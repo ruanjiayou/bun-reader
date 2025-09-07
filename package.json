@@ -1,0 +1,43 @@
+{
+  "name": "bun-reader",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "src/app.ts",
+  "keywords": [
+    "reader",
+    "nas",
+    "bun",
+    "bunjs"
+  ],
+  "scripts": {
+    "start": "bun src/app.ts",
+    "dev": "bun --hot run src/app.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "@types/bun": "latest",
+    "@types/koa-router": "^7.4.8",
+    "@types/koa-static": "^4.0.4",
+    "@types/koa2-cors": "^2.0.5",
+    "@types/lodash": "^4.17.20",
+    "@types/uuid": "^10.0.0",
+    "bun-types": "^1.2.21"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "koa": "^3.0.1",
+    "koa-body": "^6.0.1",
+    "koa-router": "^14.0.0",
+    "koa-static": "^5.0.0",
+    "koa2-cors": "^2.0.6",
+    "lodash": "^4.17.21",
+    "log4js": "^6.9.1",
+    "uuid": "^12.0.0"
+  },
+  "private": true,
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
