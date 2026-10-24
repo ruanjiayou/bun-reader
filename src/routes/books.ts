@@ -173,36 +173,80 @@ async function snapshotToc(eng: any, bookUrl: string) {
   return { info, toc };
 }
 
-// 加书架：抓详情 → 目录快照 → 落库（同 user+bookUrl+source 幂等）
+// 目录快照后台任务（加书架异步补目录）：完成后填充缺失字段并整表替换章节
+const tocJobs = new Set<number>(); // 防同书并发抓
+async function fillToc(bookId: number, eng: any, bookUrl: string) {
+  if (tocJobs.has(bookId)) return;
+  tocJobs.add(bookId);
+  try {
+    const { info, toc } = await snapshotToc(eng, bookUrl);
+    const [b] = await db.select().from(books).where(eq(books.id, bookId));
+    if (!b) return; // 书已被移出书架
+    await db.delete(chapters).where(eq(chapters.bookId, bookId));
+    await db.insert(chapters).values(toc.map((ch, i) => ({ bookId, idx: i, title: ch.title, url: ch.url })));
+    await db
+      .update(books)
+      .set({
+        name: info.name || b.name,
+        author: info.author || b.author,
+        cover: info.cover || b.cover,
+        intro: info.intro || b.intro,
+        latestChapter: info.latestChapter || b.latestChapter,
+        lastCheckAt: new Date(),
+      })
+      .where(eq(books.id, bookId));
+    log.info("shelf", `《${info.name || b.name}》目录就绪：${toc.length} 章`);
+  } catch (e: any) {
+    log.error("shelf", `目录抓取失败 bookId=${bookId}：${e?.message ?? e}`);
+  } finally {
+    tocJobs.delete(bookId);
+  }
+}
+
+// 加书架：直接落 books 表立即返回（信息来自搜索结果）；目录后台异步补，详情页轮询就绪
 bookRoutes.post("/", async (c) => {
   const uid = c.get("uid");
-  const body = await c.req.json<{ bookUrl?: string; sourceId?: number }>().catch(() => ({}) as any);
-  const { bookUrl, sourceId } = body;
+  const body = await c.req
+    .json<{
+      bookUrl?: string;
+      sourceId?: number;
+      info?: { name?: string; author?: string; cover?: string; intro?: string; latestChapter?: string };
+    }>()
+    .catch(() => ({}) as any);
+  const { bookUrl, sourceId, info } = body;
   if (!bookUrl || !sourceId) return c.json({ error: "缺少 bookUrl/sourceId" }, 400);
-  const eng = await loadEngine(sourceId);
-  const { info, toc } = await snapshotToc(eng, bookUrl);
+  const eng = await loadEngine(sourceId).catch((e) => {
+    throw new Error(`书源不可用：${e.message}`);
+  });
 
   const [existing] = await db
     .select()
     .from(books)
     .where(and(eq(books.userId, uid), eq(books.bookUrl, bookUrl), eq(books.sourceId, sourceId)));
-  let bookId: number;
   if (existing) {
-    bookId = existing.id;
-    await db
-      .update(books)
-      .set({ name: info.name || existing.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter, lastCheckAt: new Date() })
-      .where(eq(books.id, bookId));
-    await db.delete(chapters).where(eq(chapters.bookId, bookId));
-  } else {
-    const [row] = await db
-      .insert(books)
-      .values({ userId: uid, bookUrl, sourceId, name: info.name || "未知书名", author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter, lastCheckAt: new Date() })
-      .returning({ id: books.id });
-    bookId = row.id;
+    // 已在书架：不重复抓；目录缺失（上次异步抓取失败）时后台补一次
+    const n = (await db.select({ idx: chapters.idx }).from(chapters).where(eq(chapters.bookId, existing.id))).length;
+    if (!n) fillToc(existing.id, eng, bookUrl);
+    return c.json({ id: existing.id, name: existing.name, async: false });
   }
-  await db.insert(chapters).values(toc.map((ch, i) => ({ bookId, idx: i, title: ch.title, url: ch.url })));
-  return c.json({ id: bookId, name: info.name, chapterCount: toc.length });
+
+  const [row] = await db
+    .insert(books)
+    .values({
+      userId: uid,
+      bookUrl,
+      sourceId,
+      name: info?.name || "未知书名",
+      author: info?.author ?? "",
+      cover: info?.cover ?? "",
+      intro: info?.intro ?? "",
+      latestChapter: info?.latestChapter ?? "",
+      lastCheckAt: new Date(),
+    })
+    .returning({ id: books.id });
+  fillToc(row.id, eng, bookUrl); // 不 await，后台执行
+  log.info("shelf", `加书架：《${info?.name || "未知书名"}》bookId=${row.id}，目录后台抓取中`);
+  return c.json({ id: row.id, name: info?.name || "未知书名", async: true });
 });
 
 // 搜索结果预览：不入库，抓详情+目录供"加入书架"前查看（放在 /:id 前注册）

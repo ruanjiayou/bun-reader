@@ -72,6 +72,28 @@ export default function Book() {
     loadCache();
   }, [bookId]);
 
+  // 目录为空时轮询（加书架时目录是后台异步抓的，就绪后自动出现），最长轮询 2 分钟
+  useEffect(() => {
+    if (chapters.length || loadErr) return;
+    let stop = false;
+    const t = setInterval(async () => {
+      try {
+        const cat = await api<{ chapters: Chapter[]; progress: { chapterIdx: number } | null }>(`/api/books/${bookId}/category`);
+        if (stop) return;
+        if (cat.chapters.length) {
+          setChapters(cat.chapters);
+          setCur((c) => cat.progress?.chapterIdx ?? c);
+        }
+      } catch {}
+    }, 2000);
+    const to = setTimeout(() => (stop = true), 120000);
+    return () => {
+      stop = true;
+      clearInterval(t);
+      clearTimeout(to);
+    };
+  }, [chapters.length, loadErr, bookId]);
+
   // 缓存任务运行中每 2s 轮询进度
   useEffect(() => {
     if (!cache?.running) return;
@@ -224,7 +246,7 @@ export default function Book() {
               {ch.idx === cur && <span className="ml-2 text-xs text-neutral-500">· 上次读到</span>}
             </Link>
           ))}
-          {!chapters.length && !loadErr && <div className="p-6 text-center text-neutral-600">目录加载中…</div>}
+          {!chapters.length && !loadErr && <div className="p-6 text-center text-neutral-600">目录抓取中…（后台生成，就绪后自动显示）</div>}
         </div>
       </section>
     </div>

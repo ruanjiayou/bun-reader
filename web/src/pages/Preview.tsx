@@ -66,7 +66,15 @@ export default function Preview() {
   const addToShelf = async () => {
     setAdding(true);
     try {
-      const r = await api<{ id: number }>("/api/books", { method: "POST", body: JSON.stringify({ bookUrl: url, sourceId: sid }) });
+      // 搜索结果已带书名/作者/封面等信息：随请求传给后端，books 表立即落库秒回；目录由后台异步补
+      const r = await api<{ id: number }>("/api/books", {
+        method: "POST",
+        body: JSON.stringify({
+          bookUrl: url,
+          sourceId: sid,
+          info: { name: cur.name, author: cur.author, cover: cur.cover, intro: cur.intro, latestChapter: cur.latestChapter },
+        }),
+      });
       nav(`/book/${r.id}`);
     } catch (e: any) {
       setMsg(`加书架失败：${e.message}`);
