@@ -124,30 +124,59 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
   return info;
 }
 
+// 目录支持分页：ruleToc.nextTocUrl 命中即抓下一页拼接，href 为空=结束；visited 防环，上限 50 页
 export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promise<ChapterItem[]> {
-  const { url, opts } = buildReq(src, tocUrl);
-  log?.("info", "toc", `目录: ${url}`);
-  const res = await httpText(url, opts);
-  if (res.status >= 400) throw new Error(`HTTP ${res.status} · ${res.charset}`);
-  const nodes = guessNodes(res.text);
   const r = src.ruleToc ?? {};
-  const items = ruleList(nodes, r.chapterList ?? "", res.url);
-  const chapters = items
-    .map((el) => ({
-      title: ruleStr([el], r.chapterName || "text", res.url),
-      url: ruleStr([el], r.chapterUrl || "", res.url),
-    }))
-    .filter((c) => c.title && c.url)
-    .map((c) => ({ ...c, url: ensureAbs(c.url, res.url) }));
-  log?.(chapters.length ? "ok" : "warn", "toc", `章节 ${chapters.length} 章${chapters.length ? `，首章: ${chapters[0].title}` : ""}`);
-  if (!chapters.length && items.length && log)
-    log?.(
-      "warn",
-      "toc",
-      `chapterList 命中 ${items.length} 个元素但章节数为 0（chapterName/chapterUrl 为空即丢弃）。首元素提取: ` +
-        `chapterName[${r.chapterName || "(默认text)"}]→"${(ruleStr([items[0]], r.chapterName || "text", res.url) || "✗空").slice(0, 24)}" · ` +
-        `chapterUrl[${r.chapterUrl || "✗未配置"}]→"${(ruleStr([items[0]], r.chapterUrl || "", res.url) || "✗空").slice(0, 40)}"`,
-    );
+  const chapters: ChapterItem[] = [];
+  const visited = new Set<string>();
+  let next: string | null = tocUrl;
+
+  for (let page = 1; next && page <= 50; page++) {
+    const { url, opts } = buildReq(src, next);
+    if (visited.has(url)) {
+      log?.("warn", "toc", `第 ${page} 页地址已抓过（${url}），停止翻页`);
+      break;
+    }
+    visited.add(url);
+    log?.("info", "toc", page === 1 ? `目录: ${url}` : `目录第 ${page} 页: ${url}`);
+    const res = await httpText(url, opts);
+    if (res.status >= 400) throw new Error(`HTTP ${res.status} · ${res.charset}`);
+    const nodes = guessNodes(res.text);
+    const items = ruleList(nodes, r.chapterList ?? "", res.url);
+    const got = items
+      .map((el) => ({
+        title: ruleStr([el], r.chapterName || "text", res.url),
+        url: ruleStr([el], r.chapterUrl || "", res.url),
+      }))
+      .filter((c) => c.title && c.url)
+      .map((c) => ({ ...c, url: ensureAbs(c.url, res.url) }));
+    chapters.push(...got);
+    if (page === 1 && !got.length && items.length && log)
+      log?.(
+        "warn",
+        "toc",
+        `chapterList 命中 ${items.length} 个元素但章节数为 0（chapterName/chapterUrl 为空即丢弃）。首元素提取: ` +
+          `chapterName[${r.chapterName || "(默认text)"}]→"${(ruleStr([items[0]], r.chapterName || "text", res.url) || "✗空").slice(0, 24)}" · ` +
+          `chapterUrl[${r.chapterUrl || "✗未配置"}]→"${(ruleStr([items[0]], r.chapterUrl || "", res.url) || "✗空").slice(0, 40)}"`,
+      );
+    // 翻页：取下一页 href，为空即结束
+    next = null;
+    if (r.nextTocUrl) {
+      const nRaw = ruleStr(nodes, r.nextTocUrl, res.url)
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((u) => ensureAbs(u, res.url));
+      if (nRaw.length > 1) log?.("warn", "toc", `nextTocUrl 命中 ${nRaw.length} 个链接，已取最后一个`);
+      const n = nRaw[nRaw.length - 1] ?? "";
+      next = n && !visited.has(n) ? n : null;
+    }
+  }
+  const pages = visited.size;
+  log?.(
+    chapters.length ? "ok" : "warn",
+    "toc",
+    `章节 ${chapters.length} 章 · ${pages} 页${pages > 1 ? "（分页）" : ""}${chapters.length ? `，首章: ${chapters[0].title}` : ""}`,
+  );
   return chapters;
 }
 

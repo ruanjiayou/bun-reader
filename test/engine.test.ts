@@ -52,7 +52,15 @@ beforeAll(() => {
         });
       }
       if (u.pathname === "/book/1/toc") {
+        // 分页 fixture：第 1 页 3 章 + 下一页链接
         const items = Array.from({ length: 3 }, (_, i) => `<li><a href="/book/1/c${i + 1}">第${i + 1}章 测试</a></li>`).join("");
+        return new Response(html(`<ul class="chapterlist">${items}</ul><div class="pager"><a href="/book/1/toc2">下一页</a></div>`), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
+      if (u.pathname === "/book/1/toc2") {
+        // 第 2 页 3 章，无下一页链接（href 为空 = 结束）
+        const items = Array.from({ length: 3 }, (_, i) => `<li><a href="/book/1/c${i + 4}">第${i + 4}章 测试</a></li>`).join("");
         return new Response(html(`<ul class="chapterlist">${items}</ul>`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
         });
@@ -125,9 +133,18 @@ describe("书源引擎全链路", () => {
 
   test("目录：列表 + 章节补全", async () => {
     const toc = await getToc(source(), `${base}/book/1/toc`);
-    expect(toc.length).toBe(3);
+    expect(toc.length).toBe(3); // 无 nextTocUrl 规则 → 只抓第一页
     expect(toc[0].title).toBe("第1章 测试");
     expect(toc[0].url).toBe(`${base}/book/1/c1`);
+  });
+
+  test("目录分页：nextTocUrl 翻页拼接，取到空链接即结束", async () => {
+    const src = source();
+    src.ruleToc.nextTocUrl = ".pager a.-1@href";
+    const toc = await getToc(src, `${base}/book/1/toc`);
+    expect(toc.length).toBe(6); // 两页各 3 章拼起来
+    expect(toc[3].title).toBe("第4章 测试");
+    expect(toc[5].url).toBe(`${base}/book/1/c6`);
   });
 
   test("正文：textNodes + replaceRegex 净化", async () => {

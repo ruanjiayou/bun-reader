@@ -70,6 +70,7 @@ const SECTIONS: { title: string; fields: { path: string; label: string; ph?: str
       { path: "ruleToc.chapterList", label: "列表规则（选元素，不是取文本！）", rows: 2, ph: "dd\n或 .chapter-list li / #all > dl dd" },
       { path: "ruleToc.chapterName", label: "章节名称（文本）", ph: "a@text" },
       { path: "ruleToc.chapterUrl", label: "章节地址（链接 @href）", ph: "a@href" },
+      { path: "ruleToc.nextTocUrl", label: "翻页规则（下一页链接 @href，取到空即结束）", ph: ".pagelink a.-1@href\n或 .next-page@href" },
     ],
   },
   {
@@ -126,6 +127,7 @@ export default function Sources() {
   const [searchResults, setSearchResults] = useState<SearchBook[]>([]);
   const [logs, setLogs] = useState<DebugEvt[]>([]);
   const [debugging, setDebugging] = useState(false);
+  const [dirty, setDirty] = useState(false); // 表单/JSON 有未保存改动 → 保存按钮高亮
   const logBox = useRef<HTMLDivElement>(null);
 
   const load = () => api<SourceRow[]>("/api/sources").then(setRows).catch((e) => setMsg(e.message));
@@ -140,14 +142,24 @@ export default function Sources() {
   );
 
   // —— 编辑 ——
-  const setField = (path: string, v: string) =>
+  const setField = (path: string, v: string) => {
+    setDirty(true);
     setForm((f: any) => {
       const next = structuredClone(f);
       setIn(next, path, v);
       return next;
     });
+  };
+  // 表单 → JSON 文本（去掉空规则对象）
+  const formJson = (f: any) => {
+    const clean = structuredClone(f);
+    for (const k of ["ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent"])
+      if (!Object.keys(clean[k] ?? {}).length) delete clean[k];
+    return JSON.stringify(clean, null, 2);
+  };
   const selectSource = async (id: number | null) => {
     setLogs([]);
+    setDirty(false);
     if (id === null) {
       setEditId(null);
       setForm(emptyForm());
@@ -166,20 +178,20 @@ export default function Sources() {
     }
   };
   const formToJson = () => {
-    const clean = structuredClone(form);
-    for (const k of ["ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent"])
-      if (!Object.keys(clean[k]).length) delete clean[k];
-    setJsonText(JSON.stringify(clean, null, 2));
+    setJsonText(formJson(form));
     setRightTab("json");
     setMsg("已生成 JSON");
   };
-  const jsonToForm = () => {
+  // JSON → 表单（失焦自动同步 + 按钮共用），非法 JSON 不覆盖表单
+  const syncJsonToForm = (silent: boolean): boolean => {
     try {
       const parsed = JSON.parse(jsonText);
       setForm({ ...emptyForm(), ...parsed });
-      setMsg("已解析 JSON 到表单");
+      if (!silent) setMsg("已解析 JSON 到表单");
+      return true;
     } catch {
-      setMsg("JSON 解析失败");
+      if (!silent) setMsg("JSON 解析失败，未同步");
+      return false;
     }
   };
   // 保存当前表单（upsert），返回源 id
@@ -192,6 +204,7 @@ export default function Sources() {
       const row = rows.find((r) => r.bookUrl === url) ?? (await api<SourceRow[]>("/api/sources")).find((r) => r.bookUrl === url);
       if (row) setEditId(row.id);
       setMsg("已保存");
+      setDirty(false);
       return row?.id ?? null;
     } catch (e: any) {
       setMsg(e.message);
@@ -344,6 +357,7 @@ export default function Sources() {
                         placeholder={ph}
                         value={getIn(form, path) ?? ""}
                         onChange={(e) => setField(path, e.target.value)}
+                        onBlur={() => setJsonText(formJson(form))}
                       />
                     ) : (
                       <input
@@ -351,6 +365,7 @@ export default function Sources() {
                         placeholder={ph}
                         value={getIn(form, path) ?? ""}
                         onChange={(e) => setField(path, e.target.value)}
+                        onBlur={() => setJsonText(formJson(form))}
                       />
                     )}
                   </label>
@@ -362,9 +377,15 @@ export default function Sources() {
 
         {/* 中：操作列 */}
         <div className="flex flex-row flex-wrap gap-2 md:sticky md:top-4 md:flex-col">
-          <button onClick={saveSource} className={btnPrimary}>保存源</button>
+          <button
+            onClick={saveSource}
+            className={dirty ? `${btnPrimary} ring-2 ring-amber-300/60` : btn}
+            title={dirty ? "有未保存的改动" : "无改动"}
+          >
+            {dirty ? "● 保存源" : "保存源"}
+          </button>
           <button onClick={formToJson} className={btn}>表单→JSON</button>
-          <button onClick={jsonToForm} className={btn}>表单←JSON</button>
+          <button onClick={() => syncJsonToForm(false)} className={btn}>表单←JSON</button>
           <button onClick={() => selectSource(null)} className={btn}>✗ 清空新建</button>
           <label className="flex items-center gap-2 px-1 text-sm text-neutral-400">
             <input type="checkbox" checked={!!form.enabled} onChange={toggleEnabled} className="accent-amber-500" disabled={editId === null} />
@@ -389,9 +410,13 @@ export default function Sources() {
           {rightTab === "json" ? (
             <textarea
               className="h-96 w-full flex-1 rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5 md:h-auto"
-              placeholder="表单→JSON 生成；或粘贴 JSON 后 表单←JSON"
+              placeholder="表单→JSON 生成；或粘贴 JSON 后失焦自动同步到表单"
               value={jsonText}
-              onChange={(e) => setJsonText(e.target.value)}
+              onChange={(e) => {
+                setJsonText(e.target.value);
+                setDirty(true);
+              }}
+              onBlur={() => syncJsonToForm(true)}
             />
           ) : (
             <div className="flex flex-1 flex-col gap-2 overflow-hidden">
