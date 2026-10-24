@@ -46,6 +46,27 @@ beforeAll(() => {
           { headers: { "Content-Type": "text/html; charset=utf-8" } },
         );
       }
+      // {page} 模板分页目录：2-3.html 故意重复 c4 以验证去重，2-4.html 不存在（404 → 模板模式部分返回）
+      const pagedToc: Record<string, [string, string][]> = {
+        "/book/2-1.html": [
+          ["/book/2/c1", "第一章"],
+          ["/book/2/c2", "第二章"],
+        ],
+        "/book/2-2.html": [
+          ["/book/2/c3", "第三章"],
+          ["/book/2/c4", "第四章"],
+        ],
+        "/book/2-3.html": [
+          ["/book/2/c4", "第四章"],
+          ["/book/2/c5", "第五章"],
+        ],
+      };
+      if (pagedToc[u.pathname]) {
+        const items = pagedToc[u.pathname].map(([h, t]) => `<li><a href="${h}">${t}</a></li>`).join("");
+        return new Response(html(`<ul class="chapterlist">${items}</ul>`), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
       if (u.pathname === "/chapter/2.html") {
         return new Response(html(`<ul class="chapterlist"><li><a href="/chapter/2_1.html">第一章</a></li><li><a href="/chapter/2_2.html">第二章</a></li></ul>`), {
           headers: { "Content-Type": "text/html; charset=utf-8" },
@@ -199,6 +220,24 @@ describe("书源引擎全链路", () => {
     const toc = await getToc(src2, info.tocUrl);
     expect(toc.length).toBe(2);
     expect(toc[0].title).toBe("第一章");
+  });
+
+  test("目录 {page} 模板翻页：按页码展开 + URL 去重 + 404 部分返回", async () => {
+    const src3 = {
+      bookSourceUrl: base,
+      ruleBookInfo: {
+        // 详情页无目录链接：用 {{bookUrl}} 改写成分页模板（模拟幽香书房 /book/51RA9-{page}.html 场景）
+        tocUrl: "{{bookUrl}}##$##-{page}.html",
+      },
+      ruleToc: { chapterList: ".chapterlist li", chapterName: "a@text", chapterUrl: "a@href" },
+    };
+    const info = await getBookInfo(src3, `${base}/book/2`);
+    expect(info.tocUrl).toBe(`${base}/book/2-{page}.html`);
+    const toc = await getToc(src3, info.tocUrl);
+    // 3 页共 6 条但 c4 重复 → 5 章；第 4 页 404 → 模板模式返回已抓到的部分
+    expect(toc.length).toBe(5);
+    expect(toc.map((c) => c.title)).toEqual(["第一章", "第二章", "第三章", "第四章", "第五章"]);
+    expect(toc[3].url).toBe(`${base}/book/2/c4`);
   });
 
   test("占位判定：短内容 + 关键词", () => {

@@ -124,23 +124,46 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
   return info;
 }
 
-// 目录支持分页：ruleToc.nextTocUrl 命中即抓下一页拼接，href 为空=结束；visited 防环，上限 50 页
+// 目录分页两种方式：
+// ① ruleToc.nextTocUrl 命中"下一页"链接 → 循环抓取（href 空=结束）；
+// ② {page} 模板翻页——nextTocUrl（或 tocUrl）含 {page} 占位符时按页码 1,2,3… 展开。
+//    适合翻页是加密 AJAX、解析不出链接但分页 URL 有规律的站点（如 /book/51RA9-{page}.html）。
+//    tocUrl 规则可用 {{bookUrl}}##正则##替换 把详情页地址改写成模板（如 {{bookUrl}}##\.html$##-{page}.html）。
+//    模板页章节按 URL 去重；页面上完全没有章节元素即结束；连续 2 页全是重复章节也结束（防站点对任意页码返回同一页）。
+const TOC_MAX_PAGES = 200;
+const hasPageTpl = (s: string) => /\{\{?page\}?\}/.test(s);
+const expandPage = (t: string, n: number) => t.replace(/\{\{?page\}?\}/g, String(n));
+
 export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promise<ChapterItem[]> {
   const r = src.ruleToc ?? {};
   const chapters: ChapterItem[] = [];
+  const seenUrls = new Set<string>();
   const visited = new Set<string>();
-  let next: string | null = tocUrl;
+  const tpl = r.nextTocUrl && hasPageTpl(String(r.nextTocUrl)) ? String(r.nextTocUrl) : hasPageTpl(tocUrl) ? tocUrl : null;
+  let tplPage = hasPageTpl(tocUrl) ? 1 : 0; // 模板已展开到的页码
+  let current: string | null = hasPageTpl(tocUrl) ? expandPage(tocUrl, 1) : tocUrl;
+  let noNewStreak = 0;
+  let page = 0;
 
-  for (let page = 1; next && page <= 50; page++) {
-    const { url, opts } = buildReq(src, next);
-    if (visited.has(url)) {
-      log?.("warn", "toc", `第 ${page} 页地址已抓过（${url}），停止翻页`);
+  while (current && page < TOC_MAX_PAGES) {
+    const reqUrl = current;
+    if (visited.has(reqUrl)) {
+      log?.("warn", "toc", `第 ${page + 1} 页地址已抓过（${reqUrl}），停止翻页`);
       break;
     }
-    visited.add(url);
+    visited.add(reqUrl);
+    page++;
+    const { url, opts } = buildReq(src, reqUrl);
     log?.("info", "toc", page === 1 ? `目录: ${url}` : `目录第 ${page} 页: ${url}`);
     const res = await httpText(url, opts);
-    if (res.status >= 400) throw new Error(`HTTP ${res.status} · ${res.charset}`);
+    if (res.status >= 400) {
+      // 模板模式下中间页失败不致命：返回已抓到的部分（好过整本目录失败）
+      if (tpl && page > 1) {
+        log?.("warn", "toc", `第 ${page} 页 HTTP ${res.status}，返回已抓取的 ${chapters.length} 章`);
+        break;
+      }
+      throw new Error(`HTTP ${res.status} · ${res.charset}`);
+    }
     const nodes = guessNodes(res.text);
     const items = ruleList(nodes, r.chapterList ?? "", res.url);
     const got = items
@@ -150,8 +173,11 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promis
       }))
       .filter((c) => c.title && c.url)
       .map((c) => ({ ...c, url: ensureAbs(c.url, res.url) }));
-    chapters.push(...got);
-    if (page === 1 && !got.length && items.length && log)
+    // 章节按 URL 去重：分页重叠/详情页与目录页第一章重复都不会重复入库
+    const fresh = got.filter((c) => !seenUrls.has(c.url));
+    fresh.forEach((c) => seenUrls.add(c.url));
+    chapters.push(...fresh);
+    if (page === 1 && !got.length && items.length && !tpl && log)
       log?.(
         "warn",
         "toc",
@@ -159,17 +185,33 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promis
           `chapterName[${r.chapterName || "(默认text)"}]→"${(ruleStr([items[0]], r.chapterName || "text", res.url) || "✗空").slice(0, 24)}" · ` +
           `chapterUrl[${r.chapterUrl || "✗未配置"}]→"${(ruleStr([items[0]], r.chapterUrl || "", res.url) || "✗空").slice(0, 40)}"`,
       );
-    // 翻页：取下一页 href，为空即结束
-    next = null;
-    if (r.nextTocUrl) {
-      const nRaw = ruleStr(nodes, r.nextTocUrl, res.url)
-        .split(/\s+/)
-        .filter(Boolean)
-        .map((u) => ensureAbs(u, res.url));
-      if (nRaw.length > 1) log?.("warn", "toc", `nextTocUrl 命中 ${nRaw.length} 个链接，已取最后一个`);
-      const n = nRaw[nRaw.length - 1] ?? "";
-      next = n && !visited.has(n) ? n : null;
-      if (page === 1 && !next) log?.("info", "toc", `翻页规则未命中下一页链接（仅单页，或规则没匹配上）`);
+
+    // 决定下一页
+    if (tpl) {
+      if (!items.length) {
+        log?.("info", "toc", `第 ${page} 页无章节列表，目录翻页结束`);
+        break;
+      }
+      noNewStreak = fresh.length === 0 ? noNewStreak + 1 : 0;
+      if (noNewStreak >= 2) {
+        log?.("warn", "toc", `连续 ${noNewStreak} 页没有新章节（可能已到末页或站点对任意页码返回相同内容），停止`);
+        break;
+      }
+      tplPage++;
+      current = expandPage(tpl, tplPage);
+    } else {
+      // href 翻页：取下一页链接，为空即结束
+      current = null;
+      if (r.nextTocUrl) {
+        const nRaw = ruleStr(nodes, r.nextTocUrl, res.url)
+          .split(/\s+/)
+          .filter(Boolean)
+          .map((u) => ensureAbs(u, res.url));
+        if (nRaw.length > 1) log?.("warn", "toc", `nextTocUrl 命中 ${nRaw.length} 个链接，已取最后一个`);
+        const n = nRaw[nRaw.length - 1] ?? "";
+        current = n && !visited.has(n) ? n : null;
+        if (page === 1 && !current) log?.("info", "toc", `翻页规则未命中下一页链接（仅单页，或规则没匹配上）`);
+      }
     }
   }
   const pages = visited.size;
