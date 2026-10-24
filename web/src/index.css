@@ -3,3 +3,12 @@
 body {
   @apply bg-neutral-900 text-neutral-100 antialiased;
 }
+
+/* 隐藏滚动条（仍可滚动） */
+.no-scrollbar {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}

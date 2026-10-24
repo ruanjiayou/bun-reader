@@ -287,8 +287,11 @@ async function fetchChapter(src: BookSource, url: string, opts: FetchOpts, log?:
   }
   if (page > 1) log?.("ok", "content", `分页合并完成：${page} 页`);
 
+  // 部分站点正文里带字面量 \n / \r\n，统一还原成真实换行
   const merged = parts
     .join("\n")
+    .replace(/\\r\\n/g, "\n")
+    .replace(/\\n/g, "\n")
     .split("\n")
     .map((l) => l.trim())
     .join("\n")

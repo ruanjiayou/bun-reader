@@ -116,13 +116,12 @@ const NavItem = ({ icon, label, onClick }: { icon: string; label: string; onClic
     <span className="text-[10px] leading-none">{label}</span>
   </button>
 );
-// 纯图标悬浮钮（title 提示）
+// 纯图标悬浮钮（title 提示；透明背景，跟随主题色）
 const FloatBtn = ({ icon, title, onClick, active }: { icon: string; title: string; onClick: () => void; active?: boolean }) => (
   <button
     onClick={onClick}
     title={title}
-    className={`flex h-10 w-10 items-center justify-center rounded-full shadow-lg transition-opacity hover:opacity-100 ${active ? "text-amber-500" : "opacity-80"}`}
-    style={{ background: "rgba(40,40,40,.85)", border: "1px solid rgba(128,128,128,.35)" }}
+    className={`flex h-10 w-10 items-center justify-center rounded-full transition-opacity hover:opacity-100 ${active ? "text-amber-500 opacity-100" : "opacity-75"}`}
   >
     <Icon name={icon} size={19} />
   </button>
@@ -282,8 +281,8 @@ export default function Reader() {
         <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
       </div>
 
-      <div className="flex min-h-0 flex-1">
-        {/* PC 左栏：图标+文字，靠顶，紧贴内容 */}
+      <div className="flex min-h-0 flex-1 justify-center">
+        {/* PC 左栏：图标+文字，靠顶，紧贴内容左侧 */}
         <div className="hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2 min-[501px]:py-4">
           <NavItem icon="home" label="首页" onClick={() => nav("/")} />
           <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
@@ -291,9 +290,9 @@ export default function Reader() {
           <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
         </div>
 
-        {/* 正文：滚动阅读 */}
-        <div ref={scrollRef} onScroll={onScroll} className="min-w-0 flex-1 overflow-y-auto">
-          <div className="mx-auto min-[501px]:w-[640px] px-4 py-6 max-[500px]:px-5">
+        {/* 正文：滚动阅读（隐藏滚动条）；PC 固定 640px，两侧工具栏紧贴 */}
+        <div ref={scrollRef} onScroll={onScroll} className="no-scrollbar w-full min-w-0 flex-1 overflow-y-auto min-[501px]:w-[640px] min-[501px]:flex-none">
+          <div className="mx-auto px-4 py-6 max-[500px]:px-5" style={{ fontSize: prefs.fontSize, lineHeight: prefs.lineHeight }}>
             {ch ? (
               <>
                 <h2 className="mb-4 font-bold" style={{ fontSize: prefs.fontSize + 4 }}>
@@ -346,12 +345,12 @@ export default function Reader() {
         </div>
       </div>
 
-      {/* PC 章节指示 */}
-      {ch && (
-        <div className={`pointer-events-none pb-2 text-center text-xs min-[501px]:block max-[500px]:hidden ${theme.sub}`}>
-          {chapters.length ? `${idx + 1}/${chapters.length}` : ""} · {ch.title}
-        </div>
-      )}
+      {/* PC 底部：上一章 · 进度 · 下一章 */}
+      <div className={`flex items-center justify-center gap-8 pb-3 text-xs min-[501px]:flex max-[500px]:hidden ${theme.sub}`}>
+        <button onClick={() => goChapter(idx - 1)} className="px-3 py-1.5 opacity-75 transition-opacity hover:opacity-100">上一章</button>
+        <span className="min-w-16 text-center">{chapters.length ? `${idx + 1}/${chapters.length} · ${bookPct}` : ""}</span>
+        <button onClick={() => goChapter(idx + 1)} className="px-3 py-1.5 opacity-75 transition-opacity hover:opacity-100">下一章</button>
+      </div>
 
       {/* 手机底栏：上一章 · 百分比进度 · 下一章 · 设置 */}
       <div className="flex items-center justify-around border-t px-2 py-2 min-[501px]:hidden" style={{ borderColor: "rgba(128,128,128,.25)" }}>
