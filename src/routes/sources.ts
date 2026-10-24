@@ -25,6 +25,12 @@ sourceRoutes.get("/", async (c) => {
   return c.json(rows);
 });
 
+// 导出：全部书源的原始 JSON 数组（与 Legado 导出格式一致）
+sourceRoutes.get("/export", async (c) => {
+  const rows = await db.select({ json: sources.json }).from(sources);
+  return c.json(rows.map((r) => JSON.parse(r.json)));
+});
+
 sourceRoutes.get("/:id", async (c) => {
   const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
   if (!row) return c.json({ error: "书源不存在" }, 404);
