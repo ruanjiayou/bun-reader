@@ -28,6 +28,19 @@ export function guessNodes(text: string): Node[] {
 
 const isJsRule = (r: string) => r.includes("<js>") || r.startsWith("@js:") || r.startsWith("@JavaScript:");
 
+// —— 规则文法（本项目规范，写源时按此定义）——
+// 规则 = 段1@段2@…##正则##替换##变换，@ 分段，每段二选一：
+// 1. 选择器（产出元素）：CSS —— tag / #id / .class / 组合(div.intro) / 层级(空格、>) / 段尾索引(a.-1)
+//    显式形式 tag(name)：name 与取值器关键字冲突时强制按标签选（如 tag(title) 选 <title> 元素）
+// 2. 取值器（产出字符串）：
+//    内容值：text（全文）/ ownText（仅直属文本）/ textNodes（直属文本块）/ html（innerHTML）/ all（outerHTML）
+//    属性值：attr(name) —— 任意属性，显式无歧义（如 attr(data-url)、attr(title)）
+//            href / src 为常用属性快捷方式（自动补全绝对地址）；title/alt/content/value 兼容裸写
+//            其他裸单词：是标准标签名→按标签选择；否则兜底按属性名取（如 data-src）
+// 章节类规则（chapterName/chapterUrl 等）在 chapterList 选中的每个元素内部求值：
+//    chapterName: "text" 取 <a> 文本；"attr(title)" 取 title 属性；".t@text" 取内部 <span class=t> 的文本
+// —— Legado 关键字 → 本项目 CSS 语法（仅导入时转换，求值器不认关键字）——
+
 const GETTERS = /^(text|textNodes|ownText|html|all|href|src|content|value|title|alt)$/;
 // 标准 HTML 标签名：裸单词命中则按标签选择，否则视为属性名
 const HTML_TAGS = new Set(
@@ -143,9 +156,22 @@ function safeFind($: CheerioAPI, el: AnyNode, sel: string): AnyNode[] {
   }
 }
 
+const ATTR_FN = /^attr\((.+)\)$/; // attr(name)：显式取任意属性，无歧义
+const TAG_FN = /^tag\((.+)\)$/; // tag(name)：显式按标签选元素（name 与取值器关键字冲突时用，如 tag(title)）
+
 // 单段求值：CSS 选择器（#id/.class/tag 可组合）+ 取值器 + 段尾整数索引（a.-1）
 function stepHtml(n: Extract<Node, { kind: "html" }>, raw: string, base: string, out: Node[]) {
   const { $, el } = n;
+  const am = raw.match(ATTR_FN);
+  if (am) {
+    out.push({ kind: "json", v: $(el).attr(am[1]) ?? "" }); // 属性值原样返回，不做 URL 补全
+    return;
+  }
+  const tm = raw.match(TAG_FN);
+  if (tm) {
+    safeFind($, el, tm[1]).forEach((c) => out.push({ kind: "html", $, el: c }));
+    return;
+  }
   if (GETTERS.test(raw)) {
     out.push({ kind: "json", v: getter(raw, $, el, base) });
     return;

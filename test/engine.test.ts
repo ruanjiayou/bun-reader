@@ -280,4 +280,24 @@ describe("书源引擎全链路", () => {
     // 完全不含合法 base64 字符的输入过滤后为空串，由引擎的空值过滤兜底
     expect(nodeText(applyRule(nodes, "a@data-b####base64Decode")[0])).toBe("");
   });
+
+  test("元素 vs 属性的三级分派与显式形式：attr(name)/tag(name)", () => {
+    // 裸单词分派：取值器关键字 > 标签名 > 属性名兜底
+    const nodes = htmlNodes(`<div><a href="/c1" title="第1章" data-url="/r/1">文本A</a><title>页面标题</title></div>`);
+    const a = applyRule(nodes, "a");
+    // 章节名称在 title 属性里 → attr(title) 显式取属性
+    expect(nodeText(applyRule(a, "attr(title)")[0])).toBe("第1章");
+    // 章节名称是文本节点 → text
+    expect(nodeText(applyRule(a, "text")[0])).toBe("文本A");
+    // 章节地址在自定义属性 → attr(data-url)
+    expect(nodeText(applyRule(a, "attr(data-url)")[0])).toBe("/r/1");
+    // 裸单词 title 命中取值器 → 等价 attr(title)
+    expect(nodeText(applyRule(a, "title")[0])).toBe("第1章");
+    // 裸单词 a 命中标签名 → 选元素（nodeText 取其文本）
+    expect(nodeText(applyRule(nodes, "a")[0])).toBe("文本A");
+    // 裸单词 data-url 不是标签 → 属性名兜底（作用于 <a> 元素）
+    expect(nodeText(applyRule(a, "data-url")[0])).toBe("/r/1");
+    // tag(title) 显式按标签选 <title> 元素（绕过取值器关键字冲突）
+    expect(nodeText(applyRule(nodes, "div@tag(title)")[0])).toBe("页面标题");
+  });
 });
