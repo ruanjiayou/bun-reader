@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { searchSource, getBookInfo, getToc, getContent, isPlaceholder } from "../src/source/engine";
-import { applyRule, htmlNodes, nodeText, legadoToOurs } from "../src/source/rule";
+import { applyRule, htmlNodes, nodeText, legadoToOurs, normalizeSource } from "../src/source/rule";
 
 // 本地 fixture 站点：模拟一本假书的 搜索/详情/目录/正文
 let server: ReturnType<typeof Bun.serve>;
@@ -104,33 +104,33 @@ beforeAll(() => {
 
 afterAll(() => server.stop(true));
 
-// source 在 beforeAll 之后才能拿到 base，用工厂函数；规则一律用本项目 CSS 语法
+// source 在 beforeAll 之后才能拿到 base，用工厂函数；规则一律 v2 链式调用语法
 const source = () => ({
   bookSourceUrl: base,
   bookSourceName: "测试站",
   searchUrl: `${base}/search?keyword={{key}}`,
   ruleSearch: {
     bookList: ".bookbox",
-    name: "h4 a@text",
-    author: ".author@text",
-    bookUrl: "h4 a@href",
-    coverUrl: "img@data-src",
-    intro: ".intro@text",
-    lastChapter: ".last@text",
+    name: "h4 a.text()",
+    author: ".author.text()",
+    bookUrl: "h4 a.attr('href')",
+    coverUrl: "img.attr('data-src')",
+    intro: ".intro.text()",
+    lastChapter: ".last.text()",
   },
   ruleBookInfo: {
-    name: "#info h1@text",
-    author: "#info p@text##作者：",
-    intro: ".intro@text",
-    tocUrl: "#info a.0@href",
+    name: "#info h1.text()",
+    author: "#info p.text()##作者：",
+    intro: ".intro.text()",
+    tocUrl: "#info a.eq(0).attr('href')",
   },
   ruleToc: {
     chapterList: ".chapterlist li",
-    chapterName: "a@text",
-    chapterUrl: "a@href",
+    chapterName: "a.text()",
+    chapterUrl: "a.attr('href')",
   },
   ruleContent: {
-    content: "#content@textNodes",
+    content: "#content.textNodes()",
     replaceRegex: "广告链接：.*",
   },
 });
@@ -161,7 +161,7 @@ describe("书源引擎全链路", () => {
 
   test("目录分页：nextTocUrl 翻页拼接，取到空链接即结束", async () => {
     const src = source();
-    src.ruleToc.nextTocUrl = ".pager a.-1@href";
+    src.ruleToc.nextTocUrl = ".pager a.eq(-1).attr('href')";
     const toc = await getToc(src, `${base}/book/1/toc`);
     expect(toc.length).toBe(6); // 两页各 3 章拼起来
     expect(toc[3].title).toBe("第4章 测试");
@@ -177,43 +177,20 @@ describe("书源引擎全链路", () => {
   });
 
   test("空规则防御：缺 bookUrl 规则的书被丢弃而非拼出垃圾 URL", async () => {
-    const bad = { bookSourceUrl: base, searchUrl: `${base}/search?keyword={{key}}`, ruleSearch: { bookList: ".bookbox", name: "h4@text" } };
+    const bad = { bookSourceUrl: base, searchUrl: `${base}/search?keyword={{key}}`, ruleSearch: { bookList: ".bookbox", name: "h4.text()" } };
     const books = await searchSource(bad, "x");
     expect(books.length).toBe(0);
     const noBookList = { bookSourceUrl: base, searchUrl: `${base}/search?keyword={{key}}` };
     await expect(searchSource(noBookList, "x")).rejects.toThrow("缺少 ruleSearch.bookList");
   });
 
-  test("Legado 关键字 → CSS 语法转换", () => {
-    expect(legadoToOurs("class.bookbox")).toBe(".bookbox");
-    expect(legadoToOurs("id.info@tag.h1@text")).toBe("#info@h1@text");
-    expect(legadoToOurs("class.bookname@tag.a.0@href")).toBe(".bookname@a.0@href");
-    expect(legadoToOurs("id.allchapter@tag.a.-1@href")).toBe("#allchapter@a.-1@href");
-    // || 回退与 {{bookUrl}} 模板段原样保留
-    expect(legadoToOurs("id.x@tag.a@href||{{bookUrl}}##/a/(\\d+)##/b/$1.html")).toBe(
-      "#x@a@href||{{bookUrl}}##/a/(\\d+)##/b/$1.html",
-    );
-    // JsonPath 不动
-    expect(legadoToOurs("$.data.books[*].name")).toBe("$.data.books[*].name");
-    // 转换后的规则可求值
-    const nodes = htmlNodes(`<div class="box"><a href="/x">名字</a></div>`);
-    expect(nodeText(applyRule(nodes, legadoToOurs("class.box@tag.a@text"))[0])).toBe("名字");
-  });
-
-  test("CSS 语法求值：组合/层级/索引/属性", () => {
-    const nodes = htmlNodes(`<ul id="all"><li><a href="/1">一</a></li><li><a href="/2">二</a></li></ul>`);
-    expect(applyRule(nodes, "#all li").length).toBe(2); // id + 层级
-    expect(nodeText(applyRule(nodes, "li a.-1@text")[0])).toBe("二"); // 索引 -1
-    expect(applyRule(nodes, "#all li a")[0].kind).toBe("html"); // 多层组合
-  });
-
   test("tocUrl 规则：|| 回退到 {{bookUrl}} 模板跳转", async () => {
     const src2 = {
       bookSourceUrl: base,
       ruleBookInfo: {
-        tocUrl: "#allchapter a.-1@href||{{bookUrl}}##/book/(\\d+)##/chapter/$1.html",
+        tocUrl: "#allchapter a.eq(-1).attr('href')||{{bookUrl}}##/book/(\\d+)##/chapter/$1.html",
       },
-      ruleToc: { chapterList: ".chapterlist li", chapterName: "a@text", chapterUrl: "a@href" },
+      ruleToc: { chapterList: ".chapterlist li", chapterName: "a.text()", chapterUrl: "a.attr('href')" },
     };
     const info = await getBookInfo(src2, `${base}/book/2`);
     expect(info.tocUrl).toBe(`${base}/chapter/2.html`);
@@ -229,7 +206,7 @@ describe("书源引擎全链路", () => {
         // 详情页无目录链接：用 {{bookUrl}} 改写成分页模板（模拟幽香书房 /book/51RA9-{page}.html 场景）
         tocUrl: "{{bookUrl}}##$##-{page}.html",
       },
-      ruleToc: { chapterList: ".chapterlist li", chapterName: "a@text", chapterUrl: "a@href" },
+      ruleToc: { chapterList: ".chapterlist li", chapterName: "a.text()", chapterUrl: "a.attr('href')" },
     };
     const info = await getBookInfo(src3, `${base}/book/2`);
     expect(info.tocUrl).toBe(`${base}/book/2-{page}.html`);
@@ -245,59 +222,136 @@ describe("书源引擎全链路", () => {
     expect(isPlaceholder("a".repeat(100))).toBe(false);
     expect(isPlaceholder("真内容不多但超过了五十字的阈值，然后出现稍后更新字样")).toBe(true);
   });
+});
 
-  test("裸单词段：HTML 标签名按标签选择，其余按属性取", () => {
-    const nodes = htmlNodes(`<div><a href="/x">链接文字</a><span data-src="abc">x</span></div>`);
-    expect(nodeText(applyRule(nodes, "a@text")[0])).toBe("链接文字"); // a ≡ tag.a
-    expect(applyRule(nodes, "span@data-src")[0]).toMatchObject({ kind: "json", v: "abc" }); // data-src 是属性
-    expect(applyRule(nodes, "a@href")[0]).toMatchObject({ kind: "json" }); // href 走取值器
+describe("v2 链式调用语法求值", () => {
+  test("选择器.text() ≡ $('sel').text()", () => {
+    const nodes = htmlNodes(`<div><h1>书名</h1></div>`);
+    expect(nodeText(applyRule(nodes, "h1.text()")[0])).toBe("书名");
+    expect(nodeText(applyRule(nodes, "div.main h1.text()".replace(".main", ""))[0])).toBe("书名");
+    expect(nodeText(applyRule(nodes, "#xx h1.text()".replace("#xx ", ""))[0])).toBe("书名");
   });
 
-  test("带数字类名不误拆为索引：.item-2 是类名，a.2 才是索引", () => {
-    const nodes = htmlNodes(`<div><b class="item-2">甲</b><i>1</i><i>2</i><i>3</i></div>`);
-    expect(nodeText(applyRule(nodes, ".item-2@text")[0])).toBe("甲");
-    expect(nodeText(applyRule(nodes, "i.2@text")[0])).toBe("3"); // 索引语义不变
+  test("无选择器 = 相对当前节点：.text()/.attr('href')/.find('a').attr('href')", () => {
+    const nodes = htmlNodes(`<ul><li><a href="/c1" title="第1章">一</a></li></ul>`);
+    // 真实章节列表形态：chapterList 直接选中 <a> 元素数组，每项相对求值
+    const a = applyRule(nodes, "li a");
+    expect(nodeText(applyRule(a, ".text()")[0])).toBe("一");
+    expect(nodeText(applyRule(a, ".attr('href')")[0])).toBe("/c1");
+    expect(nodeText(applyRule(a, ".attr('title')")[0])).toBe("第1章");
+    // 列表项是容器时用 .find() 深入一层
+    const li = applyRule(nodes, "li");
+    expect(nodeText(applyRule(li, ".find('a').attr('href')")[0])).toBe("/c1");
+    expect(nodeText(applyRule(li, ".find('a').attr('title')")[0])).toBe("第1章");
   });
 
-  test("nextTocUrl 参与导入转换", () => {
-    expect(legadoToOurs("class.pager@tag.a.0@href")).toBe(".pager@a.0@href");
-    const out = legadoToOurs("tag.a.-1@href");
-    expect(out).toBe("a.-1@href");
+  test("选择器 :eq(N) 与链式 .eq(N)（含负数）", () => {
+    const nodes = htmlNodes(`<div><i>1</i><i>2</i><i>3</i></div>`);
+    expect(nodeText(applyRule(nodes, "i:eq(2).text()")[0])).toBe("3");
+    expect(nodeText(applyRule(nodes, "i.eq(2).text()")[0])).toBe("3");
+    expect(nodeText(applyRule(nodes, "i.eq(-1).text()")[0])).toBe("3");
+    expect(nodeText(applyRule(nodes, "i.first().text()")[0])).toBe("1");
+    expect(nodeText(applyRule(nodes, "i.last().text()")[0])).toBe("3");
   });
 
-  test("## 第三段变换：onclick base64 跳转参数解出真实 URL", () => {
-    // 模拟幽香书房网关：window.open('?action=go&t=aHR0cHM6...%3D&s=..&e=..')
-    const nodes = htmlNodes(
-      `<div><a onclick="window.open('?action=go&t=${encodeURIComponent(Buffer.from("https://www.yxshufang.com/book/51RA9.html").toString("base64"))}&s=S%2FIQ6m2aXMA%3D&e=1792847961', '_blank')">书名</a></div>`,
+  test("带数字类名 .item-2 是类名不是索引", () => {
+    const nodes = htmlNodes(`<div><b class="item-2">甲</b></div>`);
+    expect(nodeText(applyRule(nodes, ".item-2.text()")[0])).toBe("甲");
+  });
+
+  test("children/parent 导航 + attr 原样返回（不补绝对地址）", () => {
+    const nodes = htmlNodes(`<div class="wrap"><p>A</p><p>B</p></div>`);
+    expect(applyRule(nodes, "div.wrap.children()").length).toBe(2);
+    expect(nodeText(applyRule(applyRule(nodes, "p"), ".parent().attr('class')")[0])).toBe("wrap");
+    expect(nodeText(applyRule(htmlNodes(`<a href="/x">y</a>`), "a.attr('href')")[0])).toBe("/x"); // 不补域名
+  });
+
+  test("## 正则/变换段照常工作", () => {
+    const nodes = htmlNodes(`<div><p>作者：忘语</p><a data-u="%E4%B8%AD%E6%96%87" data-b="!!!!">x</a></div>`);
+    expect(nodeText(applyRule(nodes, "p.text()##作者：")[0])).toBe("忘语");
+    expect(nodeText(applyRule(nodes, "a.attr('data-u')####urlDecode")[0])).toBe("中文");
+    expect(nodeText(applyRule(nodes, "a.attr('data-b')####base64Decode")[0])).toBe("");
+    // onclick base64 跳转参数解出真实 URL（幽香书房场景）
+    const b64 = encodeURIComponent(Buffer.from("https://www.yxshufang.com/book/51RA9.html").toString("base64"));
+    const n2 = htmlNodes(`<div><a onclick="window.open('?action=go&t=${b64}&s=S%2FIQ6m2aXMA%3D&e=1', '_blank')">书名</a></div>`);
+    expect(nodeText(applyRule(n2, `a.attr('onclick')##.*?t=([^&]*).*##$1##urlDecode,base64Decode`)[0])).toBe(
+      "https://www.yxshufang.com/book/51RA9.html",
     );
-    const rule = `a@onclick##.*?t=([^&]*).*##$1##urlDecode,base64Decode`;
-    expect(nodeText(applyRule(nodes, rule)[0])).toBe("https://www.yxshufang.com/book/51RA9.html");
   });
 
-  test("## 第三段变换：无正则时 ####urlDecode 形式 + 非法输入返回空", () => {
-    const nodes = htmlNodes(`<div><a data-u="%E4%B8%AD%E6%96%87" data-b="!!!!">x</a></div>`);
-    expect(nodeText(applyRule(nodes, "a@data-u####urlDecode")[0])).toBe("中文");
-    // 完全不含合法 base64 字符的输入过滤后为空串，由引擎的空值过滤兜底
-    expect(nodeText(applyRule(nodes, "a@data-b####base64Decode")[0])).toBe("");
+  test("空规则返回空；JSON 字符串值经 nodeText 原样输出", () => {
+    expect(applyRule(htmlNodes("<div>x</div>"), "")).toEqual([]);
+  });
+});
+
+describe("旧语法 → v2 迁移转换（normalizeSource，幂等）", () => {
+  test("Legado 关键字与 @ 分节 → 链式调用", () => {
+    expect(legadoToOurs("class.bookbox")).toBe(".bookbox");
+    expect(legadoToOurs("text")).toBe(".text()");
+    expect(legadoToOurs("href")).toBe(".attr('href')");
+    expect(legadoToOurs("a@text")).toBe("a.text()");
+    expect(legadoToOurs("@text")).toBe(".text()");
+    expect(legadoToOurs("a@href")).toBe("a.attr('href')");
+    expect(legadoToOurs("id.info@tag.h1@text")).toBe("#info.find('h1').text()");
+    expect(legadoToOurs("class.bookname@tag.a.0@href")).toBe(".bookname.find('a').eq(0).attr('href')");
+    expect(legadoToOurs("id.allchapter@tag.a.-1@href")).toBe("#allchapter.find('a').eq(-1).attr('href')");
+    expect(legadoToOurs("h4 a@text")).toBe("h4 a.text()");
+    expect(legadoToOurs("a.0@text")).toBe("a.eq(0).text()");
+    expect(legadoToOurs("attr(data-src)")).toBe(".attr('data-src')");
+    expect(legadoToOurs("data-src")).toBe(".attr('data-src')");
+    expect(legadoToOurs("children")).toBe(".children()");
+    expect(legadoToOurs("tag(title).text()".replace(".text()", ""))).toBe("title");
   });
 
-  test("元素 vs 属性的三级分派与显式形式：attr(name)/tag(name)", () => {
-    // 裸单词分派：取值器关键字 > 标签名 > 属性名兜底
-    const nodes = htmlNodes(`<div><a href="/c1" title="第1章" data-url="/r/1">文本A</a><title>页面标题</title></div>`);
-    const a = applyRule(nodes, "a");
-    // 章节名称在 title 属性里 → attr(title) 显式取属性
-    expect(nodeText(applyRule(a, "attr(title)")[0])).toBe("第1章");
-    // 章节名称是文本节点 → text
-    expect(nodeText(applyRule(a, "text")[0])).toBe("文本A");
-    // 章节地址在自定义属性 → attr(data-url)
-    expect(nodeText(applyRule(a, "attr(data-url)")[0])).toBe("/r/1");
-    // 裸单词 title 命中取值器 → 等价 attr(title)
-    expect(nodeText(applyRule(a, "title")[0])).toBe("第1章");
-    // 裸单词 a 命中标签名 → 选元素（nodeText 取其文本）
-    expect(nodeText(applyRule(nodes, "a")[0])).toBe("文本A");
-    // 裸单词 data-url 不是标签 → 属性名兜底（作用于 <a> 元素）
-    expect(nodeText(applyRule(a, "data-url")[0])).toBe("/r/1");
-    // tag(title) 显式按标签选 <title> 元素（绕过取值器关键字冲突）
-    expect(nodeText(applyRule(nodes, "div@tag(title)")[0])).toBe("页面标题");
+  test("|| 回退与 ## 段不参与转换、JsonPath/模板原样保留", () => {
+    expect(legadoToOurs("id.x@tag.a@href||{{bookUrl}}##/a/(\\d+)##/b/$1.html")).toBe(
+      "#x.find('a').attr('href')||{{bookUrl}}##/a/(\\d+)##/b/$1.html",
+    );
+    expect(legadoToOurs("a@onclick##.*?t=([^&]*).*##$1##urlDecode,base64Decode")).toBe(
+      "a.attr('onclick')##.*?t=([^&]*).*##$1##urlDecode,base64Decode",
+    );
+    expect(legadoToOurs("$.data.books[*].name")).toBe("$.data.books[*].name");
+    expect(legadoToOurs("{{bookUrl}}##\\.html$##-{page}.html")).toBe("{{bookUrl}}##\\.html$##-{page}.html");
+  });
+
+  test("幂等：转一次和转两次结果一致", () => {
+    for (const r of ["a@text", "id.info@tag.h1@text", "class.pager@tag.a.-1@href", "text", "h4 a@text"]) {
+      const once = legadoToOurs(r);
+      expect(legadoToOurs(once)).toBe(once);
+    }
+  });
+
+  test("旧语法源经 normalizeSource 后全链路可用（库内存量源兼容）", async () => {
+    const legacy = normalizeSource({
+      bookSourceUrl: base,
+      bookSourceName: "旧语法站",
+      searchUrl: `${base}/search?keyword={{key}}`,
+      ruleSearch: {
+        bookList: "class.bookbox",
+        name: "tag.h4@tag.a@text",
+        author: "class.author@text",
+        bookUrl: "tag.h4@tag.a@href",
+        coverUrl: "tag.img@data-src",
+        intro: "class.intro@text",
+        lastChapter: "class.last@text",
+      },
+      ruleToc: { chapterList: "class.chapterlist@tag.li", chapterName: "tag.a@text", chapterUrl: "tag.a@href" },
+      ruleContent: { content: "id.content@textNodes", replaceRegex: "广告链接：.*" },
+    });
+    const books = await searchSource(legacy, "凡人");
+    expect(books.length).toBe(2);
+    expect(books[0].name).toBe("凡人修仙传");
+    expect(books[0].bookUrl).toBe(`${base}/book/1`);
+    const toc = await getToc(legacy, `${base}/book/1/toc`);
+    expect(toc.length).toBe(3);
+    expect(toc[0].title).toBe("第1章 测试");
+    const content = await getContent(legacy, `${base}/book/1/c1`);
+    expect(content).toContain("第1段：山间小路");
+  });
+
+  test("转换后的 v2 规则可求值", () => {
+    const nodes = htmlNodes(`<div class="box"><a href="/x">名字</a></div>`);
+    expect(nodeText(applyRule(nodes, legadoToOurs("class.box@tag.a@text"))[0])).toBe("名字");
+    expect(nodeText(applyRule(nodes, legadoToOurs("class.box@tag.a@href"))[0])).toBe("/x");
   });
 });

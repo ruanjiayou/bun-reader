@@ -74,7 +74,7 @@ export async function searchSource(src: BookSource, key: string, log?: Log): Pro
   log?.(items.length ? "ok" : "warn", "search", `bookList 命中 ${items.length} 条`);
   const books = items
     .map((el) => ({
-      name: ruleStr([el], r.name || "text", res.url),
+      name: ruleStr([el], r.name || ".text()", res.url),
       author: ruleStr([el], r.author || "", res.url),
       bookUrl: ruleStr([el], r.bookUrl || "", res.url),
       cover: ruleStr([el], r.coverUrl || "", res.url).split(/\s+/)[0] ?? "", // 封面取第一个 URL
@@ -90,7 +90,7 @@ export async function searchSource(src: BookSource, key: string, log?: Log): Pro
       "search",
       `命中 ${items.length} 条但全部被过滤（name/bookUrl 为空即丢弃）。首条字段提取: ` +
         [
-          `name[${r.name || "(默认text)"}]→"${(ruleStr([items[0]], r.name || "text", res.url) || "✗空").slice(0, 24)}"`,
+          `name[${r.name || "(默认.text())"}]→"${(ruleStr([items[0]], r.name || ".text()", res.url) || "✗空").slice(0, 24)}"`,
           `bookUrl[${r.bookUrl || "✗未配置"}]→"${(ruleStr([items[0]], r.bookUrl || "", res.url) || "✗空").slice(0, 40)}"`,
           `author→"${(ruleStr([items[0]], r.author || "", res.url) || "✗空").slice(0, 24)}"`,
         ].join(" · "),
@@ -109,7 +109,7 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
     name: ruleStr(nodes, r.name || "", res.url),
     author: ruleStr(nodes, r.author || "", res.url),
     intro: ruleStr(nodes, r.intro || "", res.url),
-    cover: (ruleStr(nodes, r.coverUrl || "", res.url).split(/\s+/)[0] ?? ""), // 封面取第一个 URL
+    cover: ensureAbs(ruleStr(nodes, r.coverUrl || "", res.url).split(/\s+/)[0] ?? "", res.url), // 封面取第一个 URL，相对地址补全
     latestChapter: ruleStr(nodes, r.lastChapter || "", res.url),
     tocUrl: ruleStr(nodes, r.tocUrl || "", res.url) || bookUrl,
   };
@@ -168,8 +168,8 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promis
     const items = ruleList(nodes, r.chapterList ?? "", res.url);
     const got = items
       .map((el) => ({
-        title: ruleStr([el], r.chapterName || "text", res.url),
-        url: ruleStr([el], r.chapterUrl || "", res.url),
+        title: ruleStr([el], r.chapterName || ".text()", res.url),
+        url: ruleStr([el], r.chapterUrl || ".attr('href')", res.url),
       }))
       .filter((c) => c.title && c.url)
       .map((c) => ({ ...c, url: ensureAbs(c.url, res.url) }));
@@ -182,8 +182,8 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promis
         "warn",
         "toc",
         `chapterList 命中 ${items.length} 个元素但章节数为 0（chapterName/chapterUrl 为空即丢弃）。首元素提取: ` +
-          `chapterName[${r.chapterName || "(默认text)"}]→"${(ruleStr([items[0]], r.chapterName || "text", res.url) || "✗空").slice(0, 24)}" · ` +
-          `chapterUrl[${r.chapterUrl || "✗未配置"}]→"${(ruleStr([items[0]], r.chapterUrl || "", res.url) || "✗空").slice(0, 40)}"`,
+          `chapterName[${r.chapterName || "(默认.text())"}]→"${(ruleStr([items[0]], r.chapterName || ".text()", res.url) || "✗空").slice(0, 24)}" · ` +
+          `chapterUrl[${r.chapterUrl || "(默认.attr('href'))"}]→"${(ruleStr([items[0]], r.chapterUrl || ".attr('href')", res.url) || "✗空").slice(0, 40)}"`,
       );
 
     // 决定下一页

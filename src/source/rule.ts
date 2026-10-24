@@ -2,6 +2,17 @@ import * as cheerio from "cheerio";
 import type { CheerioAPI } from "cheerio";
 import type { AnyNode } from "domhandler";
 
+// —— 规则语法 v2（链式调用版）——
+// 规则 = [CSS选择器][.链式调用...] + 可选 ##正则##替换##变换 + 可选 || 回退
+// 选择器：cheerio 支持的 CSS —— #id / .class / a.content / div.main div.content / :eq(2)
+// 链式调用（永远在末尾，.xxx(...) 风格）：
+//   取值：.text() .ownText() .textNodes() .html() .all() .attr('name')
+//   导航：.find('sel') .children() .eq(n) .first() .last() .parent() .next() .prev()
+// 无选择器 = 相对当前节点：章节列表项上直接 .attr('href') ≡ $(node).attr('href')，
+//            .find('a').attr('href') ≡ $(node).find('a').attr('href')
+// 保留：|| 回退、##正则##替换##变换（urlDecode/base64Decode）、{{bookUrl}}/{{baseUrl}} 模板、
+//       JsonPath（$ 开头）、目录 {page} 模板（engine 层）
+
 // 规则求值上下文：html 节点（cheerio）或 json 值（API 类书源）
 export type Node = { kind: "html"; $: CheerioAPI; el: AnyNode } | { kind: "json"; v: any };
 
@@ -28,20 +39,11 @@ export function guessNodes(text: string): Node[] {
 
 const isJsRule = (r: string) => r.includes("<js>") || r.startsWith("@js:") || r.startsWith("@JavaScript:");
 
-// —— 规则文法（本项目规范，写源时按此定义）——
-// 规则 = 段1@段2@…##正则##替换##变换，@ 分段，每段二选一：
-// 1. 选择器（产出元素）：CSS —— tag / #id / .class / 组合(div.intro) / 层级(空格、>) / 段尾索引(a.-1)
-//    显式形式 tag(name)：name 与取值器关键字冲突时强制按标签选（如 tag(title) 选 <title> 元素）
-// 2. 取值器（产出字符串）：
-//    内容值：text（全文）/ ownText（仅直属文本）/ textNodes（直属文本块）/ html（innerHTML）/ all（outerHTML）
-//    属性值：attr(name) —— 任意属性，显式无歧义（如 attr(data-url)、attr(title)）
-//            href / src 为常用属性快捷方式（自动补全绝对地址）；title/alt/content/value 兼容裸写
-//            其他裸单词：是标准标签名→按标签选择；否则兜底按属性名取（如 data-src）
-// 章节类规则（chapterName/chapterUrl 等）在 chapterList 选中的每个元素内部求值：
-//    chapterName: "text" 取 <a> 文本；"attr(title)" 取 title 属性；".t@text" 取内部 <span class=t> 的文本
-// —— Legado 关键字 → 本项目 CSS 语法（仅导入时转换，求值器不认关键字）——
-
-const GETTERS = /^(text|textNodes|ownText|html|all|href|src|content|value|title|alt)$/;
+// —— 旧语法 → v2 迁移（normalizeSource 在导入与运行前调用，幂等）——
+// 裸取值器 text/href → .text()/.attr('href')；a@text → a.text()；sel.N → .eq(N)；
+// attr(x) → .attr(x)；tag(x) → x；children → .children()；Legado 关键字 class./tag./id. 照旧
+const CONTENT_CALLS: Record<string, string> = { text: ".text()", textNodes: ".textNodes()", ownText: ".ownText()", html: ".html()", all: ".all()" };
+const ATTR_KEYWORDS = new Set(["href", "src", "content", "value", "title", "alt"]);
 // 标准 HTML 标签名：裸单词命中则按标签选择，否则视为属性名
 const HTML_TAGS = new Set(
   ("a abbr address area article aside audio b base bdi bdo blockquote body br button canvas caption cite code col colgroup data datalist dd del details dfn dialog div dl dt em embed fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe img input ins kbd label legend li link main map mark menu meta meter nav noscript object ol optgroup option output p param picture pre progress q rp rt ruby s samp script section select slot small source span strong style sub summary sup table tbody td template textarea tfoot th thead time title tr track u ul var video wbr").split(
@@ -52,22 +54,94 @@ const HTML_TAGS = new Set(
 const IDX = /^(.+)\.(-?\d+)$/;
 // 纯标签/类/id（可含连字符和数字，如 h1、.item-2、#grid-12）→ 不拆索引，避免误伤合法类名
 const PLAIN_SEL = /^[.#]?[A-Za-z][A-Za-z0-9_-]*$/;
+const CALL_NAMES = "text|textNodes|ownText|html|all|attr|find|children|eq|first|last|parent|next|prev";
+// 规则末尾已是 .xxx(...) 方法调用 → 判定为 v2 语法，转换器原样返回（幂等）
+const ALREADY_V2 = new RegExp(`\\.(${CALL_NAMES})\\((?:[^()']|'[^']*'|"[^"]*")*\\)$`);
 
 function isIdent(s: string) {
   return /^[A-Za-z0-9_-]+$/.test(s);
 }
 
-// —— Legado 关键字 → 本项目 CSS 语法（仅导入时转换，求值器不认关键字）——
-// class.x → .x · tag.x → x · id.x → #x · 索引 tag.a.-1 → a.-1；text.x（按文字找元素）无 CSS 等价，原样保留（求值为空）
+function unquote(s: string): string {
+  const t = s.trim();
+  if ((t.startsWith("'") && t.endsWith("'")) || (t.startsWith('"') && t.endsWith('"'))) return t.slice(1, -1);
+  return t;
+}
+
+// —— Legado 关键字 → CSS（仅导入时转换）：class.x → .x · tag.x → x · id.x → #x · tag.a.-1 → a.-1 ——
+// text.x（按文字找元素）无 CSS 等价，原样保留（求值为空）
 function convertSeg(seg: string): string {
   const kw = seg.match(/^(class|tag|id)\.([^@]+?)(?:\.(-?\d+))?$/);
   if (!kw) return seg;
   const [, type, arg, nth] = kw;
+  if (type === "tag") return nth ? `${arg}.eq(${nth})` : arg;
   let sel: string;
   if (type === "class") sel = isIdent(arg) ? `.${arg}` : `[class~="${arg}"]`;
-  else if (type === "tag") sel = arg;
   else sel = isIdent(arg) ? `#${arg}` : `[id="${arg}"]`;
-  return nth ? `${sel}.${nth}` : sel;
+  return nth ? `${sel} ${arg}.eq(${nth})` : sel;
+}
+
+// 单段（@分节的一段）→ 选择器 / 调用
+function convertSegToStep(seg: string, first: boolean, sel: string, calls: string[]) {
+  let s = seg;
+  let idx: number | null = null;
+  if (!PLAIN_SEL.test(s)) {
+    const m = s.match(IDX);
+    if (m) {
+      s = m[1];
+      idx = parseInt(m[2]);
+    }
+  }
+  if (CONTENT_CALLS[s]) {
+    calls.push(CONTENT_CALLS[s]);
+    return;
+  }
+  if (s === "children") {
+    calls.push(".children()");
+    return;
+  }
+  if (ATTR_KEYWORDS.has(s)) {
+    calls.push(`.attr('${s}')`);
+    return;
+  }
+  const am = s.match(/^attr\((.+)\)$/);
+  if (am) {
+    calls.push(`.attr('${unquote(am[1])}')`);
+    return;
+  }
+  const tm = s.match(/^tag\((.+)\)$/);
+  if (tm) {
+    s = unquote(tm[1]); // tag(x) 强制按标签选，绕过取值器关键字冲突
+  } else {
+    s = convertSeg(s);
+    // 裸非标签单词 = 旧语义的属性名（首段或后续段都一样）
+    if (isIdent(s) && !HTML_TAGS.has(s.toLowerCase())) {
+      calls.push(`.attr('${s}')`);
+      return;
+    }
+  }
+  if (first && !sel && !calls.length) {
+    sel = s;
+    if (idx !== null) calls.push(`.eq(${idx})`);
+  } else {
+    calls.push(`.find('${s}')`);
+    if (idx !== null) calls.push(`.eq(${idx})`);
+  }
+  return sel;
+}
+
+// 主段转换：## 之后的段不参与；已是 v2 的原样返回
+function convertMain(main: string): string {
+  main = main.trim();
+  if (!main || main.startsWith("$") || main.startsWith("{{") || isJsRule(main) || ALREADY_V2.test(main)) return main;
+  const segs = main.split("@").map((s) => s.trim()).filter(Boolean);
+  if (!segs.length) return main;
+  let sel = "";
+  const calls: string[] = [];
+  segs.forEach((seg, i) => {
+    sel = convertSegToStep(seg, i === 0, sel, calls) ?? sel;
+  });
+  return sel + calls.join("");
 }
 
 export function legadoToOurs(rule: string): string {
@@ -76,19 +150,17 @@ export function legadoToOurs(rule: string): string {
     .split("||")
     .map((part) => {
       const r = part.trim();
-      // JsonPath / {{模板}} / JS 规则原样保留
       if (!r || r.startsWith("$") || r.startsWith("{{") || r.includes("<js>")) return r;
-      return r
-        .split("@")
-        .map((s) => convertSeg(s.trim()))
-        .join("@");
+      const h = r.indexOf("##");
+      if (h > -1) return convertMain(r.slice(0, h)) + r.slice(h); // ## 后是正则/替换/变换，不动
+      return convertMain(r);
     })
     .join("||");
 }
 
 const RULE_FIELDS = new Set(["bookList", "name", "author", "lastChapter", "intro", "coverUrl", "bookUrl", "tocUrl", "chapterList", "chapterName", "chapterUrl", "nextTocUrl", "content", "nextContentUrl"]);
 
-// 书源 JSON 规则字段统一转换为本项目语法（幂等，导入与运行前都调用）
+// 书源 JSON 规则字段统一转换为 v2 语法（幂等，导入与运行前都调用）
 export function normalizeSource(src: any): any {
   if (!src || typeof src !== "object") return src;
   const out = { ...src };
@@ -100,6 +172,8 @@ export function normalizeSource(src: any): any {
   }
   return out;
 }
+
+// —— v2 求值器 ——
 
 function ownText($: CheerioAPI, el: AnyNode): string {
   let t = "";
@@ -121,33 +195,6 @@ function textNodes($: CheerioAPI, el: AnyNode): string {
   return parts.join("\n");
 }
 
-function getter(g: string, $: CheerioAPI, el: AnyNode, base: string): string {
-  switch (g) {
-    case "text":
-      return $(el).text().trim();
-    case "ownText":
-      return ownText($, el);
-    case "textNodes":
-      return textNodes($, el);
-    case "html":
-      return $(el).html() ?? "";
-    case "all":
-      return $.html(el);
-    case "href":
-    case "src": {
-      const v = $(el).attr(g) ?? "";
-      if (!v) return "";
-      try {
-        return new URL(v, base).toString();
-      } catch {
-        return v;
-      }
-    }
-    default:
-      return $(el).attr(g) ?? "";
-  }
-}
-
 function safeFind($: CheerioAPI, el: AnyNode, sel: string): AnyNode[] {
   try {
     return $(el).find(sel).toArray();
@@ -156,52 +203,91 @@ function safeFind($: CheerioAPI, el: AnyNode, sel: string): AnyNode[] {
   }
 }
 
-const ATTR_FN = /^attr\((.+)\)$/; // attr(name)：显式取任意属性，无歧义
-const TAG_FN = /^tag\((.+)\)$/; // tag(name)：显式按标签选元素（name 与取值器关键字冲突时用，如 tag(title)）
+type Call = { name: string; arg: string };
 
-// 单段求值：CSS 选择器（#id/.class/tag 可组合）+ 取值器 + 段尾整数索引（a.-1）
-function stepHtml(n: Extract<Node, { kind: "html" }>, raw: string, base: string, out: Node[]) {
-  const { $, el } = n;
-  const am = raw.match(ATTR_FN);
-  if (am) {
-    out.push({ kind: "json", v: $(el).attr(am[1]) ?? "" }); // 属性值原样返回，不做 URL 补全
-    return;
+// 解析 [选择器][.调用...]：从末尾反复剥 .name(args)；:eq(N) 归一为 .eq(N) 调用（不依赖 cheerio 伪类支持）
+function parseChain(main: string): { sel: string; calls: Call[] } {
+  const calls: Call[] = [];
+  let s = main.trim();
+  for (;;) {
+    const m = s.match(new RegExp(`\\.(${CALL_NAMES})\\(((?:[^()']|'[^']*'|"[^"]*")*)\\)$`));
+    if (!m) break;
+    calls.unshift({ name: m[1], arg: m[2].trim() });
+    s = s.slice(0, m.index).trim();
   }
-  const tm = raw.match(TAG_FN);
-  if (tm) {
-    safeFind($, el, tm[1]).forEach((c) => out.push({ kind: "html", $, el: c }));
-    return;
+  const em = s.match(/:eq\((-?\d+)\)$/);
+  if (em) {
+    s = s.slice(0, em.index);
+    calls.unshift({ name: "eq", arg: em[1] });
   }
-  if (GETTERS.test(raw)) {
-    out.push({ kind: "json", v: getter(raw, $, el, base) });
-    return;
-  }
-  if (raw === "children") {
-    $(el)
-      .children()
-      .toArray()
-      .forEach((c) => out.push({ kind: "html", $, el: c }));
-    return;
-  }
-  let sel = raw;
-  let idx: number | undefined;
-  if (!PLAIN_SEL.test(raw)) {
-    const m = raw.match(IDX);
-    if (m) {
-      sel = m[1];
-      idx = parseInt(m[2]);
+  return { sel: s, calls };
+}
+
+// 链式调用求值：导航调用产出元素，取值调用产出字符串（后续导航调用对字符串无效，自然终止）
+function evalChain(cur: Node[], calls: Call[]): Node[] {
+  for (const c of calls) {
+    const next: Node[] = [];
+    switch (c.name) {
+      case "find": {
+        const sel = unquote(c.arg);
+        for (const n of cur) if (n.kind === "html") safeFind(n.$, n.el, sel).forEach((e) => next.push({ kind: "html", $: n.$, el: e }));
+        break;
+      }
+      case "children":
+        for (const n of cur) if (n.kind === "html") n.$(n.el).children().toArray().forEach((e) => next.push({ kind: "html", $: n.$, el: e }));
+        break;
+      case "parent":
+        for (const n of cur)
+          if (n.kind === "html") {
+            const p = n.$(n.el).parent().get(0);
+            if (p) next.push({ kind: "html", $: n.$, el: p });
+          }
+        break;
+      case "next":
+      case "prev":
+        for (const n of cur)
+          if (n.kind === "html") {
+            const e = (c.name === "next" ? n.$(n.el).next() : n.$(n.el).prev()).get(0);
+            if (e) next.push({ kind: "html", $: n.$, el: e });
+          }
+        break;
+      case "eq": {
+        const i = parseInt(c.arg, 10);
+        const el = Number.isNaN(i) ? undefined : cur[i >= 0 ? i : cur.length + i];
+        if (el) next.push(el); // 收窄结果集，链上后续调用继续（不能 return 短路）
+        break;
+      }
+      case "first":
+        if (cur[0]) next.push(cur[0]);
+        break;
+      case "last":
+        if (cur.length) next.push(cur[cur.length - 1]);
+        break;
+      case "text":
+        for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: n.$(n.el).text().trim() });
+        break;
+      case "html":
+        for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: n.$(n.el).html() ?? "" });
+        break;
+      case "all":
+        for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: n.$.html(n.el) });
+        break;
+      case "ownText":
+        for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: ownText(n.$, n.el) });
+        break;
+      case "textNodes":
+        for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: textNodes(n.$, n.el) });
+        break;
+      case "attr": {
+        const name = unquote(c.arg);
+        for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: n.$(n.el).attr(name) ?? "" });
+        break;
+      }
     }
+    cur = next;
+    if (!cur.length) break;
   }
-  let found: AnyNode[];
-  if (isIdent(sel)) {
-    if (HTML_TAGS.has(sel.toLowerCase())) found = safeFind($, el, sel); // 标签名
-    else {
-      out.push({ kind: "json", v: $(el).attr(sel) ?? "" }); // 属性名（如 data-src）
-      return;
-    }
-  } else found = safeFind($, el, sel); // 其余整段 CSS 选择器
-  if (idx !== undefined) found = [found[idx >= 0 ? idx : found.length + idx]].filter(Boolean);
-  found.forEach((c) => out.push({ kind: "html", $, el: c }));
+  return cur;
 }
 
 // JsonPath 子集：$.a.b[0].c / [*] / 纯数字索引
@@ -225,7 +311,7 @@ function applyJsonPath(nodes: Node[], rule: string): Node[] {
 export function applyRule(input: Node[], rule: string, base = ""): Node[] {
   // 空规则返回空结果：缺失字段应得到 ""，而不是把整个元素文本当值
   if (!rule || !rule.trim()) return [];
-  if (isJsRule(rule)) return []; // ponytail: JS 脚本源 M2 不支持，二期沙箱补
+  if (isJsRule(rule)) return []; // ponytail: JS 脚本源二期沙箱补
   if (rule.includes("||")) {
     for (const part of rule.split("||")) {
       const r = applyRule(input, part.trim(), base);
@@ -257,18 +343,16 @@ export function applyRule(input: Node[], rule: string, base = ""): Node[] {
   let cur: Node[] = input;
   if (main) {
     if (main.startsWith("$")) cur = applyJsonPath(cur, main);
-    // URL 模板段：{{bookUrl}}/{{baseUrl}} 产出当前页地址，配合 ## 正则实现固定格式跳转（如 /book/1 → /chapter/1）
+    // URL 模板段：{{bookUrl}}/{{baseUrl}} 产出当前页地址，配合 ## 正则实现固定格式跳转
     else if (/^\{\{(?:baseUrl|bookUrl)\}\}$/.test(main)) cur = [{ kind: "json", v: base }];
     else {
-      const segs = main.split("@");
-      for (let i = 0; i < segs.length; i++) {
-        const raw = segs[i].trim();
-        if (!raw) continue;
+      const { sel, calls } = parseChain(main);
+      if (sel) {
         const next: Node[] = [];
-        for (const n of cur) if (n.kind === "html") stepHtml(n, raw, base, next);
+        for (const n of cur) if (n.kind === "html") safeFind(n.$, n.el, sel).forEach((e) => next.push({ kind: "html", $: n.$, el: e }));
         cur = next;
-        if (!cur.length) break;
       }
+      cur = evalChain(cur, calls);
     }
   }
   if (regex) cur = cur.map((n) => ({ kind: "json", v: nodeText(n).replace(regex!, rep) }));
