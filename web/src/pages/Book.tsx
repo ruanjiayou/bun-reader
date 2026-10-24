@@ -129,10 +129,6 @@ export default function Book() {
     <div className="mx-auto min-h-dvh max-w-3xl p-4">
       <header className="mb-4 flex items-center gap-2">
         <Link to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
-        <button onClick={refreshToc} disabled={refreshing} className="ml-auto rounded-lg bg-neutral-800 px-3 py-1.5 text-sm hover:bg-neutral-700 disabled:opacity-50">
-          {refreshing ? "检查更新中…" : "↻ 检查更新"}
-        </button>
-        <button onClick={remove} className="rounded-lg bg-neutral-800 px-3 py-1.5 text-sm text-red-400 hover:bg-red-950">移出书架</button>
       </header>
       {msg && <div className="mb-3 rounded-lg bg-neutral-800 px-3 py-2 text-sm text-amber-400">{msg}</div>}
 
@@ -171,14 +167,26 @@ export default function Book() {
             <div className="mt-0.5 text-sm text-neutral-400">{book.author || "佚名"}</div>
             {book.latestChapter && <div className="mt-0.5 truncate text-xs text-neutral-500">最新：{book.latestChapter}</div>}
             {book.intro && <p className="mt-2 line-clamp-3 text-xs text-neutral-500">{book.intro}</p>}
-            <div className="mt-3 flex gap-2">
+            <div className="mt-3 flex flex-wrap gap-2">
               <button
                 onClick={() => nav(`/book/${bookId}/read/${startIdx}`)}
                 className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-amber-400"
               >
                 {cur !== null ? `继续阅读 · ${chapters.find((c) => c.idx === cur)?.title ?? ""}` : "开始阅读"}
               </button>
-              <a href="#toc" className="rounded-lg bg-neutral-700 px-4 py-2 text-sm hover:bg-neutral-600">目录（{chapters.length}）</a>
+              <button
+                onClick={refreshToc}
+                disabled={refreshing}
+                className="rounded-lg bg-neutral-800 px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
+              >
+                {refreshing ? "检查更新中…" : "↻ 检查更新"}
+              </button>
+              <button
+                onClick={remove}
+                className="rounded-lg bg-neutral-800 px-3 py-2 text-sm text-red-400 hover:bg-red-950"
+              >
+                移出书架
+              </button>
             </div>
           </div>
         </div>
@@ -187,6 +195,7 @@ export default function Book() {
       <section id="toc">
         <div className="mb-2 flex items-center">
           <h2 className="text-sm font-bold text-neutral-300">目录</h2>
+          <span className="ml-2 text-xs text-neutral-500">共 {chapters.length} 章</span>
           <button onClick={() => setAsc((v) => !v)} className="ml-auto rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-400 hover:bg-neutral-700">
             {asc ? "正序 ↓" : "倒序 ↑"}
           </button>

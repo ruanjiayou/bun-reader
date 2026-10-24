@@ -6,6 +6,7 @@ import { db, sqlite } from "../db";
 import { books, chapters, chapterCache, progress, sources } from "../schema";
 import { getBookInfo, getToc, getContent, isPlaceholder } from "../source/engine";
 import { normalizeSource } from "../source/rule";
+import { log } from "../log";
 import type { AuthEnv } from "../auth";
 
 export const bookRoutes = new Hono<AuthEnv>();
@@ -56,28 +57,38 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
   const stopper = { stop: false };
   runningJobs.set(key, stopper);
   jobStmt.upsert.run(key, list.length, Date.now());
+  log.info("cache", `任务启动：${key.slice(0, 8)}… 共 ${list.length} 章待抓`);
   try {
+    let failStreak = 0; // 连续失败次数：用于拉长间隔，避免被源站反爬锁死
     for (const ch of list) {
       if (stopper.stop) {
         const cur = (jobStmt.get.get(key) ?? {}) as any;
         jobStmt.update.run(cur.done ?? 0, cur.failed ?? 0, "stopped", Date.now(), key);
+        log.info("cache", `任务停止：${key.slice(0, 8)}… 已完成 ${cur.done ?? 0}/${list.length}`);
         return;
       }
       let ok = true;
       try {
         await fetchAndSave(eng, ch.url, key, ch.idx);
-      } catch {
+        failStreak = 0;
+      } catch (e: any) {
         ok = false;
+        failStreak++;
+        log.warn("cache", `第 ${ch.idx + 1} 章抓取失败（连续 ${failStreak} 次）：${e?.message ?? e}`);
       }
       const cur = jobStmt.get.get(key) as any;
       jobStmt.update.run((cur?.done ?? 0) + (ok ? 1 : 0), (cur?.failed ?? 0) + (ok ? 0 : 1), "running", Date.now(), key);
-      await new Promise((r) => setTimeout(r, 250)); // 限速，对源友好
+      // 成功 250ms 限速；失败后按 2s/4s/6s… 递增（上限 30s），给源站喘息
+      const delay = ok ? 250 : Math.min(2000 * failStreak, 30000);
+      await new Promise((r) => setTimeout(r, delay));
     }
     const cur = jobStmt.get.get(key) as any;
     jobStmt.update.run(cur.done, cur.failed, "done", Date.now(), key);
-  } catch (e) {
+    log.info("cache", `任务完成：${key.slice(0, 8)}… 成功 ${cur.done}，失败 ${cur.failed}`);
+  } catch (e: any) {
     const cur = jobStmt.get.get(key) as any;
     jobStmt.update.run(cur?.done ?? 0, cur?.failed ?? 0, "error", Date.now(), key);
+    log.error("cache", `任务异常终止：${key.slice(0, 8)}… ${e?.message ?? e}`);
   } finally {
     runningJobs.delete(key);
   }
@@ -250,6 +261,7 @@ bookRoutes.put("/:id/refresh", async (c) => {
     .update(books)
     .set({ name: info.name || book.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter || book.latestChapter, lastCheckAt: new Date() })
     .where(eq(books.id, bookId));
+  log.info("refresh", `《${book.name}》检查更新：${oldCount} → ${toc.length} 章`);
   return c.json({ chapterCount: toc.length, added: Math.max(0, toc.length - oldCount), oldCount });
 });
 

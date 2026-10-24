@@ -1,11 +1,14 @@
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { auth, requireAuth, type AuthEnv } from "./auth";
+import { log, requestLogger } from "./log";
 import { sourceRoutes } from "./routes/sources";
 import { bookRoutes } from "./routes/books";
 import { searchRoutes } from "./routes/search";
 
 const app = new Hono<AuthEnv>();
+
+app.use(requestLogger());
 
 app.route("/auth", auth);
 
@@ -22,5 +25,5 @@ app.use("*", serveStatic({ root: webDist, rewriteRequestPath: (p) => p }));
 app.get("*", serveStatic({ root: webDist, path: "index.html" }));
 
 const port = Number(process.env.PORT ?? 3000);
-console.log(`bun-reader listening on http://localhost:${port}`);
+log.info("boot", `bun-reader listening on http://localhost:${port}`);
 Bun.serve({ port, fetch: app.fetch });
