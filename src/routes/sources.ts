@@ -115,6 +115,7 @@ sourceRoutes.post("/:id/test", async (c) => {
   };
   let bookUrl = "";
   let tocUrl = "";
+  let lastChapterUrl = "";
   let chapterUrl = "";
   const ok =
     (await run("search", async () => {
@@ -126,10 +127,11 @@ sourceRoutes.post("/:id/test", async (c) => {
     (await run("book", async () => {
       const info = await getBookInfo(src, bookUrl);
       tocUrl = info.tocUrl;
+      lastChapterUrl = info.latestChapter;
       return info.name || "（未取到书名，继续）";
     })) &&
     (await run("toc", async () => {
-      const toc = await getToc(src, tocUrl);
+      const toc = await getToc(src, tocUrl, undefined, lastChapterUrl);
       if (!toc.length) throw new Error("目录为空");
       chapterUrl = toc[0].url;
       return `${toc.length} 章`;
@@ -186,7 +188,7 @@ sourceRoutes.post("/:id/debug", async (c) => {
           tocUrl = info.tocUrl;
           bookInfo = { bookUrl: books[0].bookUrl, name: info.name || books[0].name, author: info.author || books[0].author, cover: info.cover || books[0].cover, intro: info.intro, latestChapter: info.latestChapter || books[0].latestChapter };
         }
-        const toc = await getToc(src, tocUrl, send);
+        const toc = await getToc(src, tocUrl, send, bookInfo?.latestChapter);
         if (!toc.length) throw new Error("目录为空");
         const content = await getContent(src, toc[0].url, send);
         // 全链路成功后把书籍信息发给前端：调试面板可一键加入书架（无搜索的源靠这个入库）

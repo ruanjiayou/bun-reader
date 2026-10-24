@@ -217,6 +217,22 @@ describe("书源引擎全链路", () => {
     expect(toc[3].url).toBe(`${base}/book/2/c4`);
   });
 
+  test("目录 {page} 模板 + 最新章节链接反推最大页码：精确抓 1..max 不盲试", async () => {
+    const src3 = {
+      bookSourceUrl: base,
+      ruleBookInfo: { tocUrl: "{{bookUrl}}##$##-{page}.html", lastChapter: "'.last-link'.attr('href')" },
+      ruleToc: { chapterList: ".chapterlist li", chapterName: "a.text()", chapterUrl: "a.attr('href')" },
+    };
+    const info = await getBookInfo(src3, `${base}/book/2`);
+    // 最新章节链接指向第 2 页 → 只抓 1..2 页（4 条去重后 4 章），不会去试第 3/4 页
+    const toc = await getToc(src3, info.tocUrl, undefined, `${base}/book/2-2.html`);
+    expect(toc.length).toBe(4);
+    expect(toc.map((c) => c.title)).toEqual(["第一章", "第二章", "第三章", "第四章"]);
+    // latestChapter 是文本而非链接时匹配不上模板 → 退回盲试展开（全量 5 章）
+    const toc2 = await getToc(src3, info.tocUrl, undefined, "第四章");
+    expect(toc2.length).toBe(5);
+  });
+
   test("占位判定：短内容 + 关键词", () => {
     expect(isPlaceholder("更新中")).toBe(true);
     expect(isPlaceholder("a".repeat(100))).toBe(false);

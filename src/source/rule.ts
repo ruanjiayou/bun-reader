@@ -7,7 +7,8 @@ import type { AnyNode } from "domhandler";
 // 选择器：cheerio 支持的 CSS —— '#id' / '.class' / 'a.content' / 'div.main div.content' / ':eq(N)'
 //   选择器建议用引号包裹（'h1'.text()），引擎也接受裸写 h1.text()
 //   :eq(N) 是 cheerio 原生伪类，直接透传；从根查询的全局上下文里语义=整个结果集的第 N 个（≡ .eq(N)）
-// 链式调用（永远在末尾，.xxx(...) 风格）：
+// 链式调用（永远在末尾，.xxx(...) 风格）。取值核心就两个：.text() 和 .attr('name')，
+// 其余（.ownText() .textNodes() .html() .all() 及 find/children/eq/first/last/parent/next/prev 导航）是辅助：
 //   取值：.text() .ownText() .textNodes() .html() .all() .attr('name')
 //   导航：.find('sel') .children() .eq(n) .first() .last() .parent() .next() .prev()
 //   .eq(n)/.first()/.last() 语义=整个结果集的全局索引（与 :eq 的逐容器语义不同）

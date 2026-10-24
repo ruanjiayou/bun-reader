@@ -168,7 +168,7 @@ bookRoutes.post("/:id/cache-release", async (c) => {
 // 抓详情+目录并写入章节快照（加书架与刷新共用）
 async function snapshotToc(eng: any, bookUrl: string) {
   const info = await getBookInfo(eng, bookUrl);
-  const toc = await getToc(eng, info.tocUrl);
+  const toc = await getToc(eng, info.tocUrl, undefined, info.latestChapter);
   if (!toc.length) throw new Error("目录为空");
   return { info, toc };
 }

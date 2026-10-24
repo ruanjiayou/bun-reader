@@ -130,11 +130,28 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
 //    适合翻页是加密 AJAX、解析不出链接但分页 URL 有规律的站点（如 /book/51RA9-{page}.html）。
 //    tocUrl 规则可用 {{bookUrl}}##正则##替换 把详情页地址改写成模板（如 {{bookUrl}}##\.html$##-{page}.html）。
 //    模板页章节按 URL 去重；页面上完全没有章节元素即结束；连续 2 页全是重复章节也结束（防站点对任意页码返回同一页）。
+//    若 ruleBookInfo.lastChapter 取到的是链接（规则用 .attr('href')），可传入 lastChapterUrl：
+//    引擎把最新章节地址套回模板反推最大页码，精确抓 1..max，不再盲试 404（建议如此配置）。
 const TOC_MAX_PAGES = 200;
 const hasPageTpl = (s: string) => /\{\{?page\}?\}/.test(s);
 const expandPage = (t: string, n: number) => t.replace(/\{\{?page\}?\}/g, String(n));
 
-export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promise<ChapterItem[]> {
+// 由最新章节 URL 反推 {page} 模板的最大页码：模板去掉 origin 后整体转正则，{page} 捕获为数字。
+// 匹配不上（latestChapter 是文本、或 URL 形态不同）返回 0 = 未知，退回盲试展开
+function maxPageFromTpl(tpl: string, lastChapterUrl?: string): number {
+  if (!lastChapterUrl) return 0;
+  const origin = tpl.match(/^https?:\/\/[^/]+/i)?.[0] ?? "";
+  const relTpl = tpl.slice(origin.length);
+  const re = new RegExp(`^${relTpl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\\\{page\\\}/g, "(\\d+)")}$`);
+  const cands = [lastChapterUrl, origin && lastChapterUrl.startsWith(origin) ? lastChapterUrl.slice(origin.length) : ""];
+  for (const c of cands) {
+    const m = c.match(re);
+    if (m) return Math.max(0, parseInt(m[1], 10) || 0);
+  }
+  return 0;
+}
+
+export async function getToc(src: BookSource, tocUrl: string, log?: Log, lastChapterUrl?: string): Promise<ChapterItem[]> {
   const r = src.ruleToc ?? {};
   const chapters: ChapterItem[] = [];
   const seenUrls = new Set<string>();
@@ -142,6 +159,8 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promis
   const tpl = r.nextTocUrl && hasPageTpl(String(r.nextTocUrl)) ? String(r.nextTocUrl) : hasPageTpl(tocUrl) ? tocUrl : null;
   let tplPage = hasPageTpl(tocUrl) ? 1 : 0; // 模板已展开到的页码
   let current: string | null = hasPageTpl(tocUrl) ? expandPage(tocUrl, 1) : tocUrl;
+  const maxPage = tpl ? maxPageFromTpl(tpl, lastChapterUrl) : 0;
+  if (maxPage) log?.("info", "toc", `最新章节链接推算目录共 ${maxPage} 页，精确抓取 1..${maxPage}`);
   let noNewStreak = 0;
   let page = 0;
 
@@ -155,10 +174,22 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promis
     page++;
     const { url, opts } = buildReq(src, reqUrl);
     log?.("info", "toc", page === 1 ? `目录: ${url}` : `目录第 ${page} 页: ${url}`);
-    const res = await httpText(url, opts);
+    let res = await httpText(url, opts);
+    // 模板模式中间页偶发 4xx（WAF/限流）：重试两次再放弃，好过丢整页章节
+    for (let retry = 0; tpl && page > 1 && res.status >= 400 && retry < 2; retry++) {
+      await sleep(1000 * (retry + 1));
+      log?.("warn", "toc", `第 ${page} 页 HTTP ${res.status}，重试 ${retry + 1}/2`);
+      res = await httpText(url, opts);
+    }
     if (res.status >= 400) {
-      // 模板模式下中间页失败不致命：返回已抓到的部分（好过整本目录失败）
+      // 模板模式下中间页失败不致命：已知最大页则跳过该页继续，否则返回已抓到的部分
       if (tpl && page > 1) {
+        if (maxPage) {
+          log?.("warn", "toc", `第 ${page} 页 HTTP ${res.status}，跳过该页继续`);
+          tplPage++;
+          current = expandPage(tpl, tplPage);
+          continue;
+        }
         log?.("warn", "toc", `第 ${page} 页 HTTP ${res.status}，返回已抓取的 ${chapters.length} 章`);
         break;
       }
@@ -188,14 +219,22 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promis
 
     // 决定下一页
     if (tpl) {
-      if (!items.length) {
-        log?.("info", "toc", `第 ${page} 页无章节列表，目录翻页结束`);
-        break;
-      }
-      noNewStreak = fresh.length === 0 ? noNewStreak + 1 : 0;
-      if (noNewStreak >= 2) {
-        log?.("warn", "toc", `连续 ${noNewStreak} 页没有新章节（可能已到末页或站点对任意页码返回相同内容），停止`);
-        break;
+      if (maxPage) {
+        // 最大页码已知（由最新章节链接推算）：中间页偶发空/重复不中断，抓满 1..max 为止
+        if (tplPage >= maxPage) {
+          log?.("ok", "toc", `已抓到第 ${maxPage} 页（最大页码），目录翻页结束`);
+          break;
+        }
+      } else {
+        if (!items.length) {
+          log?.("info", "toc", `第 ${page} 页无章节列表，目录翻页结束`);
+          break;
+        }
+        noNewStreak = fresh.length === 0 ? noNewStreak + 1 : 0;
+        if (noNewStreak >= 2) {
+          log?.("warn", "toc", `连续 ${noNewStreak} 页没有新章节（可能已到末页或站点对任意页码返回相同内容），停止`);
+          break;
+        }
       }
       tplPage++;
       current = expandPage(tpl, tplPage);
