@@ -4,7 +4,9 @@ import { api } from "./api";
 import Auth from "./pages/Auth";
 import Shelf from "./pages/Shelf";
 import Sources from "./pages/Sources";
-import { Stub } from "./pages/Stubs";
+import Search from "./pages/Search";
+import Book from "./pages/Book";
+import Reader from "./pages/Reader";
 
 export function useAuth() {
   const [me, setMe] = useState<{ uid: number; username: string } | null>(null);
@@ -37,10 +39,10 @@ export default function App() {
     <Routes>
       <Route path="/auth" element={me ? <Navigate to="/" replace /> : <Auth onOk={refresh} />} />
       <Route path="/" element={<Guard me={me} loading={loading}><Shelf username={me?.username} onLogout={logout} /></Guard>} />
-      <Route path="/search" element={<Guard me={me} loading={loading}><Stub title="搜索" milestone="M3" /></Guard>} />
-      <Route path="/book/:id" element={<Guard me={me} loading={loading}><Stub title="书籍详情" milestone="M3" /></Guard>} />
-      <Route path="/book/:id/category" element={<Guard me={me} loading={loading}><Stub title="目录" milestone="M3" /></Guard>} />
-      <Route path="/book/:id/read/:idx" element={<Guard me={me} loading={loading}><Stub title="阅读器" milestone="M3" /></Guard>} />
+      <Route path="/search" element={<Guard me={me} loading={loading}><Search /></Guard>} />
+      <Route path="/book/:id" element={<Guard me={me} loading={loading}><Book /></Guard>} />
+      <Route path="/book/:id/category" element={<Guard me={me} loading={loading}><Book /></Guard>} />
+      <Route path="/book/:id/read/:idx" element={<Guard me={me} loading={loading}><Reader /></Guard>} />
       <Route path="/sources" element={<Guard me={me} loading={loading}><Sources /></Guard>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>

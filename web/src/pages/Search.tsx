@@ -1,0 +1,169 @@
+import { useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import { api } from "../api";
+
+interface SBook {
+  name: string;
+  author: string;
+  bookUrl: string;
+  cover: string;
+  intro: string;
+  latestChapter: string;
+}
+interface Group {
+  key: string;
+  name: string;
+  author: string;
+  intro: string;
+  cover: string;
+  latestChapter: string;
+  from: { sourceId: number; sourceName: string; bookUrl: string }[];
+}
+interface SSEvt {
+  type: "start" | "books" | "progress" | "end";
+  total?: number;
+  q?: string;
+  sourceId?: number;
+  sourceName?: string;
+  books?: SBook[];
+  done?: number;
+  failed?: number;
+}
+
+const norm = (s: string) => s.replace(/[\s（(].*$/, "").trim();
+
+export default function Search() {
+  const [q, setQ] = useState("");
+  const [groups, setGroups] = useState<Group[]>([]);
+  const [prog, setProg] = useState<{ done: number; total: number; failed: number } | null>(null);
+  const [running, setRunning] = useState(false);
+  const [msg, setMsg] = useState("");
+  const [adding, setAdding] = useState<string | null>(null); // 正在加书架的 key
+  const abortRef = useRef<AbortController | null>(null);
+  const nav = useNavigate();
+
+  const run = async () => {
+    if (!q.trim() || running) return;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    setRunning(true);
+    setGroups([]);
+    setMsg("");
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q.trim())}`, { signal: ac.signal });
+      const reader = res.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const parts = buf.split("\n\n");
+        buf = parts.pop()!;
+        for (const p of parts) {
+          const line = p.trim();
+          if (!line.startsWith("data: ")) continue;
+          const e: SSEvt = JSON.parse(line.slice(6));
+          if (e.type === "progress" && e.done != null) setProg({ done: e.done, total: e.total!, failed: e.failed! });
+          if (e.type === "books" && e.books?.length) {
+            setGroups((g) => {
+              const next = [...g];
+              for (const b of e.books!) {
+                const key = `${norm(b.name)}::${norm(b.author || "")}`;
+                let grp = next.find((x) => x.key === key);
+                if (!grp) {
+                  grp = { key, name: b.name, author: b.author, intro: b.intro, cover: b.cover, latestChapter: b.latestChapter, from: [] };
+                  next.push(grp);
+                }
+                grp.from.push({ sourceId: e.sourceId!, sourceName: e.sourceName!, bookUrl: b.bookUrl });
+                if (!grp.cover && b.cover) grp.cover = b.cover;
+                if (!grp.intro && b.intro) grp.intro = b.intro;
+                if (!grp.latestChapter && b.latestChapter) grp.latestChapter = b.latestChapter;
+              }
+              return next;
+            });
+          }
+          if (e.type === "end") setMsg(`完成 ${e.done}/${e.total} 个源${e.failed ? `（${e.failed} 个失败）` : ""}`);
+        }
+      }
+    } catch (e: any) {
+      if (e.name !== "AbortError") setMsg(e.message);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const addToShelf = async (g: Group, f: Group["from"][number]) => {
+    setAdding(g.key);
+    try {
+      const r = await api<{ id: number }>("/api/books", { method: "POST", body: JSON.stringify({ bookUrl: f.bookUrl, sourceId: f.sourceId }) });
+      setMsg(`《${g.name}》已加入书架`);
+      nav(`/book/${r.id}`);
+    } catch (e: any) {
+      setMsg(`加书架失败：${e.message}`);
+    } finally {
+      setAdding(null);
+    }
+  };
+
+  return (
+    <div className="mx-auto min-h-dvh max-w-3xl p-4">
+      <header className="mb-4 flex items-center gap-2">
+        <input
+          autoFocus
+          className="flex-1 rounded-lg bg-neutral-800 px-3 py-2 text-sm"
+          placeholder="书名 / 作者"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={(e) => e.key === "Enter" && run()}
+        />
+        <button onClick={run} disabled={running || !q.trim()} className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 disabled:opacity-50">
+          {running ? "搜索中…" : "搜索"}
+        </button>
+        <Link to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
+      </header>
+      {prog && (
+        <div className="mb-3 text-xs text-neutral-500">
+          已完成 {prog.done}/{prog.total} 个源{prog.failed ? ` · ${prog.failed} 个失败` : ""}
+          {running && <span className="ml-1 animate-pulse">…</span>}
+        </div>
+      )}
+      {msg && <div className="mb-3 rounded-lg bg-neutral-800 px-3 py-2 text-sm text-amber-400">{msg}</div>}
+
+      <div className="space-y-2">
+        {groups.map((g) => (
+          <div key={g.key} className="rounded-xl bg-neutral-800 p-3">
+            <div className="flex gap-3">
+              {g.cover ? (
+                <img src={g.cover} alt="" className="h-20 w-14 flex-none rounded object-cover" onError={(e) => (e.currentTarget.style.display = "none")} />
+              ) : (
+                <div className="flex h-20 w-14 flex-none items-center justify-center rounded bg-neutral-700 text-xl">📕</div>
+              )}
+              <div className="min-w-0 flex-1">
+                <div className="truncate font-medium">{g.name}</div>
+                <div className="truncate text-xs text-neutral-400">{g.author || "佚名"}{g.latestChapter && ` · ${g.latestChapter}`}</div>
+                {g.intro && <p className="mt-1 line-clamp-2 text-xs text-neutral-500">{g.intro}</p>}
+                <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[11px]">
+                  <span className="text-neutral-500">{g.from.length} 个来源：</span>
+                  {g.from.map((f, i) => (
+                    <button
+                      key={i}
+                      onClick={() => addToShelf(g, f)}
+                      disabled={adding === g.key}
+                      className="rounded bg-neutral-700 px-1.5 py-0.5 text-neutral-300 hover:bg-amber-500 hover:text-neutral-900 disabled:opacity-50"
+                      title={f.bookUrl}
+                    >
+                      {f.sourceName}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+        {!groups.length && !running && <div className="p-8 text-center text-neutral-600">输入关键词搜索所有启用的书源</div>}
+      </div>
+    </div>
+  );
+}

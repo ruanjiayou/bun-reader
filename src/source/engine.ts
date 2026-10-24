@@ -77,7 +77,7 @@ export async function searchSource(src: BookSource, key: string, log?: Log): Pro
       name: ruleStr([el], r.name || "text", res.url),
       author: ruleStr([el], r.author || "", res.url),
       bookUrl: ruleStr([el], r.bookUrl || "", res.url),
-      cover: ruleStr([el], r.coverUrl || "", res.url),
+      cover: ruleStr([el], r.coverUrl || "", res.url).split(/\s+/)[0] ?? "", // 封面取第一个 URL
       intro: ruleStr([el], r.intro || "", res.url),
       latestChapter: ruleStr([el], r.lastChapter || "", res.url),
     }))
@@ -109,7 +109,7 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
     name: ruleStr(nodes, r.name || "", res.url),
     author: ruleStr(nodes, r.author || "", res.url),
     intro: ruleStr(nodes, r.intro || "", res.url),
-    cover: ruleStr(nodes, r.coverUrl || "", res.url),
+    cover: (ruleStr(nodes, r.coverUrl || "", res.url).split(/\s+/)[0] ?? ""), // 封面取第一个 URL
     latestChapter: ruleStr(nodes, r.lastChapter || "", res.url),
     tocUrl: ruleStr(nodes, r.tocUrl || "", res.url) || bookUrl,
   };
