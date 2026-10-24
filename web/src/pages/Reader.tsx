@@ -14,6 +14,8 @@ interface Prefs {
   fontSize: number;
   lineHeight: number;
   theme: Theme;
+  rate?: number; // TTS 语速 0.5-2
+  voiceURI?: string; // TTS 发音人
 }
 
 const THEMES: Record<Theme, { bg: string; text: string; sub: string }> = {
@@ -134,7 +136,7 @@ export default function Reader() {
   const idx = Number(idxParam);
   const nav = useNavigate();
 
-  const [chapters, setChapters] = useState<{ idx: number; title: string }[]>([]);
+  const [chapters, setChapters] = useState<{ idx: number; title: string; cached?: boolean }[]>([]);
   const [ch, setCh] = useState<ContentResp | null>(null);
   const [error, setError] = useState("");
   const [showToc, setShowToc] = useState(false);
@@ -146,6 +148,17 @@ export default function Reader() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const preloaded = useRef<Map<number, ContentResp>>(new Map());
+  const firstLoad = useRef(true); // 只有首次进入阅读器才恢复上次进度，章节间跳转一律回到开头
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+
+  // TTS 发音人列表（浏览器异步加载）
+  useEffect(() => {
+    if (!window.speechSynthesis) return;
+    const load = () => setVoices(window.speechSynthesis.getVoices());
+    load();
+    window.speechSynthesis.addEventListener("voiceschanged", load);
+    return () => window.speechSynthesis.removeEventListener("voiceschanged", load);
+  }, []);
 
   useEffect(() => localStorage.setItem("reader-prefs", JSON.stringify(prefs)), [prefs]);
   const theme = THEMES[prefs.theme];
@@ -168,16 +181,25 @@ export default function Reader() {
     const apply = (r: ContentResp) => {
       if (!alive) return;
       setCh(r);
-      api<{ progress: { scrollPos: number } | null }>(`/api/books/${bookId}`)
-        .then((b) => {
-          if (!alive) return;
-          const p = b.progress?.scrollPos ?? 0;
-          requestAnimationFrame(() => {
-            const el = scrollRef.current;
-            if (el) el.scrollTop = ((el.scrollHeight - el.clientHeight) * Math.min(p, 100)) / 100;
-          });
-        })
-        .catch(() => {});
+      if (firstLoad.current) {
+        firstLoad.current = false;
+        // 首次进入：恢复上次滚动位置（scrollPos = 章内滚动百分比 0-100）
+        api<{ progress: { scrollPos: number } | null }>(`/api/books/${bookId}`)
+          .then((b) => {
+            if (!alive) return;
+            const p = b.progress?.scrollPos ?? 0;
+            requestAnimationFrame(() => {
+              const el = scrollRef.current;
+              if (el) el.scrollTop = ((el.scrollHeight - el.clientHeight) * Math.min(p, 100)) / 100;
+            });
+          })
+          .catch(() => {});
+      } else {
+        // 章节间跳转：直接回到开头
+        requestAnimationFrame(() => {
+          if (scrollRef.current) scrollRef.current.scrollTop = 0;
+        });
+      }
       // 预加载下一章
       const nextIdx = idx + 1;
       if (chapters.some((c) => c.idx === nextIdx) && !preloaded.current.has(nextIdx)) {
@@ -248,10 +270,13 @@ export default function Reader() {
     if (!ch) return;
     const paras = ch.content.split("\n").filter((p) => p.trim());
     let i = 0;
+    const voice = voices.find((v) => v.voiceURI === prefs.voiceURI);
     const speakNext = () => {
       if (i >= paras.length) return setSpeaking(false);
       const u = new SpeechSynthesisUtterance(paras[i++]);
-      u.lang = "zh-CN";
+      u.lang = voice?.lang ?? "zh-CN";
+      if (voice) u.voice = voice;
+      u.rate = prefs.rate ?? 1;
       u.onend = speakNext;
       u.onerror = () => setSpeaking(false);
       window.speechSynthesis.speak(u);
@@ -388,6 +413,7 @@ export default function Reader() {
                   className={`block w-full truncate py-2.5 text-left text-sm hover:opacity-100 ${c.idx === idx ? "text-amber-400" : "opacity-80"}`}
                 >
                   {c.title}
+                  {c.cached && <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 align-middle" title="已缓存" />}
                   {c.idx === idx && <span className="ml-2 text-xs opacity-50">· 当前</span>}
                 </button>
               ))}
@@ -429,6 +455,34 @@ export default function Reader() {
                     {t === "dark" ? "暗色" : t === "paper" ? "羊皮纸" : "纯黑"}
                   </button>
                 ))}
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="w-14 opacity-60">语速</span>
+                <input
+                  type="range"
+                  min={0.5}
+                  max={2}
+                  step={0.1}
+                  value={prefs.rate ?? 1}
+                  onChange={(e) => setPrefs((p) => ({ ...p, rate: Number(e.target.value) }))}
+                  className="flex-1 accent-amber-500"
+                />
+                <span className="w-10 text-right">{(prefs.rate ?? 1).toFixed(1)}x</span>
+              </div>
+              <div className="flex items-center gap-3">
+                <span className="w-14 flex-none opacity-60">发音人</span>
+                <select
+                  value={prefs.voiceURI ?? ""}
+                  onChange={(e) => setPrefs((p) => ({ ...p, voiceURI: e.target.value }))}
+                  className="min-w-0 flex-1 rounded bg-black/30 px-2 py-1.5 text-xs"
+                >
+                  <option value="">系统默认</option>
+                  {voices.map((v) => (
+                    <option key={v.voiceURI} value={v.voiceURI}>
+                      {v.name}（{v.lang}）{v.localService ? "" : " · 在线"}
+                    </option>
+                  ))}
+                </select>
               </div>
             </div>
           </div>
