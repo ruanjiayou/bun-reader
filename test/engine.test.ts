@@ -137,6 +137,14 @@ describe("书源引擎全链路", () => {
     expect(isPlaceholder(content)).toBe(false);
   });
 
+  test("空规则防御：缺 bookUrl 规则的书被丢弃而非拼出垃圾 URL", async () => {
+    const bad = { bookSourceUrl: base, searchUrl: `${base}/search?keyword={{key}}`, ruleSearch: { bookList: "class.bookbox", name: "tag.h4@text" } };
+    const books = await searchSource(bad, "x");
+    expect(books.length).toBe(0);
+    const noBookList = { bookSourceUrl: base, searchUrl: `${base}/search?keyword={{key}}` };
+    await expect(searchSource(noBookList, "x")).rejects.toThrow("缺少 ruleSearch.bookList");
+  });
+
   test("tocUrl 规则：|| 回退到 {{bookUrl}} 模板跳转", async () => {
     const src2 = {
       bookSourceUrl: base,

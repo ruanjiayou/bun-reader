@@ -147,7 +147,8 @@ function applyJsonPath(nodes: Node[], rule: string): Node[] {
 
 // 规则求值主入口：支持 ##regex##replace 后处理、|| 回退；JS 脚本规则不支持（返回空）
 export function applyRule(input: Node[], rule: string, base = ""): Node[] {
-  if (!rule || !rule.trim()) return input;
+  // 空规则返回空结果：缺失字段应得到 ""，而不是把整个元素文本当值
+  if (!rule || !rule.trim()) return [];
   if (isJsRule(rule)) return []; // ponytail: JS 脚本源 M2 不支持，二期沙箱补
   if (rule.includes("||")) {
     for (const part of rule.split("||")) {

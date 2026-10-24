@@ -69,6 +69,7 @@ export async function searchSource(src: BookSource, key: string, log?: Log): Pro
   log?.("info", "search", `响应 ${res.status} · ${res.charset} · ${res.text.length} 字`);
   const nodes = guessNodes(res.text);
   const r = src.ruleSearch ?? {};
+  if (!r.bookList) throw new Error("书源缺少 ruleSearch.bookList");
   const items = ruleList(nodes, r.bookList ?? "", res.url);
   log?.(items.length ? "ok" : "warn", "search", `bookList 命中 ${items.length} 条`);
   const books = items
