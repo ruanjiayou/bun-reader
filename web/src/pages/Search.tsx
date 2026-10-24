@@ -133,7 +133,15 @@ export default function Search() {
 
       <div className="space-y-2">
         {groups.map((g) => (
-          <div key={g.key} className="rounded-xl bg-neutral-800 p-3">
+          <div
+            key={g.key}
+            onClick={() =>
+              nav(`/preview?sourceId=${g.from[0].sourceId}&bookUrl=${encodeURIComponent(g.from[0].bookUrl)}`, {
+                state: { name: g.name, author: g.author, cover: g.cover, intro: g.intro, latestChapter: g.latestChapter, from: g.from },
+              })
+            }
+            className="cursor-pointer rounded-xl bg-neutral-800 p-3 transition-colors hover:bg-neutral-700"
+          >
             <div className="flex gap-3">
               {g.cover ? (
                 <img src={g.cover} alt="" className="h-20 w-14 flex-none rounded object-cover" onError={(e) => (e.currentTarget.style.display = "none")} />
@@ -149,10 +157,13 @@ export default function Search() {
                   {g.from.map((f, i) => (
                     <button
                       key={i}
-                      onClick={() => addToShelf(g, f)}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        addToShelf(g, f);
+                      }}
                       disabled={adding === g.key}
                       className="rounded bg-neutral-700 px-1.5 py-0.5 text-neutral-300 hover:bg-amber-500 hover:text-neutral-900 disabled:opacity-50"
-                      title={f.bookUrl}
+                      title={`${f.bookUrl}（直接加入书架）`}
                     >
                       {f.sourceName}
                     </button>

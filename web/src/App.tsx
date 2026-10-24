@@ -5,6 +5,7 @@ import Auth from "./pages/Auth";
 import Shelf from "./pages/Shelf";
 import Sources from "./pages/Sources";
 import Search from "./pages/Search";
+import Preview from "./pages/Preview";
 import Book from "./pages/Book";
 import Reader from "./pages/Reader";
 
@@ -40,6 +41,7 @@ export default function App() {
       <Route path="/auth" element={me ? <Navigate to="/" replace /> : <Auth onOk={refresh} />} />
       <Route path="/" element={<Guard me={me} loading={loading}><Shelf username={me?.username} onLogout={logout} /></Guard>} />
       <Route path="/search" element={<Guard me={me} loading={loading}><Search /></Guard>} />
+      <Route path="/preview" element={<Guard me={me} loading={loading}><Preview /></Guard>} />
       <Route path="/book/:id" element={<Guard me={me} loading={loading}><Book /></Guard>} />
       <Route path="/book/:id/category" element={<Guard me={me} loading={loading}><Book /></Guard>} />
       <Route path="/book/:id/read/:idx" element={<Guard me={me} loading={loading}><Reader /></Guard>} />

@@ -60,6 +60,24 @@ bookRoutes.post("/", async (c) => {
   return c.json({ id: bookId, name: info.name, chapterCount: toc.length });
 });
 
+// 搜索结果预览：不入库，抓详情+目录供"加入书架"前查看（放在 /:id 前注册）
+bookRoutes.get("/preview", async (c) => {
+  const sourceId = Number(c.req.query("sourceId"));
+  const bookUrl = c.req.query("bookUrl") ?? "";
+  if (!sourceId || !bookUrl) return c.json({ error: "缺少 sourceId/bookUrl" }, 400);
+  const eng = await loadEngine(sourceId);
+  const { info, toc } = await snapshotToc(eng, bookUrl);
+  return c.json({
+    name: info.name,
+    author: info.author,
+    cover: info.cover,
+    intro: info.intro,
+    latestChapter: info.latestChapter,
+    chapterCount: toc.length,
+    tocPreview: toc.slice(0, 30).map((ch, i) => ({ idx: i, title: ch.title })),
+  });
+});
+
 // 书架列表：书 + 进度 + 章节数
 bookRoutes.get("/", async (c) => {
   const uid = c.get("uid");
