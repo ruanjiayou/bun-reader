@@ -21,6 +21,7 @@ app.route("/api", api);
 
 // SPA：挂在 /reader 前缀下，未命中路径回退 index.html
 const webDist = "web/dist";
+app.get("/reader", (c) => c.redirect("/reader/")); // 无尾斜杠也进应用（须注册在 /reader/* 通配之前，否则被截胡返回空响应）
 app.use("/reader/*", serveStatic({ root: webDist, rewriteRequestPath: (p) => p.slice("/reader".length) || "/" }));
 app.get("/reader/*", serveStatic({ root: webDist, path: "index.html" }));
 app.get("/", (c) => c.redirect("/reader/"));

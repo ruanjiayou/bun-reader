@@ -1,13 +1,34 @@
-import { defineConfig } from "vite";
+import { defineConfig, type Plugin } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import { VitePWA } from "vite-plugin-pwa";
+
+// 访问 / 或 /reader（无尾斜杠）时 302 到 /reader/，覆盖 vite dev 和 vite preview，
+// 免得显示 "did you mean to visit /reader/" 提示页
+const redirectToBase = (): Plugin => {
+  const middleware = (req: { url?: string }, res: { writeHead: Function; end: Function }, next: Function) => {
+    if (req.url === "/" || req.url === "/reader") {
+      res.writeHead(302, { Location: "/reader/" });
+      res.end();
+    } else next();
+  };
+  return {
+    name: "redirect-to-base",
+    configureServer(server) {
+      server.middlewares.use(middleware);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(middleware);
+    },
+  };
+};
 
 export default defineConfig({
   base: "/reader/",
   plugins: [
     react(),
     tailwindcss(),
+    redirectToBase(),
     VitePWA({
       registerType: "autoUpdate",
       manifest: {
