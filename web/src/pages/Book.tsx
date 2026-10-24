@@ -14,6 +14,13 @@ interface BookInfo {
 interface Chapter {
   idx: number;
   title: string;
+  cached?: boolean;
+}
+interface CacheStatus {
+  total: number;
+  cachedCount: number;
+  running: boolean;
+  job: { total: number; done: number; failed: number; status: string } | null;
 }
 
 export default function Book() {
@@ -26,6 +33,18 @@ export default function Book() {
   const [asc, setAsc] = useState(true);
   const [msg, setMsg] = useState("");
   const [refreshing, setRefreshing] = useState(false);
+  const [cache, setCache] = useState<CacheStatus | null>(null);
+  const [caching, setCaching] = useState(false);
+
+  const loadCache = async () => {
+    try {
+      const s = await api<CacheStatus>(`/api/books/${bookId}/cache-all`);
+      setCache(s);
+      return s;
+    } catch {
+      return null;
+    }
+  };
 
   const load = async () => {
     try {
@@ -42,7 +61,47 @@ export default function Book() {
   };
   useEffect(() => {
     load();
+    loadCache();
   }, [bookId]);
+
+  // 缓存任务运行中每 2s 轮询进度
+  useEffect(() => {
+    if (!cache?.running) return;
+    const t = setInterval(async () => {
+      const s = await loadCache();
+      if (s && !s.running) {
+        setMsg(s.job?.failed ? `缓存结束：${s.cachedCount}/${s.total} 章（${s.job.failed} 章失败）` : `缓存完成：${s.cachedCount}/${s.total} 章`);
+        await load();
+      }
+    }, 2000);
+    return () => clearInterval(t);
+  }, [cache?.running]);
+
+  const cacheAll = async () => {
+    setCaching(true);
+    try {
+      const r = await api<any>(`/api/books/${bookId}/cache-all`, { method: "POST" });
+      await loadCache();
+      setMsg(r.nothing ? "全部章节已缓存" : r.already ? "缓存任务进行中" : `开始缓存 ${r.queued} 章（后台执行，可关闭页面）`);
+    } catch (e: any) {
+      setMsg(`缓存失败：${e.message}`);
+    } finally {
+      setCaching(false);
+    }
+  };
+
+  const cacheStop = async () => {
+    await api(`/api/books/${bookId}/cache-stop`, { method: "POST" });
+    setMsg("已停止缓存，已抓取的章节保留");
+    await loadCache();
+  };
+
+  const cacheRelease = async () => {
+    if (!confirm(`释放《${book?.name}》的全部已缓存正文？\n（${cache?.cachedCount ?? 0} 章，释放后阅读时重新抓取；同书所有用户共享此缓存，将一并释放）`)) return;
+    const r = await api<{ released: number }>(`/api/books/${bookId}/cache-release`, { method: "POST" });
+    setMsg(`已释放 ${r.released} 章缓存`);
+    await Promise.all([loadCache(), load()]);
+  };
 
   const refreshToc = async () => {
     setRefreshing(true);
@@ -76,6 +135,29 @@ export default function Book() {
         <button onClick={remove} className="rounded-lg bg-neutral-800 px-3 py-1.5 text-sm text-red-400 hover:bg-red-950">移出书架</button>
       </header>
       {msg && <div className="mb-3 rounded-lg bg-neutral-800 px-3 py-2 text-sm text-amber-400">{msg}</div>}
+
+      {/* 缓存条：全本缓存状态 + 操作 */}
+      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl bg-neutral-800/60 px-3 py-2 text-xs">
+        <span className="text-neutral-400">
+          缓存：{cache?.cachedCount ?? 0}/{cache?.total ?? chapters.length} 章
+          {cache?.running && cache.job && (
+            <span className="ml-1 text-amber-400">
+              · 抓取中 {cache.job.done}/{cache.job.total}
+              {cache.job.failed ? `（失败 ${cache.job.failed}）` : ""}
+            </span>
+          )}
+        </span>
+        <div className="ml-auto flex gap-2">
+          {cache?.running ? (
+            <button onClick={cacheStop} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-300 hover:bg-neutral-600">■ 停止缓存</button>
+          ) : (
+            <button onClick={cacheAll} disabled={caching} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-300 hover:bg-amber-500 hover:text-neutral-900 disabled:opacity-50">
+              {caching ? "启动中…" : "⤓ 缓存全本"}
+            </button>
+          )}
+          <button onClick={cacheRelease} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-400 hover:bg-red-950 hover:text-red-400">释放缓存</button>
+        </div>
+      </div>
 
       {book && (
         <div className="mb-4 flex gap-4 rounded-xl bg-neutral-800 p-4">
@@ -117,6 +199,7 @@ export default function Book() {
               className={`block truncate px-4 py-2.5 text-sm hover:bg-neutral-800 ${ch.idx === cur ? "text-amber-400" : "text-neutral-300"}`}
             >
               {ch.title}
+              {ch.cached && <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 align-middle" title="已缓存" />}
               {ch.idx === cur && <span className="ml-2 text-xs text-neutral-500">· 上次读到</span>}
             </Link>
           ))}

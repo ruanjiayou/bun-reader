@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
 import { and, eq, inArray } from "drizzle-orm";
-import { db } from "../db";
+import { db, sqlite } from "../db";
 import { books, chapters, chapterCache, progress, sources } from "../schema";
 import { getBookInfo, getToc, getContent, isPlaceholder } from "../source/engine";
 import { normalizeSource } from "../source/rule";
@@ -19,6 +19,140 @@ async function loadEngine(sourceId: number | null) {
   if (!row) throw new Error("书源已删除");
   return normalizeSource(JSON.parse(row.json));
 }
+
+// 抓正文 → 落盘 → 章节缓存索引（单章与全本缓存共用）
+async function fetchAndSave(eng: any, url: string, key: string, idx: number) {
+  const raw = await getContent(eng, url);
+  if (!raw.trim()) throw new Error("正文抓取为空");
+  mkdirSync(cacheDir(key), { recursive: true });
+  const filePath = `${cacheDir(key)}/${idx}.txt`;
+  writeFileSync(filePath, raw);
+  const ph = isPlaceholder(raw);
+  await db
+    .insert(chapterCache)
+    .values({ contentKey: key, idx, filePath, size: raw.length, isPlaceholder: ph, fetchedAt: new Date() })
+    .onConflictDoUpdate({
+      target: [chapterCache.contentKey, chapterCache.idx],
+      set: { filePath, size: raw.length, isPlaceholder: ph, fetchedAt: new Date() },
+    });
+  return raw;
+}
+
+// ---------- 全本缓存（后台任务，按 contentKey 共享，多用户同书共用） ----------
+interface CacheJobState {
+  total: number;
+  done: number;
+  failed: number;
+  status: "running" | "done" | "stopped" | "error";
+}
+const runningJobs = new Map<string, { stop: boolean }>();
+const jobStmt = {
+  upsert: sqlite.query("INSERT OR REPLACE INTO cache_jobs (content_key, total, done, failed, status, updated_at) VALUES (?, ?, 0, 0, 'running', ?)"),
+  update: sqlite.query("UPDATE cache_jobs SET done = ?, failed = ?, status = ?, updated_at = ? WHERE content_key = ?"),
+  get: sqlite.query("SELECT total, done, failed, status, updated_at FROM cache_jobs WHERE content_key = ?"),
+};
+
+async function runCacheJob(eng: any, key: string, list: { idx: number; url: string }[]) {
+  const stopper = { stop: false };
+  runningJobs.set(key, stopper);
+  jobStmt.upsert.run(key, list.length, Date.now());
+  try {
+    for (const ch of list) {
+      if (stopper.stop) {
+        const cur = (jobStmt.get.get(key) ?? {}) as any;
+        jobStmt.update.run(cur.done ?? 0, cur.failed ?? 0, "stopped", Date.now(), key);
+        return;
+      }
+      let ok = true;
+      try {
+        await fetchAndSave(eng, ch.url, key, ch.idx);
+      } catch {
+        ok = false;
+      }
+      const cur = jobStmt.get.get(key) as any;
+      jobStmt.update.run((cur?.done ?? 0) + (ok ? 1 : 0), (cur?.failed ?? 0) + (ok ? 0 : 1), "running", Date.now(), key);
+      await new Promise((r) => setTimeout(r, 250)); // 限速，对源友好
+    }
+    const cur = jobStmt.get.get(key) as any;
+    jobStmt.update.run(cur.done, cur.failed, "done", Date.now(), key);
+  } catch (e) {
+    const cur = jobStmt.get.get(key) as any;
+    jobStmt.update.run(cur?.done ?? 0, cur?.failed ?? 0, "error", Date.now(), key);
+  } finally {
+    runningJobs.delete(key);
+  }
+}
+
+// 启动全本缓存（只抓未缓存的章节；已在跑则直接返回进度）
+bookRoutes.post("/:id/cache-all", async (c) => {
+  const uid = c.get("uid");
+  const bookId = Number(c.req.param("id"));
+  const [book] = await db.select().from(books).where(and(eq(books.id, bookId), eq(books.userId, uid)));
+  if (!book) return c.json({ error: "书籍不存在" }, 404);
+  const key = contentKey(book.bookUrl);
+  if (runningJobs.has(key)) return c.json({ already: true, ...(jobStmt.get.get(key) as any) });
+  const eng = await loadEngine(book.sourceId);
+  const list = await db.select({ idx: chapters.idx, url: chapters.url }).from(chapters).where(eq(chapters.bookId, bookId));
+  if (!list.length) return c.json({ error: "目录为空" }, 400);
+  const cachedRows = await db.select({ idx: chapterCache.idx }).from(chapterCache).where(eq(chapterCache.contentKey, key));
+  const cached = new Set(cachedRows.map((r) => r.idx));
+  const todo = list.filter((ch) => !cached.has(ch.idx)).sort((a, b) => a.idx - b.idx);
+  if (!todo.length) return c.json({ nothing: true, cachedCount: cached.size });
+  runCacheJob(eng, key, todo); // 后台执行，不 await
+  return c.json({ queued: todo.length, cachedCount: cached.size });
+});
+
+// 缓存进度查询（前端轮询）
+bookRoutes.get("/:id/cache-all", async (c) => {
+  const uid = c.get("uid");
+  const bookId = Number(c.req.param("id"));
+  const [book] = await db.select().from(books).where(and(eq(books.id, bookId), eq(books.userId, uid)));
+  if (!book) return c.json({ error: "书籍不存在" }, 404);
+  const key = contentKey(book.bookUrl);
+  const job = jobStmt.get.get(key) as any;
+  const cachedCount = (await db.select({ idx: chapterCache.idx }).from(chapterCache).where(eq(chapterCache.contentKey, key))).length;
+  const total = (await db.select({ idx: chapters.idx }).from(chapters).where(eq(chapters.bookId, bookId))).length;
+  return c.json({ total, cachedCount, job: job ?? null, running: runningJobs.has(key) });
+});
+
+// 停止缓存任务（已抓的保留）
+bookRoutes.post("/:id/cache-stop", async (c) => {
+  const uid = c.get("uid");
+  const bookId = Number(c.req.param("id"));
+  const [book] = await db.select().from(books).where(and(eq(books.id, bookId), eq(books.userId, uid)));
+  if (!book) return c.json({ error: "书籍不存在" }, 404);
+  const key = contentKey(book.bookUrl);
+  const stopper = runningJobs.get(key);
+  if (stopper) stopper.stop = true;
+  else {
+    const cur = (jobStmt.get.get(key) ?? {}) as any;
+    jobStmt.update.run(cur.done ?? 0, cur.failed ?? 0, "stopped", Date.now(), key);
+  }
+  return c.json({ ok: true });
+});
+
+// 释放缓存：删除该书全部已缓存正文文件 + 索引（多用户共享，任何人释放对所有人生效——文件随时可重抓）
+bookRoutes.post("/:id/cache-release", async (c) => {
+  const uid = c.get("uid");
+  const bookId = Number(c.req.param("id"));
+  const [book] = await db.select().from(books).where(and(eq(books.id, bookId), eq(books.userId, uid)));
+  if (!book) return c.json({ error: "书籍不存在" }, 404);
+  const key = contentKey(book.bookUrl);
+  const stopper = runningJobs.get(key);
+  if (stopper) stopper.stop = true;
+  const rows = await db.select({ idx: chapterCache.idx, filePath: chapterCache.filePath }).from(chapterCache).where(eq(chapterCache.contentKey, key));
+  await db.delete(chapterCache).where(eq(chapterCache.contentKey, key));
+  sqlite.query("DELETE FROM cache_jobs WHERE content_key = ?").run(key);
+  for (const r of rows) {
+    try {
+      unlinkSync(r.filePath);
+    } catch {}
+  }
+  try {
+    rmSync(cacheDir(key), { recursive: true, force: true });
+  } catch {}
+  return c.json({ released: rows.length });
+});
 
 // 抓详情+目录并写入章节快照（加书架与刷新共用）
 async function snapshotToc(eng: any, bookUrl: string) {
@@ -157,8 +291,16 @@ bookRoutes.get("/:id/category", async (c) => {
   }
   const list = await db.select({ idx: chapters.idx, title: chapters.title }).from(chapters).where(eq(chapters.bookId, bookId));
   list.sort((a, b) => a.idx - b.idx);
+  const key = contentKey(book.bookUrl);
+  const cachedRows = await db.select({ idx: chapterCache.idx }).from(chapterCache).where(eq(chapterCache.contentKey, key));
+  const cachedSet = new Set(cachedRows.map((r) => r.idx));
   const [prog] = await db.select().from(progress).where(eq(progress.bookId, bookId));
-  return c.json({ book: { id: book.id, name: book.name, author: book.author }, chapters: list, progress: prog ? { chapterIdx: prog.chapterIdx } : null });
+  return c.json({
+    book: { id: book.id, name: book.name, author: book.author },
+    chapters: list.map((ch) => ({ ...ch, cached: cachedSet.has(ch.idx) })),
+    cachedCount: cachedSet.size,
+    progress: prog ? { chapterIdx: prog.chapterIdx } : null,
+  });
 });
 
 // 正文：磁盘缓存优先，未命中抓取→落盘→入库索引；?refresh=1 绕过缓存
@@ -182,20 +324,8 @@ bookRoutes.get("/:id/content/:idx", async (c) => {
   }
 
   const eng = await loadEngine(book.sourceId);
-  const raw = await getContent(eng, ch.url);
-  if (!raw.trim()) return c.json({ error: "正文抓取为空" }, 502);
-  mkdirSync(cacheDir(key), { recursive: true });
-  const filePath = `${cacheDir(key)}/${idx}.txt`;
-  writeFileSync(filePath, raw);
-  const ph = isPlaceholder(raw);
-  await db
-    .insert(chapterCache)
-    .values({ contentKey: key, idx, filePath, size: raw.length, isPlaceholder: ph, fetchedAt: new Date() })
-    .onConflictDoUpdate({
-      target: [chapterCache.contentKey, chapterCache.idx],
-      set: { filePath, size: raw.length, isPlaceholder: ph, fetchedAt: new Date() },
-    });
-  return c.json({ idx, title: ch.title, content: raw, isPlaceholder: ph, cached: false });
+  const raw = await fetchAndSave(eng, ch.url, key, idx);
+  return c.json({ idx, title: ch.title, content: raw, isPlaceholder: isPlaceholder(raw), cached: false });
 });
 
 // 进度上报

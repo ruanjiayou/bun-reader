@@ -60,6 +60,15 @@ CREATE TABLE IF NOT EXISTS chapter_cache (
   fetched_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS cache_key_idx ON chapter_cache(content_key, idx);
+-- 全本缓存任务：按 content_key(sha1(bookUrl)) 共享，多用户加同一本书共用一个任务
+CREATE TABLE IF NOT EXISTS cache_jobs (
+  content_key TEXT PRIMARY KEY,
+  total INTEGER NOT NULL DEFAULT 0,
+  done INTEGER NOT NULL DEFAULT 0,
+  failed INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'running',
+  updated_at INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS progress (
   book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
   chapter_idx INTEGER NOT NULL DEFAULT 0,
