@@ -1,5 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { searchSource, getBookInfo, getToc, getContent, isPlaceholder } from "../src/source/engine";
+import { applyRule, htmlNodes, nodeText } from "../src/source/rule";
 
 // 本地 fixture 站点：模拟一本假书的 搜索/详情/目录/正文
 let server: ReturnType<typeof Bun.serve>;
@@ -164,5 +165,12 @@ describe("书源引擎全链路", () => {
     expect(isPlaceholder("更新中")).toBe(true);
     expect(isPlaceholder("a".repeat(100))).toBe(false);
     expect(isPlaceholder("真内容不多但超过了五十字的阈值，然后出现稍后更新字样")).toBe(true);
+  });
+
+  test("裸单词段：HTML 标签名按标签选择，其余按属性取", () => {
+    const nodes = htmlNodes(`<div><a href="/x">链接文字</a><span data-src="abc">x</span></div>`);
+    expect(nodeText(applyRule(nodes, "a@text")[0])).toBe("链接文字"); // a ≡ tag.a
+    expect(applyRule(nodes, "span@data-src")[0]).toMatchObject({ kind: "json", v: "abc" }); // data-src 是属性
+    expect(applyRule(nodes, "a@href")[0]).toMatchObject({ kind: "json" }); // href 走取值器
   });
 });

@@ -30,6 +30,12 @@ const isJsRule = (r: string) => r.includes("<js>") || r.startsWith("@js:") || r.
 
 const GETTERS = /^(text|textNodes|ownText|html|all|href|src|content|value|title|alt)$/;
 const KEYWORD = /^(class|tag|id|text)\.([^@]+?)(?:\.(-?\d+))?$/;
+// 标准 HTML 标签名：裸单词命中则按标签选择，否则视为属性名
+const HTML_TAGS = new Set(
+  ("a abbr address area article aside audio b base bdi bdo blockquote body br button canvas caption cite code col colgroup data datalist dd del details dfn dialog div dl dt em embed fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe img input ins kbd label legend li link main map mark menu meta meter nav noscript object ol optgroup option output p param picture pre progress q rp rt ruby s samp script section select slot small source span strong style sub summary sup table tbody td template textarea tfoot th thead time title tr track u ul var video wbr").split(
+    " ",
+  ),
+);
 
 function classSel(arg: string): string {
   return /^[A-Za-z0-9_-]+$/.test(arg) ? `.${arg}` : `[class~="${arg}"]`;
@@ -119,9 +125,13 @@ function stepHtml(n: Extract<Node, { kind: "html" }>, raw: string, base: string,
       .forEach((c) => out.push({ kind: "html", $, el: c }));
     return;
   }
-  // 末段裸属性名（如 data-src）→ 取属性
+  // 裸单词：标准 HTML 标签名 → 按标签选择（a ≡ tag.a）；其余视为属性名（如 data-src）
   if (/^[a-zA-Z][\w-]*$/.test(raw)) {
-    out.push({ kind: "json", v: $(el).attr(raw) ?? "" });
+    if (HTML_TAGS.has(raw.toLowerCase())) {
+      safeFind($, el, raw).forEach((c) => out.push({ kind: "html", $, el: c }));
+    } else {
+      out.push({ kind: "json", v: $(el).attr(raw) ?? "" });
+    }
     return;
   }
   // 其余按 CSS 选择器处理（Legado 默认语法对未知段回退 jsoup select）
