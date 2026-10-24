@@ -113,6 +113,12 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
     latestChapter: ruleStr(nodes, r.lastChapter || "", res.url),
     tocUrl: ruleStr(nodes, r.tocUrl || "", res.url) || bookUrl,
   };
+  // tocUrl 规则命中多个时（多行）取最后一个——目录页通常在末尾，且避免多行拼接成垃圾 URL
+  const lines = info.tocUrl.split(/\s+/).filter(Boolean);
+  if (lines.length > 1) {
+    info.tocUrl = lines[lines.length - 1];
+    log?.("warn", "book", `tocUrl 规则命中 ${lines.length} 个链接，已取最后一个（要取指定位置请加索引如 a.-1）`);
+  }
   info.tocUrl = ensureAbs(info.tocUrl, res.url);
   log?.("ok", "book", `详情解析: ${info.name || "?"} · tocUrl=${info.tocUrl}`);
   return info;
