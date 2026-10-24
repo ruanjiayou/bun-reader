@@ -141,9 +141,24 @@ sourceRoutes.post("/:id/test", async (c) => {
   return c.json({ ok, steps });
 });
 
-// 调试：SSE 流式推送每步日志，前端实时渲染
-sourceRoutes.post("/:id/debug", async (c) => {
+// 调试搜索：返回结果列表（含每条的书名/作者/最新章节等），便于检查规则提取效果
+sourceRoutes.post("/:id/debug-search", async (c) => {
   const { key = "我的" } = await readBody<{ key?: string }>(c);
+  const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
+  if (!row) return c.json({ error: "书源不存在" }, 404);
+  const src = normalizeSource(JSON.parse(row.json));
+  const logs: { level: LogLevel; step: string; msg: string }[] = [];
+  try {
+    const books = await searchSource(src, key, (level, step, msg) => logs.push({ level, step, msg }));
+    return c.json({ books, logs });
+  } catch (e: any) {
+    return c.json({ books: [], logs, error: e?.message ?? String(e) });
+  }
+});
+
+// 调试：SSE 流式推送每步日志。带 bookUrl 时从详情开始（调书籍），否则从搜索开始（调源）
+sourceRoutes.post("/:id/debug", async (c) => {
+  const { key = "我的", bookUrl } = await readBody<{ key?: string; bookUrl?: string }>(c);
   const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
   if (!row) return c.json({ error: "书源不存在" }, 404);
   const src = normalizeSource(JSON.parse(row.json));
@@ -155,13 +170,23 @@ sourceRoutes.post("/:id/debug", async (c) => {
       const send = (level: LogLevel, step: string, msg: string) =>
         controller.enqueue(enc.encode(`data: ${JSON.stringify({ level, step, msg })}\n\n`));
       try {
-        const books = await searchSource(src, key, send);
-        if (!books.length) throw new Error("搜索无结果");
-        const info = await getBookInfo(src, books[0].bookUrl, send);
-        const toc = await getToc(src, info.tocUrl, send);
+        let name = "";
+        let tocUrl = "";
+        if (bookUrl) {
+          const info = await getBookInfo(src, bookUrl, send);
+          name = info.name || "（未取到书名）";
+          tocUrl = info.tocUrl;
+        } else {
+          const books = await searchSource(src, key, send);
+          if (!books.length) throw new Error("搜索无结果");
+          name = books[0].name;
+          const info = await getBookInfo(src, books[0].bookUrl, send);
+          tocUrl = info.tocUrl;
+        }
+        const toc = await getToc(src, tocUrl, send);
         if (!toc.length) throw new Error("目录为空");
         const content = await getContent(src, toc[0].url, send);
-        send("ok", "done", `调试完成：${books[0].name} → ${toc.length} 章 → 正文 ${content.length} 字`);
+        send("ok", "done", `调试完成：${name} → ${toc.length} 章 → 首章正文 ${content.length} 字`);
       } catch (e: any) {
         send("err", "done", e?.message ?? String(e));
       } finally {

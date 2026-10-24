@@ -14,6 +14,14 @@ interface DebugEvt {
   step: string;
   msg: string;
 }
+interface SearchBook {
+  name: string;
+  author: string;
+  bookUrl: string;
+  cover: string;
+  intro: string;
+  latestChapter: string;
+}
 
 // 表单按区块声明，字段 = { path, label, ph 示例提示, rows 行数 }；规则一律 CSS 语法
 const SECTIONS: { title: string; fields: { path: string; label: string; ph?: string; rows?: number }[] }[] = [
@@ -113,6 +121,9 @@ export default function Sources() {
   const [msg, setMsg] = useState("");
   const [importUrl, setImportUrl] = useState("");
   const [debugKey, setDebugKey] = useState("我的");
+  const [dbgMode, setDbgMode] = useState<"search" | "book">("search");
+  const [debugBookUrl, setDebugBookUrl] = useState("");
+  const [searchResults, setSearchResults] = useState<SearchBook[]>([]);
   const [logs, setLogs] = useState<DebugEvt[]>([]);
   const [debugging, setDebugging] = useState(false);
   const logBox = useRef<HTMLDivElement>(null);
@@ -224,21 +235,37 @@ export default function Sources() {
     URL.revokeObjectURL(a.href);
   };
 
-  // —— 调试（保存后跑，保证调的是最新规则）——
-  const runDebug = async () => {
+  // —— 调试：调已保存的源（不自动保存）——
+  const runDebugSearch = async () => {
+    if (editId === null) return setMsg("先保存源再调试");
+    setDebugging(true);
+    setSearchResults([]);
+    setLogs([]);
+    try {
+      const r = await api<{ books: SearchBook[]; logs: DebugEvt[]; error?: string }>(
+        `/api/sources/${editId}/debug-search`,
+        { method: "POST", body: JSON.stringify({ key: debugKey }) },
+      );
+      setSearchResults(r.books);
+      setLogs(r.logs);
+      if (r.error) setLogs((l) => [...l, { level: "err", step: "done", msg: r.error! }]);
+      setMsg(r.books.length ? `搜索到 ${r.books.length} 条` : r.error ?? "搜索无结果");
+    } catch (e: any) {
+      setMsg(e.message);
+    } finally {
+      setDebugging(false);
+    }
+  };
+  const runDebugBook = async () => {
+    if (editId === null) return setMsg("先保存源再调试");
+    if (!debugBookUrl.trim()) return setMsg("输入书籍详情页 URL");
     setLogs([]);
     setDebugging(true);
-    setRightTab("debug");
     try {
-      let id = editId;
-      if (id === null) {
-        id = await saveSource();
-        if (id === null) throw new Error("保存失败，无法调试");
-      }
-      const res = await fetch(`/api/sources/${id}/debug`, {
+      const res = await fetch(`/api/sources/${editId}/debug`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ key: debugKey }),
+        body: JSON.stringify({ bookUrl: debugBookUrl.trim() }),
       });
       const reader = res.body!.getReader();
       const dec = new TextDecoder();
@@ -336,11 +363,17 @@ export default function Sources() {
         {/* 中：操作列 */}
         <div className="flex flex-row flex-wrap gap-2 md:sticky md:top-4 md:flex-col">
           <button onClick={saveSource} className={btnPrimary}>保存源</button>
-          <button onClick={runDebug} disabled={debugging} className={btn}>
-            {debugging ? "调试中…" : "⇏ 保存并调试"}
+          <button
+            onClick={() => {
+              if (editId === null) setMsg("新建源先保存再调试");
+              else setRightTab("debug");
+            }}
+            className={btn}
+          >
+            ⇏ 调试
           </button>
           <button onClick={formToJson} className={btn}>表单→JSON</button>
-          <button onClick={jsonToForm} className={btn}>JSON→表单</button>
+          <button onClick={jsonToForm} className={btn}>表单←JSON</button>
           <button onClick={() => selectSource(null)} className={btn}>✗ 清空新建</button>
           <label className="flex items-center gap-2 px-1 text-sm text-neutral-400">
             <input type="checkbox" checked={!!form.enabled} onChange={toggleEnabled} className="accent-amber-500" disabled={editId === null} />
@@ -349,9 +382,9 @@ export default function Sources() {
           <button onClick={del} className="w-full rounded-lg px-3 py-1.5 text-sm text-red-400 hover:bg-red-950">删除此源</button>
         </div>
 
-        {/* 右：JSON / 调试日志 */}
+        {/* 右：JSON / 调试 */}
         <div className="flex flex-col rounded-xl bg-neutral-800 p-3 md:sticky md:top-4 md:max-h-[calc(100dvh-2rem)]">
-          <div className="mb-2 flex gap-1">
+          <div className="mb-2 flex flex-wrap items-center gap-1">
             {(["json", "debug"] as const).map((t) => (
               <button
                 key={t}
@@ -361,35 +394,89 @@ export default function Sources() {
                 {t === "json" ? "JSON" : "调试"}
               </button>
             ))}
-            {rightTab === "debug" && (
-              <input
-                className="ml-auto w-40 rounded-lg bg-neutral-700 px-2 py-1.5 text-sm"
-                placeholder="搜索关键词"
-                value={debugKey}
-                onChange={(e) => setDebugKey(e.target.value)}
-              />
-            )}
           </div>
           {rightTab === "json" ? (
             <textarea
               className="h-96 w-full flex-1 rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5 md:h-auto"
-              placeholder="表单→JSON 生成；或粘贴 JSON 后 JSON→表单"
+              placeholder="表单→JSON 生成；或粘贴 JSON 后 表单←JSON"
               value={jsonText}
               onChange={(e) => setJsonText(e.target.value)}
             />
           ) : (
-            <div
-              ref={logBox}
-              className="h-96 w-full flex-1 overflow-y-auto rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5 md:h-auto"
-            >
-              {logs.map((l, i) => (
-                <div key={i} className={levelColor[l.level]}>
-                  <span className="text-neutral-600">[{l.step}]</span> {l.msg}
+            <div className="flex flex-1 flex-col gap-2 overflow-hidden">
+              {/* 子模式切换 + 输入 */}
+              <div className="flex flex-wrap items-center gap-1">
+                {(["search", "book"] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => setDbgMode(m)}
+                    className={`rounded-lg px-3 py-1 text-xs ${dbgMode === m ? "bg-neutral-600 font-medium text-neutral-100" : "bg-neutral-700 text-neutral-400 hover:bg-neutral-600"}`}
+                  >
+                    {m === "search" ? "调搜索" : "调书籍"}
+                  </button>
+                ))}
+                {dbgMode === "search" ? (
+                  <>
+                    <input
+                      className="ml-auto w-36 rounded-lg bg-neutral-700 px-2 py-1 text-xs"
+                      placeholder="搜索关键词"
+                      value={debugKey}
+                      onChange={(e) => setDebugKey(e.target.value)}
+                    />
+                    <button onClick={runDebugSearch} disabled={debugging} className="rounded-lg bg-amber-500 px-3 py-1 text-xs font-medium text-neutral-900 disabled:opacity-50">
+                      运行
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <input
+                      className="ml-auto w-56 flex-1 rounded-lg bg-neutral-700 px-2 py-1 font-mono text-xs"
+                      placeholder="书籍详情页 URL"
+                      value={debugBookUrl}
+                      onChange={(e) => setDebugBookUrl(e.target.value)}
+                    />
+                    <button onClick={runDebugBook} disabled={debugging} className="rounded-lg bg-amber-500 px-3 py-1 text-xs font-medium text-neutral-900 disabled:opacity-50">
+                      运行
+                    </button>
+                  </>
+                )}
+              </div>
+              {/* 调搜索：结果列表 */}
+              {dbgMode === "search" && (
+                <div className="flex-1 overflow-y-auto rounded-lg bg-neutral-900 p-2">
+                  {searchResults.map((b, i) => (
+                    <div key={i} className="mb-2 rounded-lg bg-neutral-800 p-2 text-xs">
+                      <div className="flex items-center gap-2">
+                        {b.cover && <img src={b.cover} alt="" className="h-12 w-9 flex-none rounded object-cover" onError={(e) => (e.currentTarget.style.display = "none")} />}
+                        <div className="min-w-0">
+                          <div className="truncate font-medium text-neutral-100">{b.name}</div>
+                          <div className="truncate text-neutral-400">
+                            {b.author || "佚名"}
+                            {b.latestChapter && ` · ${b.latestChapter}`}
+                          </div>
+                        </div>
+                      </div>
+                      {b.intro && <div className="mt-1 line-clamp-2 text-neutral-500">{b.intro}</div>}
+                      <div className="mt-1 truncate text-neutral-600">{b.bookUrl}</div>
+                    </div>
+                  ))}
+                  {!searchResults.length && <div className="p-2 text-neutral-600">输入关键词点运行，返回每条的书名/作者/最新章节等</div>}
+                  {logs.map((l, i) => (
+                    <div key={`lg${i}`} className={levelColor[l.level]}>
+                      <span className="text-neutral-600">[{l.step}]</span> {l.msg}
+                    </div>
+                  ))}
                 </div>
-              ))}
-              {!logs.length && (
-                <div className="text-neutral-600">
-                  {cur ? `点「保存并调试」运行 ${cur.name}` : "新建源保存后可调试"} · 流程：搜索 → 详情 → 目录 → 正文
+              )}
+              {/* 调书籍：SSE 日志 */}
+              {dbgMode === "book" && (
+                <div ref={logBox} className="h-96 flex-1 overflow-y-auto rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5 md:h-auto">
+                  {logs.map((l, i) => (
+                    <div key={i} className={levelColor[l.level]}>
+                      <span className="text-neutral-600">[{l.step}]</span> {l.msg}
+                    </div>
+                  ))}
+                  {!logs.length && <div className="text-neutral-600">粘贴书籍详情页 URL 点运行：详情 → 目录 → 首章正文</div>}
                 </div>
               )}
             </div>
