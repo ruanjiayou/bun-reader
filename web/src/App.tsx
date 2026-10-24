@@ -14,7 +14,9 @@ export function useAuth() {
       .then(setMe)
       .catch(() => setMe(null))
       .finally(() => setLoading(false));
-  useEffect(refresh, []);
+  useEffect(() => {
+    refresh();
+  }, []);
   return { me, loading, refresh };
 }
 

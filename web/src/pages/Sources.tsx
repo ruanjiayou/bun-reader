@@ -36,7 +36,9 @@ export default function Sources() {
   const logBox = useRef<HTMLDivElement>(null);
 
   const load = () => api<SourceRow[]>("/api/sources").then(setRows).catch((e) => setMsg(e.message));
-  useEffect(load, []);
+  useEffect(() => {
+    load();
+  }, []);
 
   const shown = rows.filter(
     (r) => !filter || r.name.includes(filter) || r.group.includes(filter) || r.bookUrl.includes(filter),
