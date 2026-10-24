@@ -36,12 +36,12 @@ const SECTIONS: { title: string; fields: { path: string; label: string; ph?: str
   {
     title: "搜索",
     fields: [
-      { path: "ruleSearch.bookList", label: "列表规则（选元素，不是取文本！）", rows: 2, ph: ".bookbox\n或 class.bookbox / tag.dd" },
+      { path: "ruleSearch.bookList", label: "列表规则（选元素，不是取文本！）", rows: 2, ph: ".bookbox\n或 .bookbox > div / li.book" },
       { path: "ruleSearch.name", label: "书名（文本）", ph: ".bookname a@text" },
       { path: "ruleSearch.author", label: "作者（文本）", ph: ".author@text##作者：|字数：.+" },
       { path: "ruleSearch.lastChapter", label: "最新章节（文本）", ph: ".cat a@text" },
       { path: "ruleSearch.intro", label: "简介（文本）", ph: ".update@text" },
-      { path: "ruleSearch.coverUrl", label: "封面（图片，用 @src）", ph: "img@src 或 .thumbnail@src" },
+      { path: "ruleSearch.coverUrl", label: "封面（图片，用 @src）", ph: "img@src 或 .thumbnail img@src" },
       { path: "ruleSearch.bookUrl", label: "详情地址（链接，用 @href，必填）", ph: ".bookname a@href" },
     ],
   },
@@ -53,21 +53,21 @@ const SECTIONS: { title: string; fields: { path: string; label: string; ph?: str
       { path: "ruleBookInfo.lastChapter", label: "最新章节（文本）", ph: ".bookchapter@text" },
       { path: "ruleBookInfo.intro", label: "简介（文本）", ph: ".bookintro@text" },
       { path: "ruleBookInfo.coverUrl", label: "封面（图片，用 @src）", ph: ".thumbnail img@src" },
-      { path: "ruleBookInfo.tocUrl", label: "目录地址（链接 @href，与详情页相同可留空）", ph: "id.allchapter@tag.a.-1@href" },
+      { path: "ruleBookInfo.tocUrl", label: "目录地址（链接 @href，与详情页相同可留空）", ph: "#allchapter a.-1@href" },
     ],
   },
   {
     title: "目录",
     fields: [
-      { path: "ruleToc.chapterList", label: "列表规则（选元素，不是取文本！）", rows: 2, ph: "tag.dd\n或 .chapter-list li" },
-      { path: "ruleToc.chapterName", label: "章节名称（文本）", ph: "tag.a@text" },
-      { path: "ruleToc.chapterUrl", label: "章节地址（链接 @href）", ph: "tag.a@href" },
+      { path: "ruleToc.chapterList", label: "列表规则（选元素，不是取文本！）", rows: 2, ph: "dd\n或 .chapter-list li / #all > dl dd" },
+      { path: "ruleToc.chapterName", label: "章节名称（文本）", ph: "a@text" },
+      { path: "ruleToc.chapterUrl", label: "章节地址（链接 @href）", ph: "a@href" },
     ],
   },
   {
     title: "正文",
     fields: [
-      { path: "ruleContent.content", label: "正文规则（多行文本用 @textNodes）", rows: 2, ph: "id.content@textNodes\n或 .readcontent@text" },
+      { path: "ruleContent.content", label: "正文规则（多行文本用 @textNodes）", rows: 2, ph: "#content@textNodes\n或 .readcontent@text" },
       { path: "ruleContent.replaceRegex", label: "替换净化（正则##替换为，替换为留空=删除）", ph: "广告.*?<br>##\n（##广告.*?##  删除匹配内容）" },
     ],
   },
@@ -396,22 +396,28 @@ export default function Sources() {
       {/* 帮助 */}
       {tab === "help" && (
         <div className="space-y-4 rounded-xl bg-neutral-800 p-4 text-sm leading-6 text-neutral-300">
-          <p><b className="text-amber-400">规则语法（首版支持）</b></p>
+          <p><b className="text-amber-400">选择器语法（本项目原生 = CSS）</b></p>
+          <p className="text-xs">
+            <code>#xxx</code> id · <code>.xxx</code> 类名 · <code>xxx</code> 标签名，可组合：<code>div.intro</code>、<code>#main.content</code>；层级用空格或 <code>&gt;</code>：<code>#all dd a</code>、<code>.list &gt; li</code>。
+            段尾 <code>.N</code> 取索引：<code>a.0</code> 第 1 个、<code>a.-1</code> 最后一个。
+          </p>
           <p className="text-xs">
             取值后缀：<code>@text</code> 文本 · <code>@textNodes</code> 多行文本（正文用）· <code>@href</code> 链接（自动补全绝对地址）· <code>@src</code> 图片 · <code>@任意属性</code>（如 <code>@data-src</code>）。
             注意：<code>@//text/</code> 是 XPath 写法，不支持。
           </p>
           <ul className="list-disc space-y-1 pl-5">
-            <li><code>class.bookname@tag.a@text</code> — class/tag/id/text 关键字规则，@ 分段，<code>tag.a.0</code> 取第 1 个、<code>tag.a.-1</code> 取最后一个</li>
-            <li><code>.bookbox</code> / <code>.bookname a</code> — 直接写 CSS 选择器也可以（cheerio）</li>
-            <li><code>id.content@textNodes</code> — 取全部文本节点（按行分隔，适合正文）</li>
-            <li><code>tag.a@href</code> / <code>tag.img@data-src</code> — 属性取值，href/src 自动补全绝对地址</li>
-            <li><code>id.content@text##广告.*</code> — ## 正则后处理（净化）</li>
-            <li><code>规则A||规则B</code> — A 无结果时用 B；<code>{"{{bookUrl}}##正则##替换"}</code> — URL 改写（如详情→目录固定格式跳转）</li>
+            <li><code>.bookname a@text</code> — 类名 bookname 下的 a，取文本</li>
+            <li><code>dd</code> / <code>a</code> — 裸标签名直接写；<code>dd@text</code>、<code>a@href</code></li>
+            <li><code>#content@textNodes</code> — id 取正文多行文本</li>
+            <li><code>.intro@text##广告.*</code> — ## 正则后处理（净化）</li>
+            <li><code>规则A||规则B</code> — A 无结果时用 B；<code>{"{{bookUrl}}##正则##替换"}</code> — URL 改写（详情→目录固定格式跳转）</li>
             <li><code>$.data.books[*].name</code> — JsonPath（API 类书源）</li>
           </ul>
           <p className="text-xs text-neutral-400">关键区分：<b>列表规则</b>（bookList/chapterList）选<b>元素</b>，其余字段在列表元素内取<b>值</b>（文本/链接/图片）。</p>
-          <p className="text-xs text-neutral-400">每段判定顺序：class./tag./id./text. 关键字 → 取值器（text/href/src…）→ children → 裸属性名（单词如 data-src 会被当属性！）→ 其余整段当 CSS 选择器（如 <code>main.content</code> = &lt;main class="content"&gt;，<code>.content</code> = class）。</p>
+          <p className="text-xs text-neutral-400">
+            <b className="text-amber-400">导入兼容</b>：从 Legado 导入的源，其关键字规则（<code>class.x</code> / <code>tag.x</code> / <code>id.x</code>）会自动转换成 CSS 语法再入库；
+            <code>text.x</code>（按文字找元素）无 CSS 等价，不支持。手工编辑请直接写 CSS 语法，不要再写关键字。
+          </p>
           <p><b className="text-amber-400">暂不支持</b>：&lt;js&gt; 脚本规则、&amp;&amp; 合并、! 排除、目录/正文翻页规则、发现页。</p>
           <p><b className="text-amber-400">参考链接</b></p>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-neutral-400">

@@ -29,16 +29,61 @@ export function guessNodes(text: string): Node[] {
 const isJsRule = (r: string) => r.includes("<js>") || r.startsWith("@js:") || r.startsWith("@JavaScript:");
 
 const GETTERS = /^(text|textNodes|ownText|html|all|href|src|content|value|title|alt)$/;
-const KEYWORD = /^(class|tag|id|text)\.([^@]+?)(?:\.(-?\d+))?$/;
 // 标准 HTML 标签名：裸单词命中则按标签选择，否则视为属性名
 const HTML_TAGS = new Set(
   ("a abbr address area article aside audio b base bdi bdo blockquote body br button canvas caption cite code col colgroup data datalist dd del details dfn dialog div dl dt em embed fieldset figcaption figure footer form h1 h2 h3 h4 h5 h6 head header hgroup hr html i iframe img input ins kbd label legend li link main map mark menu meta meter nav noscript object ol optgroup option output p param picture pre progress q rp rt ruby s samp script section select slot small source span strong style sub summary sup table tbody td template textarea tfoot th thead time title tr track u ul var video wbr").split(
     " ",
   ),
 );
+// 段尾整数索引标记（如 a.0 / a.-1）：截断后按结果集索引取
+const IDX = /^(.+)\.(-?\d+)$/;
 
-function classSel(arg: string): string {
-  return /^[A-Za-z0-9_-]+$/.test(arg) ? `.${arg}` : `[class~="${arg}"]`;
+function isIdent(s: string) {
+  return /^[A-Za-z0-9_-]+$/.test(s);
+}
+
+// —— Legado 关键字 → 本项目 CSS 语法（仅导入时转换，求值器不认关键字）——
+// class.x → .x · tag.x → x · id.x → #x · 索引 tag.a.-1 → a.-1；text.x（按文字找元素）无 CSS 等价，原样保留（求值为空）
+function convertSeg(seg: string): string {
+  const kw = seg.match(/^(class|tag|id)\.([^@]+?)(?:\.(-?\d+))?$/);
+  if (!kw) return seg;
+  const [, type, arg, nth] = kw;
+  let sel: string;
+  if (type === "class") sel = isIdent(arg) ? `.${arg}` : `[class~="${arg}"]`;
+  else if (type === "tag") sel = arg;
+  else sel = isIdent(arg) ? `#${arg}` : `[id="${arg}"]`;
+  return nth ? `${sel}.${nth}` : sel;
+}
+
+export function legadoToOurs(rule: string): string {
+  if (!rule || !rule.trim()) return rule;
+  return rule
+    .split("||")
+    .map((part) => {
+      const r = part.trim();
+      // JsonPath / {{模板}} / JS 规则原样保留
+      if (!r || r.startsWith("$") || r.startsWith("{{") || r.includes("<js>")) return r;
+      return r
+        .split("@")
+        .map((s) => convertSeg(s.trim()))
+        .join("@");
+    })
+    .join("||");
+}
+
+const RULE_FIELDS = new Set(["bookList", "name", "author", "lastChapter", "intro", "coverUrl", "bookUrl", "tocUrl", "chapterList", "chapterName", "chapterUrl", "content"]);
+
+// 书源 JSON 规则字段统一转换为本项目语法（幂等，导入与运行前都调用）
+export function normalizeSource(src: any): any {
+  if (!src || typeof src !== "object") return src;
+  const out = { ...src };
+  for (const grp of ["ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent"]) {
+    if (out[grp] && typeof out[grp] === "object")
+      out[grp] = Object.fromEntries(
+        Object.entries(out[grp]).map(([k, v]) => [k, typeof v === "string" && RULE_FIELDS.has(k) ? legadoToOurs(v) : v]),
+      );
+  }
+  return out;
 }
 
 function ownText($: CheerioAPI, el: AnyNode): string {
@@ -96,24 +141,9 @@ function safeFind($: CheerioAPI, el: AnyNode, sel: string): AnyNode[] {
   }
 }
 
-// 单段求值：keyword 规则优先（class.content 的 content 是类名不是 getter）
+// 单段求值：CSS 选择器（#id/.class/tag 可组合）+ 取值器 + 段尾整数索引（a.-1）
 function stepHtml(n: Extract<Node, { kind: "html" }>, raw: string, base: string, out: Node[]) {
   const { $, el } = n;
-  const kw = raw.match(KEYWORD);
-  if (kw) {
-    const [, type, arg, nth] = kw;
-    let found: AnyNode[];
-    if (type === "class") found = safeFind($, el, classSel(arg));
-    else if (type === "tag") found = safeFind($, el, arg);
-    else if (type === "id") found = safeFind($, el, `[id="${arg}"]`);
-    else found = $(el).find("*").toArray().filter((x) => $(x).text().includes(arg));
-    if (nth !== undefined) {
-      const k = parseInt(nth);
-      found = [found[k >= 0 ? k : found.length + k]].filter(Boolean);
-    }
-    found.forEach((c) => out.push({ kind: "html", $, el: c }));
-    return;
-  }
   if (GETTERS.test(raw)) {
     out.push({ kind: "json", v: getter(raw, $, el, base) });
     return;
@@ -125,17 +155,23 @@ function stepHtml(n: Extract<Node, { kind: "html" }>, raw: string, base: string,
       .forEach((c) => out.push({ kind: "html", $, el: c }));
     return;
   }
-  // 裸单词：标准 HTML 标签名 → 按标签选择（a ≡ tag.a）；其余视为属性名（如 data-src）
-  if (/^[a-zA-Z][\w-]*$/.test(raw)) {
-    if (HTML_TAGS.has(raw.toLowerCase())) {
-      safeFind($, el, raw).forEach((c) => out.push({ kind: "html", $, el: c }));
-    } else {
-      out.push({ kind: "json", v: $(el).attr(raw) ?? "" });
-    }
-    return;
+  let sel = raw;
+  let idx: number | undefined;
+  const m = raw.match(IDX);
+  if (m) {
+    sel = m[1];
+    idx = parseInt(m[2]);
   }
-  // 其余按 CSS 选择器处理（Legado 默认语法对未知段回退 jsoup select）
-  safeFind($, el, raw).forEach((c) => out.push({ kind: "html", $, el: c }));
+  let found: AnyNode[];
+  if (isIdent(sel)) {
+    if (HTML_TAGS.has(sel.toLowerCase())) found = safeFind($, el, sel); // 标签名
+    else {
+      out.push({ kind: "json", v: $(el).attr(sel) ?? "" }); // 属性名（如 data-src）
+      return;
+    }
+  } else found = safeFind($, el, sel); // 其余整段 CSS 选择器
+  if (idx !== undefined) found = [found[idx >= 0 ? idx : found.length + idx]].filter(Boolean);
+  found.forEach((c) => out.push({ kind: "html", $, el: c }));
 }
 
 // JsonPath 子集：$.a.b[0].c / [*] / 纯数字索引

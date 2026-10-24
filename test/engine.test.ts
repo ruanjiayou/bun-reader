@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { searchSource, getBookInfo, getToc, getContent, isPlaceholder } from "../src/source/engine";
-import { applyRule, htmlNodes, nodeText } from "../src/source/rule";
+import { applyRule, htmlNodes, nodeText, legadoToOurs } from "../src/source/rule";
 
 // 本地 fixture 站点：模拟一本假书的 搜索/详情/目录/正文
 let server: ReturnType<typeof Bun.serve>;
@@ -75,33 +75,33 @@ beforeAll(() => {
 
 afterAll(() => server.stop(true));
 
-// source 在 beforeAll 之后才能拿到 base，用工厂函数
+// source 在 beforeAll 之后才能拿到 base，用工厂函数；规则一律用本项目 CSS 语法
 const source = () => ({
   bookSourceUrl: base,
   bookSourceName: "测试站",
   searchUrl: `${base}/search?keyword={{key}}`,
   ruleSearch: {
-    bookList: "class.bookbox",
-    name: "tag.h4@tag.a@text",
-    author: "class.author@text",
-    bookUrl: "tag.h4@tag.a@href",
-    coverUrl: "tag.img@data-src",
-    intro: "class.intro@text",
-    lastChapter: "class.last@text",
+    bookList: ".bookbox",
+    name: "h4 a@text",
+    author: ".author@text",
+    bookUrl: "h4 a@href",
+    coverUrl: "img@data-src",
+    intro: ".intro@text",
+    lastChapter: ".last@text",
   },
   ruleBookInfo: {
-    name: "id.info@tag.h1@text",
-    author: "id.info@tag.p@text##作者：",
-    intro: "class.intro@text",
-    tocUrl: "id.info@tag.a.0@href",
+    name: "#info h1@text",
+    author: "#info p@text##作者：",
+    intro: ".intro@text",
+    tocUrl: "#info a.0@href",
   },
   ruleToc: {
-    chapterList: "class.chapterlist@tag.li",
-    chapterName: "tag.a@text",
-    chapterUrl: "tag.a@href",
+    chapterList: ".chapterlist li",
+    chapterName: "a@text",
+    chapterUrl: "a@href",
   },
   ruleContent: {
-    content: "id.content@textNodes",
+    content: "#content@textNodes",
     replaceRegex: "广告链接：.*",
   },
 });
@@ -139,20 +139,43 @@ describe("书源引擎全链路", () => {
   });
 
   test("空规则防御：缺 bookUrl 规则的书被丢弃而非拼出垃圾 URL", async () => {
-    const bad = { bookSourceUrl: base, searchUrl: `${base}/search?keyword={{key}}`, ruleSearch: { bookList: "class.bookbox", name: "tag.h4@text" } };
+    const bad = { bookSourceUrl: base, searchUrl: `${base}/search?keyword={{key}}`, ruleSearch: { bookList: ".bookbox", name: "h4@text" } };
     const books = await searchSource(bad, "x");
     expect(books.length).toBe(0);
     const noBookList = { bookSourceUrl: base, searchUrl: `${base}/search?keyword={{key}}` };
     await expect(searchSource(noBookList, "x")).rejects.toThrow("缺少 ruleSearch.bookList");
   });
 
+  test("Legado 关键字 → CSS 语法转换", () => {
+    expect(legadoToOurs("class.bookbox")).toBe(".bookbox");
+    expect(legadoToOurs("id.info@tag.h1@text")).toBe("#info@h1@text");
+    expect(legadoToOurs("class.bookname@tag.a.0@href")).toBe(".bookname@a.0@href");
+    expect(legadoToOurs("id.allchapter@tag.a.-1@href")).toBe("#allchapter@a.-1@href");
+    // || 回退与 {{bookUrl}} 模板段原样保留
+    expect(legadoToOurs("id.x@tag.a@href||{{bookUrl}}##/a/(\\d+)##/b/$1.html")).toBe(
+      "#x@a@href||{{bookUrl}}##/a/(\\d+)##/b/$1.html",
+    );
+    // JsonPath 不动
+    expect(legadoToOurs("$.data.books[*].name")).toBe("$.data.books[*].name");
+    // 转换后的规则可求值
+    const nodes = htmlNodes(`<div class="box"><a href="/x">名字</a></div>`);
+    expect(nodeText(applyRule(nodes, legadoToOurs("class.box@tag.a@text"))[0])).toBe("名字");
+  });
+
+  test("CSS 语法求值：组合/层级/索引/属性", () => {
+    const nodes = htmlNodes(`<ul id="all"><li><a href="/1">一</a></li><li><a href="/2">二</a></li></ul>`);
+    expect(applyRule(nodes, "#all li").length).toBe(2); // id + 层级
+    expect(nodeText(applyRule(nodes, "li a.-1@text")[0])).toBe("二"); // 索引 -1
+    expect(applyRule(nodes, "#all li a")[0].kind).toBe("html"); // 多层组合
+  });
+
   test("tocUrl 规则：|| 回退到 {{bookUrl}} 模板跳转", async () => {
     const src2 = {
       bookSourceUrl: base,
       ruleBookInfo: {
-        tocUrl: "id.allchapter@tag.a.-1@href||{{bookUrl}}##/book/(\\d+)##/chapter/$1.html",
+        tocUrl: "#allchapter a.-1@href||{{bookUrl}}##/book/(\\d+)##/chapter/$1.html",
       },
-      ruleToc: { chapterList: "class.chapterlist@tag.li", chapterName: "tag.a@text", chapterUrl: "tag.a@href" },
+      ruleToc: { chapterList: ".chapterlist li", chapterName: "a@text", chapterUrl: "a@href" },
     };
     const info = await getBookInfo(src2, `${base}/book/2`);
     expect(info.tocUrl).toBe(`${base}/chapter/2.html`);

@@ -4,6 +4,7 @@ import { db } from "../db";
 import { sources } from "../schema";
 import { httpText } from "../source/fetcher";
 import { searchSource, getBookInfo, getToc, getContent, type LogLevel } from "../source/engine";
+import { normalizeSource } from "../source/rule";
 import type { AuthEnv } from "../auth";
 
 export const sourceRoutes = new Hono<AuthEnv>();
@@ -71,7 +72,8 @@ sourceRoutes.post("/import", async (c) => {
   const list: any[] = Array.isArray(parsed) ? parsed : [parsed];
   let added = 0;
   let updated = 0;
-  for (const s of list) {
+  for (const raw of list) {
+    const s = normalizeSource(raw); // Legado 关键字规则 → 本项目 CSS 语法后入库
     const url = s.bookSourceUrl;
     const name = s.bookSourceName;
     if (!url || !name) continue; // ponytail: 跳过非法条目而不是整体失败
@@ -99,7 +101,7 @@ sourceRoutes.post("/:id/test", async (c) => {
   const { key = "我的" } = await readBody<{ key?: string }>(c);
   const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
   if (!row) return c.json({ error: "书源不存在" }, 404);
-  const src = JSON.parse(row.json);
+  const src = normalizeSource(JSON.parse(row.json)); // 兼容入库时尚未转换的旧关键字规则
   const steps: { step: string; ok: boolean; msg: string }[] = [];
   const run = async (step: string, fn: () => Promise<string>) => {
     try {
@@ -144,7 +146,7 @@ sourceRoutes.post("/:id/debug", async (c) => {
   const { key = "我的" } = await readBody<{ key?: string }>(c);
   const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
   if (!row) return c.json({ error: "书源不存在" }, 404);
-  const src = JSON.parse(row.json);
+  const src = normalizeSource(JSON.parse(row.json));
   const id = Number(c.req.param("id"));
 
   const stream = new ReadableStream({
