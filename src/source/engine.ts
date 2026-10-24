@@ -217,13 +217,29 @@ export function isPlaceholder(content: string, words: string[] = PLACEHOLDER_WOR
   return words.some((w) => content.includes(w));
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
 export async function getContent(src: BookSource, chapterUrl: string, log?: Log): Promise<string> {
   const { url, opts } = buildReq(src, chapterUrl);
   log?.("info", "content", `正文: ${url}`);
-  const res = await httpText(url, opts);
-  if (res.status >= 400) throw new Error(`HTTP ${res.status} · ${res.charset}`);
-  const nodes = guessNodes(res.text);
-  let content = ruleStr(nodes, src.ruleContent?.content ?? "", res.url);
+  // 站点偶发 4xx/5xx（反爬/限流）重试兜底：1s → 2s → 4s
+  let lastErr: unknown;
+  for (let i = 0; i < 3; i++) {
+    try {
+      const res = await httpText(url, opts);
+      if (res.status >= 400) throw new Error(`HTTP ${res.status} · ${res.charset}`);
+      return await parseContent(src, res.text, res.url, log);
+    } catch (e) {
+      lastErr = e;
+      if (i < 2) await sleep(1000 * 2 ** i);
+    }
+  }
+  throw lastErr;
+}
+
+async function parseContent(src: BookSource, text: string, baseUrl: string, log?: Log): Promise<string> {
+  const nodes = guessNodes(text);
+  let content = ruleStr(nodes, src.ruleContent?.content ?? "", baseUrl);
   if (!content) throw new Error("正文规则未命中");
   content = applyReplace(content, src.ruleContent?.replaceRegex);
   content = content
