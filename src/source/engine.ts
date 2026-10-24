@@ -169,6 +169,7 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promis
       if (nRaw.length > 1) log?.("warn", "toc", `nextTocUrl 命中 ${nRaw.length} 个链接，已取最后一个`);
       const n = nRaw[nRaw.length - 1] ?? "";
       next = n && !visited.has(n) ? n : null;
+      if (page === 1 && !next) log?.("info", "toc", `翻页规则未命中下一页链接（仅单页，或规则没匹配上）`);
     }
   }
   const pages = visited.size;
