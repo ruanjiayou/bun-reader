@@ -265,6 +265,27 @@ bookRoutes.put("/:id/refresh", async (c) => {
   return c.json({ chapterCount: toc.length, added: Math.max(0, toc.length - oldCount), oldCount });
 });
 
+// 换源：更换书源+详情地址，重抓目录快照；书架 id 与阅读进度保留
+bookRoutes.put("/:id/source", async (c) => {
+  const uid = c.get("uid");
+  const bookId = Number(c.req.param("id"));
+  const body = await c.req.json<{ sourceId?: number; bookUrl?: string }>().catch(() => ({}) as any);
+  const { sourceId, bookUrl } = body;
+  if (!sourceId || !bookUrl) return c.json({ error: "缺少 sourceId/bookUrl" }, 400);
+  const [book] = await db.select().from(books).where(and(eq(books.id, bookId), eq(books.userId, uid)));
+  if (!book) return c.json({ error: "书籍不存在" }, 404);
+  const eng = await loadEngine(sourceId);
+  const { info, toc } = await snapshotToc(eng, bookUrl);
+  await db.delete(chapters).where(eq(chapters.bookId, bookId));
+  await db.insert(chapters).values(toc.map((ch, i) => ({ bookId, idx: i, title: ch.title, url: ch.url })));
+  await db
+    .update(books)
+    .set({ sourceId, bookUrl, name: info.name || book.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter || book.latestChapter, lastCheckAt: new Date() })
+    .where(eq(books.id, bookId));
+  log.info("source", `《${book.name}》换源 → ${info.name || "?"}（${toc.length} 章）`);
+  return c.json({ chapterCount: toc.length, name: info.name });
+});
+
 bookRoutes.delete("/:id", async (c) => {
   const uid = c.get("uid");
   const bookId = Number(c.req.param("id"));

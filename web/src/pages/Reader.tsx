@@ -145,6 +145,15 @@ export default function Reader() {
   const [speaking, setSpeaking] = useState(false);
   const [toast, setToast] = useState("");
   const [tick, setTick] = useState(0); // 错误重试触发器
+  // —— 换源面板 ——
+  const [showSources, setShowSources] = useState(false);
+  const [bookName, setBookName] = useState("");
+  const [srcList, setSrcList] = useState<{ id: number; name: string; group: string }[]>([]);
+  const [srcTarget, setSrcTarget] = useState<{ id: number; name: string } | null>(null);
+  const [srcCandidates, setSrcCandidates] = useState<{ name: string; author: string; bookUrl: string; latestChapter: string }[] | null>(null);
+  const [srcSearching, setSrcSearching] = useState(false);
+  const [switching, setSwitching] = useState(false);
+  const [srcErr, setSrcErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const preloaded = useRef<Map<number, ContentResp>>(new Map());
@@ -233,6 +242,58 @@ export default function Reader() {
     }, 800);
   };
 
+  // 当前书名（换源搜索关键词）
+  useEffect(() => {
+    api<{ name: string; author: string }>(`/api/books/${bookId}`)
+      .then((b) => setBookName(b.name))
+      .catch(() => {});
+  }, [bookId]);
+
+  const openSources = async () => {
+    setShowSources(true);
+    setSrcTarget(null);
+    setSrcCandidates(null);
+    setSrcErr("");
+    try {
+      setSrcList((await api<any[]>("/api/sources")).filter((s) => s.enabled));
+    } catch {}
+  };
+  // 用书名在选中源上搜索，列出候选
+  const pickSource = async (s: { id: number; name: string }) => {
+    setSrcSearching(true);
+    setSrcErr("");
+    try {
+      const r = await api<{ books: any[] }>(`/api/sources/${s.id}/debug-search`, { method: "POST", body: JSON.stringify({ key: bookName }) });
+      setSrcTarget(s);
+      setSrcCandidates(r.books);
+    } catch (e: any) {
+      setSrcErr(e.message);
+    } finally {
+      setSrcSearching(false);
+    }
+  };
+  // 确认换源：保留进度，重抓目录，超出新目录的章节回第 0 章
+  const switchSource = async (b: { name: string; bookUrl: string }) => {
+    if (!confirm(`换源到「${srcTarget?.name}」的《${b.name}》？\n进度保留，目录将重新抓取。`)) return;
+    setSwitching(true);
+    setSrcErr("");
+    try {
+      await api(`/api/books/${bookId}/source`, { method: "PUT", body: JSON.stringify({ sourceId: srcTarget!.id, bookUrl: b.bookUrl }) });
+      preloaded.current.clear();
+      const cat = await api<{ chapters: { idx: number }[] }>(`/api/books/${bookId}/category`);
+      setChapters(cat.chapters as any);
+      setShowSources(false);
+      setToast(`已换源：${srcTarget?.name}`);
+      const to = idx < cat.chapters.length ? idx : 0;
+      if (to !== idx) nav(`/book/${bookId}/read/${to}`);
+      else setTick((t) => t + 1); // 重载当前章
+    } catch (e: any) {
+      setSrcErr(e.message);
+    } finally {
+      setSwitching(false);
+    }
+  };
+
   const goChapter = (to: number) => {
     if (to < 0 || (chapters.length && to >= chapters.length)) return setToast(chapters.length ? "没有更多章节" : "");
     nav(`/book/${bookId}/read/${to}`);
@@ -302,7 +363,7 @@ export default function Reader() {
         </button>
         <NavItem icon="home" label="首页" onClick={() => nav("/")} />
         <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
-        <NavItem icon="globe" label="书源" onClick={() => nav("/sources")} />
+        <NavItem icon="globe" label="书源" onClick={openSources} />
         <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
       </div>
 
@@ -311,7 +372,7 @@ export default function Reader() {
         <div className="hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2 min-[501px]:py-4">
           <NavItem icon="home" label="首页" onClick={() => nav("/")} />
           <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
-          <NavItem icon="globe" label="书源" onClick={() => nav("/sources")} />
+          <NavItem icon="globe" label="书源" onClick={openSources} />
           <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
         </div>
 
@@ -419,6 +480,65 @@ export default function Reader() {
               ))}
               {!chapters.length && <div className="py-6 text-center text-sm opacity-50">目录加载中…</div>}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* 换源面板：选源 → 书名搜索 → 选候选书 → 换源（进度保留） */}
+      {showSources && (
+        <div className="absolute inset-0 z-40 overflow-y-auto bg-black/60" onClick={() => !switching && setShowSources(false)}>
+          <div className={`mx-auto min-h-full min-[501px]:w-[640px] max-w-full p-4 ${theme.bg} ${theme.text}`} onClick={(e) => e.stopPropagation()}>
+            <div className="sticky top-0 mb-2 flex items-center gap-2 bg-inherit pb-2 pt-1">
+              {srcCandidates && (
+                <button onClick={() => setSrcCandidates(null)} className="px-1 opacity-60 hover:opacity-100" title="返回源列表">
+                  <Icon name="back" size={18} />
+                </button>
+              )}
+              <h3 className="text-sm font-bold">{srcCandidates ? `在「${srcTarget?.name}」搜索` : "换源"}</h3>
+              <span className="truncate text-xs opacity-50">《{bookName || "…"}》</span>
+              <button onClick={() => setShowSources(false)} className="ml-auto px-2 text-lg opacity-60 hover:opacity-100">×</button>
+            </div>
+            {(srcSearching || switching) && <div className="py-1 text-center text-xs opacity-60">{srcSearching ? "正在搜索…" : "正在换源…"}</div>}
+            {srcErr && <div className="mb-2 rounded-lg bg-red-500/15 px-3 py-2 text-xs text-red-400">{srcErr}</div>}
+
+            {/* 第一步：源列表 */}
+            {!srcCandidates && (
+              <div className="divide-y" style={{ borderColor: "rgba(128,128,128,.2)" }}>
+                {srcList.map((s) => (
+                  <button
+                    key={s.id}
+                    onClick={() => pickSource(s)}
+                    disabled={srcSearching || !bookName}
+                    className="block w-full py-2.5 text-left text-sm opacity-80 hover:opacity-100 disabled:opacity-40"
+                  >
+                    {s.name}
+                    {s.group && <span className="ml-2 text-xs opacity-50">{s.group}</span>}
+                  </button>
+                ))}
+                {!srcList.length && !srcSearching && <div className="py-6 text-center text-sm opacity-50">没有启用的书源</div>}
+              </div>
+            )}
+
+            {/* 第二步：搜索结果候选 */}
+            {srcCandidates && (
+              <div className="divide-y" style={{ borderColor: "rgba(128,128,128,.2)" }}>
+                {srcCandidates.map((b, i) => (
+                  <button
+                    key={i}
+                    onClick={() => switchSource(b)}
+                    disabled={switching}
+                    className="block w-full py-2.5 text-left text-sm hover:opacity-100 disabled:opacity-40"
+                  >
+                    <div className={b.name === bookName ? "text-amber-400" : "opacity-85"}>{b.name}</div>
+                    <div className="mt-0.5 truncate text-xs opacity-50">
+                      {b.author || "佚名"}
+                      {b.latestChapter ? ` · 最新：${b.latestChapter}` : ""}
+                    </div>
+                  </button>
+                ))}
+                {!srcCandidates.length && !srcSearching && <div className="py-6 text-center text-sm opacity-50">搜索无结果</div>}
+              </div>
+            )}
           </div>
         </div>
       )}
