@@ -411,6 +411,7 @@ export default function Sources() {
             <li><code>$.data.books[*].name</code> — JsonPath（API 类书源）</li>
           </ul>
           <p className="text-xs text-neutral-400">关键区分：<b>列表规则</b>（bookList/chapterList）选<b>元素</b>，其余字段在列表元素内取<b>值</b>（文本/链接/图片）。</p>
+          <p className="text-xs text-neutral-400">每段判定顺序：class./tag./id./text. 关键字 → 取值器（text/href/src…）→ children → 裸属性名（单词如 data-src 会被当属性！）→ 其余整段当 CSS 选择器（如 <code>main.content</code> = &lt;main class="content"&gt;，<code>.content</code> = class）。</p>
           <p><b className="text-amber-400">暂不支持</b>：&lt;js&gt; 脚本规则、&amp;&amp; 合并、! 排除、目录/正文翻页规则、发现页。</p>
           <p><b className="text-amber-400">参考链接</b></p>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-neutral-400">
