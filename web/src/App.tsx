@@ -3,6 +3,7 @@ import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { api } from "./api";
 import Auth from "./pages/Auth";
 import Shelf from "./pages/Shelf";
+import Sources from "./pages/Sources";
 import { Stub } from "./pages/Stubs";
 
 export function useAuth() {
@@ -38,7 +39,7 @@ export default function App() {
       <Route path="/book/:id" element={<Guard me={me} loading={loading}><Stub title="书籍详情" milestone="M3" /></Guard>} />
       <Route path="/book/:id/category" element={<Guard me={me} loading={loading}><Stub title="目录" milestone="M3" /></Guard>} />
       <Route path="/book/:id/read/:idx" element={<Guard me={me} loading={loading}><Stub title="阅读器" milestone="M3" /></Guard>} />
-      <Route path="/sources" element={<Guard me={me} loading={loading}><Stub title="书源管理" milestone="M2" /></Guard>} />
+      <Route path="/sources" element={<Guard me={me} loading={loading}><Sources /></Guard>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

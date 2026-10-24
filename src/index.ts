@@ -1,14 +1,15 @@
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import { auth, requireAuth, type AuthEnv } from "./auth";
+import { sourceRoutes } from "./routes/sources";
 
 const app = new Hono<AuthEnv>();
 
 app.route("/auth", auth);
 
-// M3 才实现业务接口，先占位保证鉴权链路可测
 const api = new Hono<AuthEnv>().use(requireAuth());
 api.get("/ping", (c) => c.json({ pong: true, uid: c.get("uid") }));
+api.route("/sources", sourceRoutes);
 app.route("/api", api);
 
 // SPA：构建产物托管，未命中路径回退 index.html

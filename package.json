@@ -9,6 +9,7 @@
     "check": "bun run --cwd web vite build && tsc --noEmit"
   },
   "dependencies": {
+    "cheerio": "^1.2.0",
     "drizzle-orm": "^0.44.0",
     "hono": "^4.9.0",
     "iconv-lite": "^0.6.3"
