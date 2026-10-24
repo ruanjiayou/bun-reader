@@ -55,11 +55,18 @@ SQLite 表 + 磁盘文件：
 | `sources` | id, name, enabled, "group", json, last_use_at | **全局共享**，Legado 书源 JSON 原文存库 |
 | `books` | id, user_id, book_url, source_id, name, author, cover, intro, latest_chapter, last_check_at | 书架；唯一约束 (user_id, book_url, source_id) |
 | `chapters` | id, book_id, idx, title, url | 目录快照，加书架时抓取，按需刷新 |
-| `chapter_cache` | content_key(sha1(book_url)), idx, file_path, size, fetched_at | 正文索引；文件在 `data/cache/` |
+| `chapter_cache` | content_key(sha1(book_url)), idx, file_path, size, is_placeholder, fetched_at | 正文索引；文件在 `data/cache/` |
 | `progress` | book_id, chapter_idx, scroll_pos, updated_at | 随 book 按用户隔离 |
 | `settings` | user_id, key, value | 阅读偏好 |
 
-**正文落盘**：`data/cache/{sha1(book_url)}/{idx}.txt`。库只存元数据；同一本书不同用户天然共享缓存；清理即删目录；正文 <50 字视为疑似占位（触发阅读器刷新提示）。LRU 策略控制总量（约 5000 章）。
+**正文落盘**：`data/cache/{sha1(book_url)}/{idx}.txt`。库只存元数据；同一本书不同用户天然共享缓存；清理即删目录；LRU 策略控制总量（约 5000 章）。
+
+**疑似占位章节判定**（双重规则，命中任一即标记）：
+
+1. 正文字数 < 阈值（默认 50 字，可在设置中调整）
+2. 正文命中占位关键词：内置默认词表（"更新中"、"稍后更新"、"章节内容稍后"、"审核中"、"暂未更新"、"购买后查看" 等），词表存 settings 表**可自行增删**
+
+标记为疑似占位的章节：缓存照常落盘，但阅读器刷新按钮加红点提示"本章疑似占位内容，可尝试刷新获取最新"。关键词匹配在抓取管线落盘前执行一次，结果随 chapter_cache 记录（is_placeholder 字段），避免每次阅读重复计算。
 
 ## 5. API 概要
 
@@ -104,7 +111,7 @@ SQLite 表 + 磁盘文件：
 
 - 点击：左 1/3 上一页、右 1/3 下一页、中间呼出菜单
 - 菜单：顶部（返回/书名/设置）、底部（**刷新按钮**、进度滑块、上下章、朗读按钮）
-- 本章正文 <50 字时刷新按钮红点提示"疑似占位内容"
+- 本章命中占位判定（字数阈值或关键词）时刷新按钮红点提示"疑似占位内容"
 - 设置面板：字号/行距/页边距、亮/暗/羊皮纸主题、系统字体可选
 - 翻页：CSS transform 平移滑动（不做仿真卷曲）
 - 预加载：读当前章时后台预取下一章
