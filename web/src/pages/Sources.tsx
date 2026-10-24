@@ -15,7 +15,7 @@ interface DebugEvt {
   msg: string;
 }
 
-// 表单按区块声明，字段 = { path, label, ph 示例提示, rows 行数 }
+// 表单按区块声明，字段 = { path, label, ph 示例提示, rows 行数 }；规则一律 CSS 语法
 const SECTIONS: { title: string; fields: { path: string; label: string; ph?: string; rows?: number }[] }[] = [
   {
     title: "基本",
@@ -104,14 +104,14 @@ const levelColor: Record<DebugEvt["level"], string> = {
 };
 
 export default function Sources() {
-  const [tab, setTab] = useState<"edit" | "debug" | "list" | "help">("list");
   const [rows, setRows] = useState<SourceRow[]>([]);
   const [filter, setFilter] = useState("");
+  const [editId, setEditId] = useState<number | null>(null); // null = 新建未保存
   const [form, setForm] = useState<any>(emptyForm());
   const [jsonText, setJsonText] = useState("");
+  const [rightTab, setRightTab] = useState<"json" | "debug">("json");
   const [msg, setMsg] = useState("");
   const [importUrl, setImportUrl] = useState("");
-  const [debugSrcId, setDebugSrcId] = useState<number | null>(null);
   const [debugKey, setDebugKey] = useState("我的");
   const [logs, setLogs] = useState<DebugEvt[]>([]);
   const [debugging, setDebugging] = useState(false);
@@ -121,35 +121,46 @@ export default function Sources() {
   useEffect(() => {
     load();
   }, []);
+  useEffect(() => {
+    logBox.current?.scrollTo({ top: logBox.current.scrollHeight });
+  }, [logs]);
   const shown = rows.filter(
     (r) => !filter || r.name.includes(filter) || r.group.includes(filter) || r.bookUrl.includes(filter),
   );
 
-  // —— 编辑源 ——
+  // —— 编辑 ——
   const setField = (path: string, v: string) =>
     setForm((f: any) => {
       const next = structuredClone(f);
       setIn(next, path, v);
       return next;
     });
-  const loadForEdit = async (r: SourceRow) => {
-    const row = await api<{ json: string }>(`/api/sources/${r.id}`);
-    setForm(JSON.parse(row.json));
-    setJsonText(JSON.stringify(JSON.parse(row.json), null, 2));
-    setMsg(`已载入「${r.name}」到编辑器`);
-    setTab("edit");
-  };
-  const newSource = () => {
-    setForm(emptyForm());
-    setJsonText("");
-    setMsg("");
+  const selectSource = async (id: number | null) => {
+    setLogs([]);
+    if (id === null) {
+      setEditId(null);
+      setForm(emptyForm());
+      setJsonText("");
+      setMsg("");
+      return;
+    }
+    try {
+      const row = await api<{ id: number; json: string }>(`/api/sources/${id}`);
+      setEditId(id);
+      setForm(JSON.parse(row.json));
+      setJsonText(JSON.stringify(JSON.parse(row.json), null, 2));
+      setMsg("");
+    } catch (e: any) {
+      setMsg(e.message);
+    }
   };
   const formToJson = () => {
     const clean = structuredClone(form);
     for (const k of ["ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent"])
       if (!Object.keys(clean[k]).length) delete clean[k];
     setJsonText(JSON.stringify(clean, null, 2));
-    setMsg("已生成 JSON，可直接保存或复制到阅读 APP");
+    setRightTab("json");
+    setMsg("已生成 JSON");
   };
   const jsonToForm = () => {
     try {
@@ -160,21 +171,35 @@ export default function Sources() {
       setMsg("JSON 解析失败");
     }
   };
-  const saveForm = async () => {
-    formToJson();
+  // 保存当前表单（upsert），返回源 id
+  const saveSource = async (): Promise<number | null> => {
+    const text = jsonText.trim().startsWith("{") ? jsonText : JSON.stringify(form);
     try {
-      const r = await api<{ added: number; updated: number }>("/api/sources/import", {
-        method: "POST",
-        body: JSON.stringify({ text: jsonText || JSON.stringify(form) }),
-      });
-      setMsg(r.updated ? "已更新书源" : "已新增书源");
-      load();
+      await api("/api/sources/import", { method: "POST", body: JSON.stringify({ text }) });
+      await load();
+      const url = JSON.parse(text).bookSourceUrl;
+      const row = rows.find((r) => r.bookUrl === url) ?? (await api<SourceRow[]>("/api/sources")).find((r) => r.bookUrl === url);
+      if (row) setEditId(row.id);
+      setMsg("已保存");
+      return row?.id ?? null;
     } catch (e: any) {
       setMsg(e.message);
+      return null;
     }
   };
-
-  // —— 源列表 ——
+  const del = async () => {
+    if (editId === null) return setMsg("当前是未保存的新源");
+    if (!confirm(`删除书源「${form.bookSourceName}」？`)) return;
+    await api(`/api/sources/${editId}`, { method: "DELETE" });
+    await selectSource(null);
+    load();
+  };
+  const toggleEnabled = async () => {
+    if (editId === null) return setMsg("先保存后再启停");
+    await api(`/api/sources/${editId}`, { method: "PUT", body: JSON.stringify({ enabled: !form.enabled }) });
+    setForm((f: any) => ({ ...f, enabled: !f.enabled }));
+    load();
+  };
   const doImportUrl = async () => {
     setMsg("");
     try {
@@ -189,15 +214,6 @@ export default function Sources() {
       setMsg(e.message);
     }
   };
-  const toggle = async (r: SourceRow) => {
-    await api(`/api/sources/${r.id}`, { method: "PUT", body: JSON.stringify({ enabled: !r.enabled }) });
-    load();
-  };
-  const del = async (r: SourceRow) => {
-    if (!confirm(`删除书源「${r.name}」？`)) return;
-    await api(`/api/sources/${r.id}`, { method: "DELETE" });
-    load();
-  };
   const doExport = async () => {
     const data = await api<any[]>("/api/sources/export");
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
@@ -208,13 +224,18 @@ export default function Sources() {
     URL.revokeObjectURL(a.href);
   };
 
-  // —— 调试源 ——
+  // —— 调试（保存后跑，保证调的是最新规则）——
   const runDebug = async () => {
-    if (!debugSrcId) return setMsg("先选择要调试的书源");
     setLogs([]);
     setDebugging(true);
+    setRightTab("debug");
     try {
-      const res = await fetch(`/api/sources/${debugSrcId}/debug`, {
+      let id = editId;
+      if (id === null) {
+        id = await saveSource();
+        if (id === null) throw new Error("保存失败，无法调试");
+      }
+      const res = await fetch(`/api/sources/${id}/debug`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ key: debugKey }),
@@ -239,196 +260,142 @@ export default function Sources() {
       setDebugging(false);
     }
   };
-  useEffect(() => {
-    logBox.current?.scrollTo({ top: logBox.current.scrollHeight });
-  }, [logs]);
 
-  const tabs: [typeof tab, string][] = [
-    ["edit", "编辑源"],
-    ["debug", "调试源"],
-    ["list", `源列表（${rows.length}）`],
-    ["help", "帮助"],
-  ];
+  const cur = rows.find((r) => r.id === editId);
+  const btn = "w-full rounded-lg bg-neutral-600 px-3 py-1.5 text-sm hover:bg-neutral-500";
+  const btnPrimary = "w-full rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-neutral-900 hover:bg-amber-400";
 
   return (
-    <div className="mx-auto min-h-dvh max-w-6xl p-4">
-      <header className="mb-3 flex items-center justify-between">
+    <div className="mx-auto min-h-dvh max-w-7xl p-4">
+      <header className="mb-3 flex flex-wrap items-center gap-2">
         <h1 className="text-lg font-bold">书源</h1>
-        <Link to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
+        <input
+          className="w-40 rounded-lg bg-neutral-800 px-3 py-1.5 text-sm"
+          placeholder="筛选（名称/URL/分组）"
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+        />
+        <input
+          className="w-64 rounded-lg bg-neutral-800 px-3 py-1.5 text-sm"
+          placeholder="书源 JSON 地址批量导入"
+          value={importUrl}
+          onChange={(e) => setImportUrl(e.target.value)}
+        />
+        <button onClick={doImportUrl} className="rounded-lg bg-neutral-700 px-3 py-1.5 text-sm hover:bg-neutral-600">导入</button>
+        <button onClick={doExport} className="rounded-lg bg-neutral-700 px-3 py-1.5 text-sm hover:bg-neutral-600">导出</button>
+        <span className="text-xs text-neutral-500">共 {rows.length} 个源</span>
+        <Link to="/" className="ml-auto text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
       </header>
       {msg && <div className="mb-3 rounded-lg bg-neutral-800 px-3 py-2 text-sm text-amber-400">{msg}</div>}
 
-      <nav className="mb-4 flex gap-1 border-b border-neutral-700">
-        {tabs.map(([id, label]) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            className={`px-4 py-2 text-sm ${tab === id ? "border-b-2 border-amber-500 font-medium text-amber-400" : "text-neutral-400 hover:text-neutral-200"}`}
+      <div className="grid gap-4 md:grid-cols-[minmax(0,5fr)_9rem_minmax(0,6fr)]">
+        {/* 左：源下拉 + 编辑表单 */}
+        <div className="space-y-3">
+          <select
+            className="w-full rounded-lg bg-neutral-800 px-3 py-2 text-sm"
+            value={editId ?? ""}
+            onChange={(e) => selectSource(e.target.value === "" ? null : Number(e.target.value))}
           >
-            {label}
-          </button>
-        ))}
-      </nav>
-
-      {/* 编辑源 */}
-      {tab === "edit" && (
-        <div className="grid gap-4 md:grid-cols-2">
-          <div className="space-y-4">
-            {SECTIONS.map((sec) => (
-              <fieldset key={sec.title} className="rounded-xl bg-neutral-800 p-4">
-                <legend className="px-1 text-sm font-bold text-amber-400">{sec.title}</legend>
-                <div className="space-y-2">
-                  {sec.fields.map(({ path, label, ph, rows = 1 }) => (
-                    <label key={path} className="block">
-                      <span className="mb-0.5 block text-xs text-neutral-400">{label}</span>
-                      {rows > 1 ? (
-                        <textarea
-                          rows={rows}
-                          className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500"
-                          placeholder={ph}
-                          value={getIn(form, path) ?? ""}
-                          onChange={(e) => setField(path, e.target.value)}
-                        />
-                      ) : (
-                        <input
-                          className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500"
-                          placeholder={ph}
-                          value={getIn(form, path) ?? ""}
-                          onChange={(e) => setField(path, e.target.value)}
-                        />
-                      )}
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
+            <option value="">＋ 新建源</option>
+            {shown.map((r) => (
+              <option key={r.id} value={r.id}>
+                {r.name}（{r.enabled ? "启用" : "停用"}）
+              </option>
             ))}
+          </select>
+          {SECTIONS.map((sec) => (
+            <fieldset key={sec.title} className="rounded-xl bg-neutral-800 p-4">
+              <legend className="px-1 text-sm font-bold text-amber-400">{sec.title}</legend>
+              <div className="space-y-2">
+                {sec.fields.map(({ path, label, ph, rows: rowsN = 1 }) => (
+                  <label key={path} className="block">
+                    <span className="mb-0.5 block text-xs text-neutral-400">{label}</span>
+                    {rowsN > 1 ? (
+                      <textarea
+                        rows={rowsN}
+                        className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500"
+                        placeholder={ph}
+                        value={getIn(form, path) ?? ""}
+                        onChange={(e) => setField(path, e.target.value)}
+                      />
+                    ) : (
+                      <input
+                        className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500"
+                        placeholder={ph}
+                        value={getIn(form, path) ?? ""}
+                        onChange={(e) => setField(path, e.target.value)}
+                      />
+                    )}
+                  </label>
+                ))}
+              </div>
+            </fieldset>
+          ))}
+        </div>
+
+        {/* 中：操作列 */}
+        <div className="flex flex-row flex-wrap gap-2 md:sticky md:top-4 md:flex-col">
+          <button onClick={saveSource} className={btnPrimary}>保存源</button>
+          <button onClick={runDebug} disabled={debugging} className={btn}>
+            {debugging ? "调试中…" : "⇏ 保存并调试"}
+          </button>
+          <button onClick={formToJson} className={btn}>表单→JSON</button>
+          <button onClick={jsonToForm} className={btn}>JSON→表单</button>
+          <button onClick={() => selectSource(null)} className={btn}>✗ 清空新建</button>
+          <label className="flex items-center gap-2 px-1 text-sm text-neutral-400">
+            <input type="checkbox" checked={!!form.enabled} onChange={toggleEnabled} className="accent-amber-500" disabled={editId === null} />
+            启用搜索
+          </label>
+          <button onClick={del} className="w-full rounded-lg px-3 py-1.5 text-sm text-red-400 hover:bg-red-950">删除此源</button>
+        </div>
+
+        {/* 右：JSON / 调试日志 */}
+        <div className="flex flex-col rounded-xl bg-neutral-800 p-3 md:sticky md:top-4 md:max-h-[calc(100dvh-2rem)]">
+          <div className="mb-2 flex gap-1">
+            {(["json", "debug"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setRightTab(t)}
+                className={`rounded-lg px-3 py-1.5 text-sm ${rightTab === t ? "bg-amber-500 font-medium text-neutral-900" : "bg-neutral-700 text-neutral-300 hover:bg-neutral-600"}`}
+              >
+                {t === "json" ? "JSON" : "调试"}
+              </button>
+            ))}
+            {rightTab === "debug" && (
+              <input
+                className="ml-auto w-40 rounded-lg bg-neutral-700 px-2 py-1.5 text-sm"
+                placeholder="搜索关键词"
+                value={debugKey}
+                onChange={(e) => setDebugKey(e.target.value)}
+              />
+            )}
           </div>
-          <div className="flex h-fit flex-col rounded-xl bg-neutral-800 p-4 md:sticky md:top-4">
-            <div className="mb-2 flex flex-wrap gap-2">
-              <button onClick={formToJson} className="rounded-lg bg-neutral-600 px-3 py-1.5 text-sm">表单 → JSON</button>
-              <button onClick={jsonToForm} className="rounded-lg bg-neutral-600 px-3 py-1.5 text-sm">JSON → 表单</button>
-              <button onClick={saveForm} className="rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-neutral-900">保存源</button>
-              <button onClick={newSource} className="rounded-lg bg-neutral-700 px-3 py-1.5 text-sm">✗ 清空新建</button>
-            </div>
+          {rightTab === "json" ? (
             <textarea
-              className="h-96 w-full rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5"
-              placeholder="序列化的书源 JSON，可直接复制到 Legado 导入"
+              className="h-96 w-full flex-1 rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5 md:h-auto"
+              placeholder="表单→JSON 生成；或粘贴 JSON 后 JSON→表单"
               value={jsonText}
               onChange={(e) => setJsonText(e.target.value)}
             />
-          </div>
-        </div>
-      )}
-
-      {/* 调试源 */}
-      {tab === "debug" && (
-        <div className="space-y-3">
-          <div className="flex flex-wrap gap-2">
-            <select
-              className="rounded-lg bg-neutral-800 px-3 py-1.5 text-sm"
-              value={debugSrcId ?? ""}
-              onChange={(e) => setDebugSrcId(Number(e.target.value) || null)}
+          ) : (
+            <div
+              ref={logBox}
+              className="h-96 w-full flex-1 overflow-y-auto rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5 md:h-auto"
             >
-              <option value="">选择书源…</option>
-              {rows.map((r) => (
-                <option key={r.id} value={r.id}>{r.name}</option>
-              ))}
-            </select>
-            <input
-              className="flex-1 rounded-lg bg-neutral-800 px-3 py-1.5 text-sm"
-              placeholder="搜索关键词，默认「我的」"
-              value={debugKey}
-              onChange={(e) => setDebugKey(e.target.value)}
-            />
-            <button onClick={runDebug} disabled={debugging}
-              className="rounded-lg bg-amber-500 px-4 py-1.5 text-sm font-medium text-neutral-900 disabled:opacity-50">
-              {debugging ? "调试中…" : "⇏ 调试"}
-            </button>
-          </div>
-          <div ref={logBox} className="h-[28rem] overflow-y-auto rounded-xl bg-neutral-900 p-3 font-mono text-xs leading-5">
-            {logs.map((l, i) => (
-              <div key={i} className={levelColor[l.level]}>
-                <span className="text-neutral-600">[{l.step}]</span> {l.msg}
-              </div>
-            ))}
-            {!logs.length && <div className="text-neutral-600">选源 → 输关键词 → 点调试，流程：搜索 → 详情 → 目录 → 正文</div>}
-          </div>
-        </div>
-      )}
-
-      {/* 源列表 */}
-      {tab === "list" && (
-        <div className="space-y-3">
-          <div className="flex flex-wrap gap-2">
-            <input
-              className="flex-1 rounded-lg bg-neutral-800 px-3 py-1.5 text-sm"
-              placeholder="输入筛选关键词（源名称、源 URL 或源分组）"
-              value={filter}
-              onChange={(e) => setFilter(e.target.value)}
-            />
-            <input
-              className="w-72 rounded-lg bg-neutral-800 px-3 py-1.5 text-sm"
-              placeholder="或输入书源 JSON 地址批量导入"
-              value={importUrl}
-              onChange={(e) => setImportUrl(e.target.value)}
-            />
-            <button onClick={doImportUrl} className="rounded-lg bg-neutral-600 px-3 py-1.5 text-sm">导入</button>
-            <button onClick={doExport} className="rounded-lg bg-neutral-600 px-3 py-1.5 text-sm">导出</button>
-          </div>
-          <ul className="space-y-1">
-            {shown.map((r) => (
-              <li key={r.id} className="flex items-center gap-2 rounded-lg bg-neutral-800 px-3 py-2 text-sm">
-                <input type="checkbox" checked={r.enabled} onChange={() => toggle(r)} className="accent-amber-500" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate font-medium">{r.name}</div>
-                  <div className="truncate text-xs text-neutral-500">{r.group} · {r.bookUrl}</div>
+              {logs.map((l, i) => (
+                <div key={i} className={levelColor[l.level]}>
+                  <span className="text-neutral-600">[{l.step}]</span> {l.msg}
                 </div>
-                <button onClick={() => loadForEdit(r)} className="rounded bg-neutral-600 px-2 py-0.5 text-xs hover:bg-neutral-500">编辑</button>
-                <button onClick={() => { setDebugSrcId(r.id); setTab("debug"); }} className="rounded bg-neutral-600 px-2 py-0.5 text-xs hover:bg-neutral-500">调试</button>
-                <button onClick={() => del(r)} className="text-xs text-red-400 hover:text-red-300">删除</button>
-              </li>
-            ))}
-            {!shown.length && <li className="py-8 text-center text-neutral-500">暂无书源</li>}
-          </ul>
+              ))}
+              {!logs.length && (
+                <div className="text-neutral-600">
+                  {cur ? `点「保存并调试」运行 ${cur.name}` : "新建源保存后可调试"} · 流程：搜索 → 详情 → 目录 → 正文
+                </div>
+              )}
+            </div>
+          )}
         </div>
-      )}
-
-      {/* 帮助 */}
-      {tab === "help" && (
-        <div className="space-y-4 rounded-xl bg-neutral-800 p-4 text-sm leading-6 text-neutral-300">
-          <p><b className="text-amber-400">选择器语法（本项目原生 = CSS）</b></p>
-          <p className="text-xs">
-            <code>#xxx</code> id · <code>.xxx</code> 类名 · <code>xxx</code> 标签名，可组合：<code>div.intro</code>、<code>#main.content</code>；层级用空格或 <code>&gt;</code>：<code>#all dd a</code>、<code>.list &gt; li</code>。
-            段尾 <code>.N</code> 取索引：<code>a.0</code> 第 1 个、<code>a.-1</code> 最后一个。
-          </p>
-          <p className="text-xs">
-            取值后缀：<code>@text</code> 文本 · <code>@textNodes</code> 多行文本（正文用）· <code>@href</code> 链接（自动补全绝对地址）· <code>@src</code> 图片 · <code>@任意属性</code>（如 <code>@data-src</code>）。
-            注意：<code>@//text/</code> 是 XPath 写法，不支持。
-          </p>
-          <ul className="list-disc space-y-1 pl-5">
-            <li><code>.bookname a@text</code> — 类名 bookname 下的 a，取文本</li>
-            <li><code>dd</code> / <code>a</code> — 裸标签名直接写；<code>dd@text</code>、<code>a@href</code></li>
-            <li><code>#content@textNodes</code> — id 取正文多行文本</li>
-            <li><code>.intro@text##广告.*</code> — ## 正则后处理（净化）</li>
-            <li><code>规则A||规则B</code> — A 无结果时用 B；<code>{"{{bookUrl}}##正则##替换"}</code> — URL 改写（详情→目录固定格式跳转）</li>
-            <li><code>$.data.books[*].name</code> — JsonPath（API 类书源）</li>
-          </ul>
-          <p className="text-xs text-neutral-400">关键区分：<b>列表规则</b>（bookList/chapterList）选<b>元素</b>，其余字段在列表元素内取<b>值</b>（文本/链接/图片）。</p>
-          <p className="text-xs text-neutral-400">
-            <b className="text-amber-400">导入兼容</b>：从 Legado 导入的源，其关键字规则（<code>class.x</code> / <code>tag.x</code> / <code>id.x</code>）会自动转换成 CSS 语法再入库；
-            <code>text.x</code>（按文字找元素）无 CSS 等价，不支持。手工编辑请直接写 CSS 语法，不要再写关键字。
-          </p>
-          <p><b className="text-amber-400">暂不支持</b>：&lt;js&gt; 脚本规则、&amp;&amp; 合并、! 排除、目录/正文翻页规则、发现页。</p>
-          <p><b className="text-amber-400">参考链接</b></p>
-          <div className="flex flex-wrap gap-x-4 gap-y-1 text-neutral-400">
-            <a className="hover:text-amber-400" href="https://alanskycn.gitee.io/teachme" target="_blank">源制作教程</a>
-            <a className="hover:text-amber-400" href="https://zhuanlan.zhihu.com/p/29436838" target="_blank">XPath 基础</a>
-            <a className="hover:text-amber-400" href="https://www.w3cschool.cn/regex_rmjc" target="_blank">正则表达式教程</a>
-            <a className="hover:text-amber-400" href="https://regexr.com" target="_blank">正则在线验证</a>
-          </div>
-          <p className="text-xs text-neutral-500">Java 正则前缀：(?s) 跨行 · (?m) 逐行 · (?i) 忽略大小写</p>
-        </div>
-      )}
+      </div>
     </div>
   );
 }
