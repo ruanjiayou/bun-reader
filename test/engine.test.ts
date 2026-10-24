@@ -213,4 +213,16 @@ describe("书源引擎全链路", () => {
     expect(applyRule(nodes, "span@data-src")[0]).toMatchObject({ kind: "json", v: "abc" }); // data-src 是属性
     expect(applyRule(nodes, "a@href")[0]).toMatchObject({ kind: "json" }); // href 走取值器
   });
+
+  test("带数字类名不误拆为索引：.item-2 是类名，a.2 才是索引", () => {
+    const nodes = htmlNodes(`<div><b class="item-2">甲</b><i>1</i><i>2</i><i>3</i></div>`);
+    expect(nodeText(applyRule(nodes, ".item-2@text")[0])).toBe("甲");
+    expect(nodeText(applyRule(nodes, "i.2@text")[0])).toBe("3"); // 索引语义不变
+  });
+
+  test("nextTocUrl 参与导入转换", () => {
+    expect(legadoToOurs("class.pager@tag.a.0@href")).toBe(".pager@a.0@href");
+    const out = legadoToOurs("tag.a.-1@href");
+    expect(out).toBe("a.-1@href");
+  });
 });

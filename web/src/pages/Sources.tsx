@@ -137,6 +137,12 @@ export default function Sources() {
   useEffect(() => {
     logBox.current?.scrollTo({ top: logBox.current.scrollHeight });
   }, [logs]);
+  // 提示信息 4 秒自动消失
+  useEffect(() => {
+    if (!msg) return;
+    const t = setTimeout(() => setMsg(""), 4000);
+    return () => clearTimeout(t);
+  }, [msg]);
   const shown = rows.filter(
     (r) => !filter || r.name.includes(filter) || r.group.includes(filter) || r.bookUrl.includes(filter),
   );
@@ -177,20 +183,13 @@ export default function Sources() {
       setMsg(e.message);
     }
   };
-  const formToJson = () => {
-    setJsonText(formJson(form));
-    setRightTab("json");
-    setMsg("已生成 JSON");
-  };
-  // JSON → 表单（失焦自动同步 + 按钮共用），非法 JSON 不覆盖表单
-  const syncJsonToForm = (silent: boolean): boolean => {
+  // JSON → 表单（失焦时静默同步），非法 JSON 不覆盖表单
+  const syncJsonToForm = (): boolean => {
     try {
       const parsed = JSON.parse(jsonText);
       setForm({ ...emptyForm(), ...parsed });
-      if (!silent) setMsg("已解析 JSON 到表单");
       return true;
     } catch {
-      if (!silent) setMsg("JSON 解析失败，未同步");
       return false;
     }
   };
@@ -326,11 +325,15 @@ export default function Sources() {
         <span className="text-xs text-neutral-500">共 {rows.length} 个源</span>
         <Link to="/" className="ml-auto text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
       </header>
-      {msg && <div className="mb-3 rounded-lg bg-neutral-800 px-3 py-2 text-sm text-amber-400">{msg}</div>}
+      {msg && (
+        <div className="fixed left-1/2 top-3 z-50 -translate-x-1/2 rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 shadow-lg">
+          {msg}
+        </div>
+      )}
 
       <div className="grid gap-4 md:grid-cols-[minmax(0,5fr)_9rem_minmax(0,6fr)]">
-        {/* 左：源下拉 + 编辑表单 */}
-        <div className="space-y-3">
+        {/* 左：源下拉 + 编辑表单（吸附，独立滚动） */}
+        <div className="space-y-3 md:sticky md:top-4 md:max-h-[calc(100dvh-2rem)] md:overflow-y-auto md:pr-1">
           <select
             className="w-full rounded-lg bg-neutral-800 px-3 py-2 text-sm"
             value={editId ?? ""}
@@ -384,8 +387,6 @@ export default function Sources() {
           >
             {dirty ? "● 保存源" : "保存源"}
           </button>
-          <button onClick={formToJson} className={btn}>表单→JSON</button>
-          <button onClick={() => syncJsonToForm(false)} className={btn}>表单←JSON</button>
           <button onClick={() => selectSource(null)} className={btn}>✗ 清空新建</button>
           <label className="flex items-center gap-2 px-1 text-sm text-neutral-400">
             <input type="checkbox" checked={!!form.enabled} onChange={toggleEnabled} className="accent-amber-500" disabled={editId === null} />
@@ -416,7 +417,7 @@ export default function Sources() {
                 setJsonText(e.target.value);
                 setDirty(true);
               }}
-              onBlur={() => syncJsonToForm(true)}
+              onBlur={() => syncJsonToForm()}
             />
           ) : (
             <div className="flex flex-1 flex-col gap-2 overflow-hidden">

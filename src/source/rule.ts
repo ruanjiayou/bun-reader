@@ -37,6 +37,8 @@ const HTML_TAGS = new Set(
 );
 // 段尾整数索引标记（如 a.0 / a.-1）：截断后按结果集索引取
 const IDX = /^(.+)\.(-?\d+)$/;
+// 纯标签/类/id（可含连字符和数字，如 h1、.item-2、#grid-12）→ 不拆索引，避免误伤合法类名
+const PLAIN_SEL = /^[.#]?[A-Za-z][A-Za-z0-9_-]*$/;
 
 function isIdent(s: string) {
   return /^[A-Za-z0-9_-]+$/.test(s);
@@ -71,7 +73,7 @@ export function legadoToOurs(rule: string): string {
     .join("||");
 }
 
-const RULE_FIELDS = new Set(["bookList", "name", "author", "lastChapter", "intro", "coverUrl", "bookUrl", "tocUrl", "chapterList", "chapterName", "chapterUrl", "content"]);
+const RULE_FIELDS = new Set(["bookList", "name", "author", "lastChapter", "intro", "coverUrl", "bookUrl", "tocUrl", "chapterList", "chapterName", "chapterUrl", "nextTocUrl", "content"]);
 
 // 书源 JSON 规则字段统一转换为本项目语法（幂等，导入与运行前都调用）
 export function normalizeSource(src: any): any {
@@ -157,10 +159,12 @@ function stepHtml(n: Extract<Node, { kind: "html" }>, raw: string, base: string,
   }
   let sel = raw;
   let idx: number | undefined;
-  const m = raw.match(IDX);
-  if (m) {
-    sel = m[1];
-    idx = parseInt(m[2]);
+  if (!PLAIN_SEL.test(raw)) {
+    const m = raw.match(IDX);
+    if (m) {
+      sel = m[1];
+      idx = parseInt(m[2]);
+    }
   }
   let found: AnyNode[];
   if (isIdent(sel)) {
