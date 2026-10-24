@@ -143,6 +143,7 @@ describe("书源引擎全链路", () => {
       ruleBookInfo: {
         tocUrl: "id.allchapter@tag.a.-1@href||{{bookUrl}}##/book/(\\d+)##/chapter/$1.html",
       },
+      ruleToc: { chapterList: "class.chapterlist@tag.li", chapterName: "tag.a@text", chapterUrl: "tag.a@href" },
     };
     const info = await getBookInfo(src2, `${base}/book/2`);
     expect(info.tocUrl).toBe(`${base}/chapter/2.html`);
