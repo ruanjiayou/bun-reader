@@ -4,11 +4,13 @@
 
 规则 = `[CSS选择器][.链式调用...]`，**去掉 @ 分节器**。
 
-- 选择器：cheerio 支持的 CSS —— `#id` `.class` `a.content` `div.main div.content`，选第 N 个用 `:eq(2)`
+- 选择器：cheerio 支持的 CSS —— `'#id'` `'.class'` `'a.content'` `'div.main div.content'`，选第 N 个用 `:eq(2)`（cheerio 原生伪类，直接透传）
+- **选择器建议用引号包裹**：`'h1'.text()`、`'.bookname a'.attr('href')`、`'.bb a:eq(1)'.attr('href')`——引号只是把选择器括起来，引擎解析时剥掉；裸写 `h1.text()` 同样有效
 - 取值：`.xxx(...)` 函数调用风格，永远在规则末尾：
-  - `'h1'.text()` → 引擎处理为 `$('h1').text()`（规则写作 `h1.text()`）
-  - 章节地址：`a.attr('href')`，或列表项已是元素时直接 `.attr('href')`（≡ `$(node).attr('href')`）
+  - `'h1'.text()` → 引擎处理为 `$('h1').text()`
+  - 章节地址：`'a'.attr('href')`，或列表项已是元素时直接 `.attr('href')`（≡ `$(node).attr('href')`）
   - 深层取值：`.find('a').attr('href')`（≡ `$(node).find('a').attr('href')`）
+- `:eq(N)` 语义：从根查询的全局上下文里 = 整个结果集的第 N 个（≡ `.eq(N)`，`.eq(n)` 方法保留）
 - 链式调用清单：取值 `text/html/all/ownText/textNodes/attr('x')`；导航 `find('sel')/children/eq(n)/first/last/parent/next/prev`
 - 保留：`||` 回退、`##正则##替换##变换`、`{{bookUrl}}/{{baseUrl}}` 模板、JsonPath（$ 开头）、目录 `{page}` 模板
 

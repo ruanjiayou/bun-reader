@@ -3,11 +3,14 @@ import type { CheerioAPI } from "cheerio";
 import type { AnyNode } from "domhandler";
 
 // —— 规则语法 v2（链式调用版）——
-// 规则 = [CSS选择器][.链式调用...] + 可选 ##正则##替换##变换 + 可选 || 回退
-// 选择器：cheerio 支持的 CSS —— #id / .class / a.content / div.main div.content / :eq(2)
+// 规则 = ['CSS选择器'][.链式调用...] + 可选 ##正则##替换##变换 + 可选 || 回退
+// 选择器：cheerio 支持的 CSS —— '#id' / '.class' / 'a.content' / 'div.main div.content' / ':eq(N)'
+//   选择器建议用引号包裹（'h1'.text()），引擎也接受裸写 h1.text()
+//   :eq(N) 是 cheerio 原生伪类，直接透传；从根查询的全局上下文里语义=整个结果集的第 N 个（≡ .eq(N)）
 // 链式调用（永远在末尾，.xxx(...) 风格）：
 //   取值：.text() .ownText() .textNodes() .html() .all() .attr('name')
 //   导航：.find('sel') .children() .eq(n) .first() .last() .parent() .next() .prev()
+//   .eq(n)/.first()/.last() 语义=整个结果集的全局索引（与 :eq 的逐容器语义不同）
 // 无选择器 = 相对当前节点：章节列表项上直接 .attr('href') ≡ $(node).attr('href')，
 //            .find('a').attr('href') ≡ $(node).find('a').attr('href')
 // 保留：|| 回退、##正则##替换##变换（urlDecode/base64Decode）、{{bookUrl}}/{{baseUrl}} 模板、
@@ -55,8 +58,9 @@ const IDX = /^(.+)\.(-?\d+)$/;
 // 纯标签/类/id（可含连字符和数字，如 h1、.item-2、#grid-12）→ 不拆索引，避免误伤合法类名
 const PLAIN_SEL = /^[.#]?[A-Za-z][A-Za-z0-9_-]*$/;
 const CALL_NAMES = "text|textNodes|ownText|html|all|attr|find|children|eq|first|last|parent|next|prev";
-// 规则末尾已是 .xxx(...) 方法调用 → 判定为 v2 语法，转换器原样返回（幂等）
+// 规则末尾已是 .xxx(...) 方法调用，或选择器整体引号包裹 → 判定为 v2 语法，转换器原样返回（幂等）
 const ALREADY_V2 = new RegExp(`\\.(${CALL_NAMES})\\((?:[^()']|'[^']*'|"[^"]*")*\\)$`);
+const FULLY_QUOTED = /^'[^']*'$|^"[^"]*"$/;
 
 function isIdent(s: string) {
   return /^[A-Za-z0-9_-]+$/.test(s);
@@ -133,7 +137,7 @@ function convertSegToStep(seg: string, first: boolean, sel: string, calls: strin
 // 主段转换：## 之后的段不参与；已是 v2 的原样返回
 function convertMain(main: string): string {
   main = main.trim();
-  if (!main || main.startsWith("$") || main.startsWith("{{") || isJsRule(main) || ALREADY_V2.test(main)) return main;
+  if (!main || main.startsWith("$") || main.startsWith("{{") || isJsRule(main) || ALREADY_V2.test(main) || FULLY_QUOTED.test(main)) return main;
   const segs = main.split("@").map((s) => s.trim()).filter(Boolean);
   if (!segs.length) return main;
   let sel = "";
@@ -205,7 +209,8 @@ function safeFind($: CheerioAPI, el: AnyNode, sel: string): AnyNode[] {
 
 type Call = { name: string; arg: string };
 
-// 解析 [选择器][.调用...]：从末尾反复剥 .name(args)；:eq(N) 归一为 .eq(N) 调用（不依赖 cheerio 伪类支持）
+// 解析 ['选择器'][.调用...]：从末尾反复剥 .name(args)；选择器若整体引号包裹则去引号。
+// :eq(N) 不做转换——cheerio 原生支持（语义=每个匹配上下文各自的第 N 个），直接透传给 find
 function parseChain(main: string): { sel: string; calls: Call[] } {
   const calls: Call[] = [];
   let s = main.trim();
@@ -215,11 +220,9 @@ function parseChain(main: string): { sel: string; calls: Call[] } {
     calls.unshift({ name: m[1], arg: m[2].trim() });
     s = s.slice(0, m.index).trim();
   }
-  const em = s.match(/:eq\((-?\d+)\)$/);
-  if (em) {
-    s = s.slice(0, em.index);
-    calls.unshift({ name: "eq", arg: em[1] });
-  }
+  // 选择器引号包裹：'h1'.text() / ".intro a".attr('href') —— 引号不属于选择器本身
+  const qm = s.match(/^'([^']*)'$|^"([^"]*)"$/);
+  if (qm) s = qm[1] ?? qm[2];
   return { sel: s, calls };
 }
 

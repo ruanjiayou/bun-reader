@@ -7,20 +7,20 @@
   "searchUrl": "",
   "ruleSearch": {},
   "ruleBookInfo": {
-    "name": "h1.text()",
-    "author": ".novel_info_title a.text()",
-    "intro": ".intro.text()",
-    "coverUrl": ".novel_info_main img.attr('src')",
-    "lastChapter": ".to100 a.text()",
+    "name": "'h1'.text()",
+    "author": "'.novel_info_title a'.text()",
+    "intro": "'.intro'.text()",
+    "coverUrl": "'.novel_info_main img'.attr('src')",
+    "lastChapter": "'.to100 a'.text()",
     "tocUrl": "{{bookUrl}}##\\.html$##-{page}.html"
   },
   "ruleToc": {
-    "chapterList": "#ul_all_chapters li a",
+    "chapterList": "'#ul_all_chapters li a'",
     "chapterName": ".text()",
     "chapterUrl": ".attr('href')"
   },
   "ruleContent": {
-    "content": "#article.text()"
+    "content": "'#article'.text()"
   },
   "_notes": "规则为 v2 链式调用语法。搜索依赖 rrssk.com 网关的 JS 加密 token（_t/_ts/_s），纯 CSS 规则无法实现，故 searchUrl 留空；加书走「调书籍」粘贴详情页 URL（如 https://www.yxshufang.com/book/51RA9.html）→ 调试成功 → 加入书架。目录翻页是加密 AJAX（index.php?action=loadChapterPage），无法解析链接，故用 {page} 模板翻页：tocUrl 规则把详情页地址改写成 /book/51RA9-{page}.html 模板，引擎按页码 1,2,3… 展开直到无新章节。rrssk 网关搜索结果页的 onclick 跳转（window.open('?action=go&t=<base64>&s=..&e=..')）可用规则 a.attr('onclick')##.*?t=([^&]*).*##$1##urlDecode,base64Decode 解出真实书籍地址。站点 WAF 偶发验证码，抓取失败重试即可。"
 }

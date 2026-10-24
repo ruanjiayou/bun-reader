@@ -245,13 +245,32 @@ describe("v2 链式调用语法求值", () => {
     expect(nodeText(applyRule(li, ".find('a').attr('title')")[0])).toBe("第1章");
   });
 
-  test("选择器 :eq(N) 与链式 .eq(N)（含负数）", () => {
+  test("选择器 :eq(N) 原生透传，与链式 .eq(N) 同为全局索引（含负数）", () => {
     const nodes = htmlNodes(`<div><i>1</i><i>2</i><i>3</i></div>`);
     expect(nodeText(applyRule(nodes, "i:eq(2).text()")[0])).toBe("3");
     expect(nodeText(applyRule(nodes, "i.eq(2).text()")[0])).toBe("3");
     expect(nodeText(applyRule(nodes, "i.eq(-1).text()")[0])).toBe("3");
     expect(nodeText(applyRule(nodes, "i.first().text()")[0])).toBe("1");
     expect(nodeText(applyRule(nodes, "i.last().text()")[0])).toBe("3");
+    const two = htmlNodes(
+      `<div><div class="bb"><a>1</a><a>2</a><a>3</a></div><div class="bb"><a>4</a><a>5</a><a>6</a></div></div>`,
+    );
+    // 根节点一次 find 的全局上下文里，:eq(N) 与 .eq(N) 都是整个结果集的第 N 条
+    expect(applyRule(two, ".bb a:eq(2)").map(nodeText).join(",")).toBe("3");
+    expect(applyRule(two, ".bb a.eq(2)").map(nodeText).join(",")).toBe("3");
+  });
+
+  test("选择器可用引号包裹：'h1'.text() / '.bb a:eq(1)'.attr('href')", () => {
+    const nodes = htmlNodes(`<div><h1>书名</h1></div>`);
+    expect(nodeText(applyRule(nodes, "'h1'.text()")[0])).toBe("书名");
+    expect(nodeText(applyRule(nodes, `"h1".text()`)[0])).toBe("书名");
+    expect(nodeText(applyRule(nodes, "'div h1'.text()")[0])).toBe("书名");
+    const two = htmlNodes(
+      `<div><div class="bb"><a href="/1">1</a></div><div class="bb"><a href="/2">2</a></div></div>`,
+    );
+    expect(nodeText(applyRule(two, "'.bb a:eq(1)'.attr('href')")[0])).toBe("/2");
+    // 引号选择器规则经 normalizeSource 幂等不变形
+    expect(legadoToOurs("'h1'.text()")).toBe("'h1'.text()");
   });
 
   test("带数字类名 .item-2 是类名不是索引", () => {
