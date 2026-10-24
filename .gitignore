@@ -1,2 +1,6 @@
-logs
 node_modules/
+web/node_modules/
+dist/
+web/dist/
+data/
+*.log

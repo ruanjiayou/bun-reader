@@ -1,0 +1,78 @@
+import { mkdirSync } from "node:fs";
+import { Database } from "bun:sqlite";
+import { drizzle } from "drizzle-orm/bun-sqlite";
+import * as schema from "./schema";
+
+mkdirSync("data/cache", { recursive: true });
+mkdirSync("data/logs", { recursive: true });
+
+export const sqlite = new Database("data/book.db");
+sqlite.exec("PRAGMA journal_mode = WAL;");
+sqlite.exec("PRAGMA foreign_keys = ON;");
+
+// ponytail: drizzle-kit 在 Windows 下 push 需要原生驱动，改为启动时幂等建表；
+// 加列时在此处补 ALTER ... IF NOT EXISTS 语义（SQLite 无 ADD COLUMN IF NOT EXISTS，用 try/catch）
+sqlite.exec(`
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  username TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT NOT NULL,
+  book_url TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  "group" TEXT NOT NULL DEFAULT '默认',
+  json TEXT NOT NULL,
+  last_use_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS books (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  book_url TEXT NOT NULL,
+  source_id INTEGER REFERENCES sources(id) ON DELETE SET NULL,
+  name TEXT NOT NULL,
+  author TEXT NOT NULL DEFAULT '',
+  cover TEXT NOT NULL DEFAULT '',
+  intro TEXT NOT NULL DEFAULT '',
+  latest_chapter TEXT NOT NULL DEFAULT '',
+  last_check_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS books_user_book_src ON books(user_id, book_url, source_id);
+CREATE TABLE IF NOT EXISTS chapters (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  idx INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  url TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS chapters_book_idx ON chapters(book_id, idx);
+CREATE TABLE IF NOT EXISTS chapter_cache (
+  content_key TEXT NOT NULL,
+  idx INTEGER NOT NULL,
+  file_path TEXT NOT NULL,
+  size INTEGER NOT NULL DEFAULT 0,
+  is_placeholder INTEGER NOT NULL DEFAULT 0,
+  fetched_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS cache_key_idx ON chapter_cache(content_key, idx);
+CREATE TABLE IF NOT EXISTS progress (
+  book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+  chapter_idx INTEGER NOT NULL DEFAULT 0,
+  scroll_pos INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS settings (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  key TEXT NOT NULL,
+  value TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS settings_user_key ON settings(user_id, key);
+`);
+
+export const db = drizzle(sqlite, { schema });
