@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { api } from "../api";
+import { api, fmtLatest } from "../api";
 
 interface ContentResp {
   idx: number;
@@ -499,7 +499,7 @@ export default function Reader() {
                   </div>
                   <div className="mt-0.5 truncate text-xs opacity-50">
                     {h.author || "佚名"}
-                    {h.latestChapter ? ` · 最新：${h.latestChapter}` : ""}
+                    {h.latestChapter ? ` · 最新：${fmtLatest(h.latestChapter)}` : ""}
                   </div>
                 </button>
               ))}

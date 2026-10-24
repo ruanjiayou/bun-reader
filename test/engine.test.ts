@@ -40,9 +40,9 @@ beforeAll(() => {
         );
       }
       if (u.pathname === "/book/2") {
-        // 无目录链接的详情页，目录地址靠 {{bookUrl}} 模板推出
+        // 无目录链接的详情页，目录地址靠 {{bookUrl}} 模板推出；.last-link 是"最新章节"链接（URL+标题同一节点）
         return new Response(
-          html(`<div id="info"><h1>斗破苍穹</h1><p>作者：天蚕土豆</p></div>`),
+          html(`<div id="info"><h1>斗破苍穹</h1><p>作者：天蚕土豆</p><a class="last-link" href="/book/2-2.html">第四章</a></div>`),
           { headers: { "Content-Type": "text/html; charset=utf-8" } },
         );
       }
@@ -224,11 +224,19 @@ describe("书源引擎全链路", () => {
       ruleToc: { chapterList: ".chapterlist li", chapterName: "a.text()", chapterUrl: "a.attr('href')" },
     };
     const info = await getBookInfo(src3, `${base}/book/2`);
+    // 规则取 URL：URL 供翻页推算，同节点换 .text() 拿到标题（入库展示用）
+    expect(info.latestChapterUrl).toBe(`${base}/book/2-2.html`);
+    expect(info.latestChapter).toBe("第四章");
     // 最新章节链接指向第 2 页 → 只抓 1..2 页（4 条去重后 4 章），不会去试第 3/4 页
-    const toc = await getToc(src3, info.tocUrl, undefined, `${base}/book/2-2.html`);
+    const toc = await getToc(src3, info.tocUrl, undefined, info.latestChapterUrl);
     expect(toc.length).toBe(4);
     expect(toc.map((c) => c.title)).toEqual(["第一章", "第二章", "第三章", "第四章"]);
-    // latestChapter 是文本而非链接时匹配不上模板 → 退回盲试展开（全量 5 章）
+    // 反向配置：规则取文本（.text()）→ 标题入库展示，换 .attr('href') 反推 URL 供翻页推算
+    const src4 = { ...src3, ruleBookInfo: { tocUrl: "{{bookUrl}}##$##-{page}.html", lastChapter: "'.last-link'.text()" } };
+    const info2 = await getBookInfo(src4, `${base}/book/2`);
+    expect(info2.latestChapter).toBe("第四章");
+    expect(info2.latestChapterUrl).toBe(`${base}/book/2-2.html`);
+    // 传文本（推不出页码）→ 退回盲试展开（全量 5 章）
     const toc2 = await getToc(src3, info.tocUrl, undefined, "第四章");
     expect(toc2.length).toBe(5);
   });

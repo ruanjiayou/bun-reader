@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api } from "../api";
+import { api, fmtLatest } from "../api";
 
 interface BookInfo {
   id: number;
@@ -199,7 +199,7 @@ export default function Book() {
           <div className="min-w-0 flex-1">
             <h1 className="text-lg font-bold">{book.name}</h1>
             <div className="mt-0.5 text-sm text-neutral-400">{book.author || "佚名"}</div>
-            {book.latestChapter && <div className="mt-0.5 truncate text-xs text-neutral-500">最新：{book.latestChapter}</div>}
+            {book.latestChapter && <div className="mt-0.5 truncate text-xs text-neutral-500">最新：{fmtLatest(book.latestChapter)}</div>}
             {book.intro && <p className="mt-2 line-clamp-3 text-xs text-neutral-500">{book.intro}</p>}
             <div className="mt-3 flex flex-wrap gap-2">
               <button

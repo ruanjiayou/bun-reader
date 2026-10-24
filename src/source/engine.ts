@@ -98,6 +98,25 @@ export async function searchSource(src: BookSource, key: string, log?: Log): Pro
   return books;
 }
 
+// 最新章节双取：详情页反正要抓，同一个链接节点上 URL 和标题都能拿到。
+// 规则取到 URL（如 .attr('href')）→ 同一规则换 .text() 再取标题；规则取到文本（.text()）→ 换 .attr('href') 反推 URL。
+// URL 仅供 {page} 目录模板推最大页码，入库展示（书架/详情）的永远是标题。
+const urlLike = (s: string) => /^(https?:)?\/\//i.test(s) || s.startsWith("/");
+function splitLatestChapter(nodes: any, rule: string, baseUrl: string): { title: string; url: string } {
+  const raw = ruleStr(nodes, rule, baseUrl).trim();
+  if (!raw) return { title: "", url: "" };
+  const lastTok = raw.split(/\s+/).filter(Boolean).pop() ?? "";
+  if (urlLike(lastTok)) {
+    // 规则取到的是链接：URL 留给翻页推算，标题用同一规则换 .text() 再取（规则带 ## 后缀换不动时宁可空也不显示 URL）
+    const title = raw === lastTok ? ruleStr(nodes, rule.replace(/\.\s*attr\s*\([^)]*\)\s*$/, ".text()"), baseUrl).trim() : "";
+    return { title: title && !urlLike(title) ? title : "", url: ensureAbs(lastTok, baseUrl) };
+  }
+  // 规则取到的是文本：换 .attr('href') 反推 URL（供 {page} 推最大页码；推不出就空，退回盲试展开）
+  const u = ruleStr(nodes, rule.replace(/\.\s*text\s*\(\s*\)\s*$/, ".attr('href')"), baseUrl).trim();
+  const uTok = u.split(/\s+/).filter(Boolean).pop() ?? "";
+  return { title: raw, url: uTok && urlLike(uTok) ? ensureAbs(uTok, baseUrl) : "" };
+}
+
 export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
   const { url, opts } = buildReq(src, bookUrl);
   log?.("info", "book", `详情: ${url}`);
@@ -105,12 +124,14 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
   if (res.status >= 400) throw new Error(`HTTP ${res.status} · ${res.charset}`);
   const nodes = guessNodes(res.text);
   const r = src.ruleBookInfo ?? {};
+  const lc = splitLatestChapter(nodes, String(r.lastChapter ?? ""), res.url);
   const info = {
     name: ruleStr(nodes, r.name || "", res.url),
     author: ruleStr(nodes, r.author || "", res.url),
     intro: ruleStr(nodes, r.intro || "", res.url),
     cover: ensureAbs(ruleStr(nodes, r.coverUrl || "", res.url).split(/\s+/)[0] ?? "", res.url), // 封面取第一个 URL，相对地址补全
-    latestChapter: ruleStr(nodes, r.lastChapter || "", res.url),
+    latestChapter: lc.title,
+    latestChapterUrl: lc.url,
     tocUrl: ruleStr(nodes, r.tocUrl || "", res.url) || bookUrl,
   };
   // tocUrl 规则命中多个时（多行）取最后一个——目录页通常在末尾，且避免多行拼接成垃圾 URL
@@ -120,7 +141,7 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
     log?.("warn", "book", `tocUrl 规则命中 ${lines.length} 个链接，已取最后一个（要取指定位置请加索引如 a.-1）`);
   }
   info.tocUrl = ensureAbs(info.tocUrl, res.url);
-  log?.("ok", "book", `详情解析: ${info.name || "?"} · tocUrl=${info.tocUrl}`);
+  log?.("ok", "book", `详情解析: ${info.name || "?"} · 最新=${info.latestChapter || info.latestChapterUrl || "无"} · tocUrl=${info.tocUrl}`);
   return info;
 }
 

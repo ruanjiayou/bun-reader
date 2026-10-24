@@ -165,10 +165,10 @@ bookRoutes.post("/:id/cache-release", async (c) => {
   return c.json({ released: rows.length });
 });
 
-// 抓详情+目录并写入章节快照（加书架与刷新共用）
+// 抓详情+目录并写入章节快照（加书架与刷新共用）；最新章节 URL 供 {page} 模板推最大页码
 async function snapshotToc(eng: any, bookUrl: string) {
   const info = await getBookInfo(eng, bookUrl);
-  const toc = await getToc(eng, info.tocUrl, undefined, info.latestChapter);
+  const toc = await getToc(eng, info.tocUrl, undefined, info.latestChapterUrl || undefined);
   if (!toc.length) throw new Error("目录为空");
   return { info, toc };
 }
@@ -191,7 +191,7 @@ async function fillToc(bookId: number, eng: any, bookUrl: string) {
         author: info.author || b.author,
         cover: info.cover || b.cover,
         intro: info.intro || b.intro,
-        latestChapter: info.latestChapter || b.latestChapter,
+        latestChapter: info.latestChapter || info.latestChapterUrl || b.latestChapter, // 标题优先入库；取不到标题存 URL（前端兜底显示页码）
         lastCheckAt: new Date(),
       })
       .where(eq(books.id, bookId));
@@ -303,7 +303,7 @@ bookRoutes.put("/:id/refresh", async (c) => {
   await db.insert(chapters).values(toc.map((ch, i) => ({ bookId, idx: i, title: ch.title, url: ch.url })));
   await db
     .update(books)
-    .set({ name: info.name || book.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter || book.latestChapter, lastCheckAt: new Date() })
+    .set({ name: info.name || book.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter || info.latestChapterUrl || book.latestChapter, lastCheckAt: new Date() })
     .where(eq(books.id, bookId));
   log.info("refresh", `《${book.name}》检查更新：${oldCount} → ${toc.length} 章`);
   return c.json({ chapterCount: toc.length, added: Math.max(0, toc.length - oldCount), oldCount });
@@ -361,7 +361,7 @@ bookRoutes.put("/:id/source", async (c) => {
   await db.insert(chapters).values(toc.map((ch, i) => ({ bookId, idx: i, title: ch.title, url: ch.url })));
   await db
     .update(books)
-    .set({ sourceId, bookUrl, name: info.name || book.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter || book.latestChapter, lastCheckAt: new Date() })
+    .set({ sourceId, bookUrl, name: info.name || book.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter || info.latestChapterUrl || book.latestChapter, lastCheckAt: new Date() })
     .where(eq(books.id, bookId));
   log.info("source", `《${book.name}》换源 → ${info.name || "?"}（${toc.length} 章）`);
   return c.json({ chapterCount: toc.length, name: info.name });
@@ -401,7 +401,7 @@ bookRoutes.get("/:id/category", async (c) => {
     const old = await db.select().from(chapters).where(eq(chapters.bookId, bookId));
     await db.delete(chapters).where(eq(chapters.bookId, bookId));
     await db.insert(chapters).values(toc.map((ch, i) => ({ bookId, idx: i, title: ch.title, url: ch.url })));
-    await db.update(books).set({ latestChapter: info.latestChapter || book.latestChapter, lastCheckAt: new Date() }).where(eq(books.id, bookId));
+    await db.update(books).set({ latestChapter: info.latestChapter || info.latestChapterUrl || book.latestChapter, lastCheckAt: new Date() }).where(eq(books.id, bookId));
   }
   const list = await db.select({ idx: chapters.idx, title: chapters.title }).from(chapters).where(eq(chapters.bookId, bookId));
   list.sort((a, b) => a.idx - b.idx);

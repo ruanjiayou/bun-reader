@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
-import { api } from "../api";
+import { api, fmtLatest } from "../api";
 
 interface FromSource {
   sourceId: number;
@@ -98,7 +98,7 @@ export default function Preview() {
         <div className="min-w-0 flex-1">
           <h1 className="text-lg font-bold">{cur.name || (loading ? "加载中…" : "未知书名")}</h1>
           <div className="mt-0.5 text-sm text-neutral-400">{cur.author || "佚名"}</div>
-          {cur.latestChapter && <div className="mt-0.5 truncate text-xs text-neutral-500">最新：{cur.latestChapter}</div>}
+          {cur.latestChapter && <div className="mt-0.5 truncate text-xs text-neutral-500">最新：{fmtLatest(cur.latestChapter)}</div>}
           {cur.intro && <p className="mt-2 line-clamp-4 text-xs text-neutral-500">{cur.intro}</p>}
           <div className="mt-3 flex gap-2">
             <button
