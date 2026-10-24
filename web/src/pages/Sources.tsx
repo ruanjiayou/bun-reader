@@ -15,55 +15,60 @@ interface DebugEvt {
   msg: string;
 }
 
-// 表单按区块声明，字段 = [路径, 标签, 行数?]
-const SECTIONS: { title: string; fields: [string, string, number?][] }[] = [
+// 表单按区块声明，字段 = { path, label, ph 示例提示, rows 行数 }
+const SECTIONS: { title: string; fields: { path: string; label: string; ph?: string; rows?: number }[] }[] = [
   {
     title: "基本",
     fields: [
-      ["bookSourceUrl", "源域名（必填，通常为网站主页）", 1],
-      ["bookSourceName", "源名称（必填）", 1],
-      ["bookSourceGroup", "源分组", 1],
-      ["bookSourceComment", "源注释", 1],
-      ["header", "请求头（JSON 字符串）", 3],
-      ["searchUrl", "搜索地址，支持 {{key}}/{{page}}，可带 ,{\"method\":\"POST\",\"body\":...}", 2],
+      { path: "bookSourceUrl", label: "源域名（必填，通常为网站主页）", ph: "https://www.example.com/" },
+      { path: "bookSourceName", label: "源名称（必填）", ph: "示例源" },
+      { path: "bookSourceGroup", label: "源分组", ph: "默认" },
+      { path: "bookSourceComment", label: "源注释", ph: "作者 / 备注" },
+      { path: "header", label: "请求头（JSON 字符串）", rows: 3, ph: '{"User-Agent":"Mozilla/5.0","Referer":"https://www.example.com/"}' },
+      {
+        path: "searchUrl",
+        label: "搜索地址，支持 {{key}}/{{page}}，可带 ,{\"method\":\"POST\",\"body\":...}",
+        rows: 2,
+        ph: "/search/{{key}}.html\n或 /search.php,{\"method\":\"POST\",\"body\":\"kw={{key}}\"}",
+      },
     ],
   },
   {
     title: "搜索",
     fields: [
-      ["ruleSearch.bookList", "列表规则（结果为元素列表）"],
-      ["ruleSearch.name", "书名规则"],
-      ["ruleSearch.author", "作者规则"],
-      ["ruleSearch.lastChapter", "最新章节"],
-      ["ruleSearch.intro", "简介规则"],
-      ["ruleSearch.coverUrl", "封面规则"],
-      ["ruleSearch.bookUrl", "详情地址"],
+      { path: "ruleSearch.bookList", label: "列表规则（选元素，不是取文本！）", rows: 2, ph: ".bookbox\n或 class.bookbox / tag.dd" },
+      { path: "ruleSearch.name", label: "书名（文本）", ph: ".bookname a@text" },
+      { path: "ruleSearch.author", label: "作者（文本）", ph: ".author@text##作者：|字数：.+" },
+      { path: "ruleSearch.lastChapter", label: "最新章节（文本）", ph: ".cat a@text" },
+      { path: "ruleSearch.intro", label: "简介（文本）", ph: ".update@text" },
+      { path: "ruleSearch.coverUrl", label: "封面（图片，用 @src）", ph: "img@src 或 .thumbnail@src" },
+      { path: "ruleSearch.bookUrl", label: "详情地址（链接，用 @href，必填）", ph: ".bookname a@href" },
     ],
   },
   {
     title: "详情",
     fields: [
-      ["ruleBookInfo.name", "书名规则"],
-      ["ruleBookInfo.author", "作者规则"],
-      ["ruleBookInfo.lastChapter", "最新章节"],
-      ["ruleBookInfo.intro", "简介规则"],
-      ["ruleBookInfo.coverUrl", "封面规则"],
-      ["ruleBookInfo.tocUrl", "目录地址（与详情页相同可省略）"],
+      { path: "ruleBookInfo.name", label: "书名（文本）", ph: "h1@text" },
+      { path: "ruleBookInfo.author", label: "作者（文本）", ph: ".booktag a.0@text" },
+      { path: "ruleBookInfo.lastChapter", label: "最新章节（文本）", ph: ".bookchapter@text" },
+      { path: "ruleBookInfo.intro", label: "简介（文本）", ph: ".bookintro@text" },
+      { path: "ruleBookInfo.coverUrl", label: "封面（图片，用 @src）", ph: ".thumbnail img@src" },
+      { path: "ruleBookInfo.tocUrl", label: "目录地址（链接 @href，与详情页相同可留空）", ph: "id.allchapter@tag.a.-1@href" },
     ],
   },
   {
     title: "目录",
     fields: [
-      ["ruleToc.chapterList", "列表规则（结果为元素列表）", 2],
-      ["ruleToc.chapterName", "章节名称"],
-      ["ruleToc.chapterUrl", "章节地址"],
+      { path: "ruleToc.chapterList", label: "列表规则（选元素，不是取文本！）", rows: 2, ph: "tag.dd\n或 .chapter-list li" },
+      { path: "ruleToc.chapterName", label: "章节名称（文本）", ph: "tag.a@text" },
+      { path: "ruleToc.chapterUrl", label: "章节地址（链接 @href）", ph: "tag.a@href" },
     ],
   },
   {
     title: "正文",
     fields: [
-      ["ruleContent.content", "正文规则", 2],
-      ["ruleContent.replaceRegex", "替换净化规则（正则##替换为）"],
+      { path: "ruleContent.content", label: "正文规则（多行文本用 @textNodes）", rows: 2, ph: "id.content@textNodes\n或 .readcontent@text" },
+      { path: "ruleContent.replaceRegex", label: "替换净化（正则##替换为，替换为留空=删除）", ph: "广告.*?<br>##\n（##广告.*?##  删除匹配内容）" },
     ],
   },
 ];
@@ -273,19 +278,21 @@ export default function Sources() {
               <fieldset key={sec.title} className="rounded-xl bg-neutral-800 p-4">
                 <legend className="px-1 text-sm font-bold text-amber-400">{sec.title}</legend>
                 <div className="space-y-2">
-                  {sec.fields.map(([path, label, rowsN = 1]) => (
+                  {sec.fields.map(({ path, label, ph, rows = 1 }) => (
                     <label key={path} className="block">
                       <span className="mb-0.5 block text-xs text-neutral-400">{label}</span>
-                      {rowsN > 1 ? (
+                      {rows > 1 ? (
                         <textarea
-                          rows={rowsN}
-                          className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs"
+                          rows={rows}
+                          className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500"
+                          placeholder={ph}
                           value={getIn(form, path) ?? ""}
                           onChange={(e) => setField(path, e.target.value)}
                         />
                       ) : (
                         <input
-                          className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs"
+                          className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500"
+                          placeholder={ph}
                           value={getIn(form, path) ?? ""}
                           onChange={(e) => setField(path, e.target.value)}
                         />
@@ -390,14 +397,20 @@ export default function Sources() {
       {tab === "help" && (
         <div className="space-y-4 rounded-xl bg-neutral-800 p-4 text-sm leading-6 text-neutral-300">
           <p><b className="text-amber-400">规则语法（首版支持）</b></p>
+          <p className="text-xs">
+            取值后缀：<code>@text</code> 文本 · <code>@textNodes</code> 多行文本（正文用）· <code>@href</code> 链接（自动补全绝对地址）· <code>@src</code> 图片 · <code>@任意属性</code>（如 <code>@data-src</code>）。
+            注意：<code>@//text/</code> 是 XPath 写法，不支持。
+          </p>
           <ul className="list-disc space-y-1 pl-5">
-            <li><code>class.bookname@tag.a@text</code> — class/tag/id/text 关键字规则，@ 分段</li>
+            <li><code>class.bookname@tag.a@text</code> — class/tag/id/text 关键字规则，@ 分段，<code>tag.a.0</code> 取第 1 个、<code>tag.a.-1</code> 取最后一个</li>
+            <li><code>.bookbox</code> / <code>.bookname a</code> — 直接写 CSS 选择器也可以（cheerio）</li>
             <li><code>id.content@textNodes</code> — 取全部文本节点（按行分隔，适合正文）</li>
             <li><code>tag.a@href</code> / <code>tag.img@data-src</code> — 属性取值，href/src 自动补全绝对地址</li>
             <li><code>id.content@text##广告.*</code> — ## 正则后处理（净化）</li>
-            <li><code>规则A||规则B</code> — A 无结果时用 B</li>
+            <li><code>规则A||规则B</code> — A 无结果时用 B；<code>{"{{bookUrl}}##正则##替换"}</code> — URL 改写（如详情→目录固定格式跳转）</li>
             <li><code>$.data.books[*].name</code> — JsonPath（API 类书源）</li>
           </ul>
+          <p className="text-xs text-neutral-400">关键区分：<b>列表规则</b>（bookList/chapterList）选<b>元素</b>，其余字段在列表元素内取<b>值</b>（文本/链接/图片）。</p>
           <p><b className="text-amber-400">暂不支持</b>：&lt;js&gt; 脚本规则、&amp;&amp; 合并、! 排除、目录/正文翻页规则、发现页。</p>
           <p><b className="text-amber-400">参考链接</b></p>
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-neutral-400">

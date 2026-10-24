@@ -84,6 +84,17 @@ export async function searchSource(src: BookSource, key: string, log?: Log): Pro
     .filter((b) => b.name && b.bookUrl)
     .map((b) => ({ ...b, bookUrl: ensureAbs(b.bookUrl, res.url), cover: ensureAbs(b.cover, res.url) }));
   if (books.length) log?.("ok", "search", `首条: ${books[0].name} · ${books[0].author || "佚名"}`);
+  else if (items.length && log)
+    log?.(
+      "warn",
+      "search",
+      `命中 ${items.length} 条但全部被过滤（name/bookUrl 为空即丢弃）。首条字段提取: ` +
+        [
+          `name[${r.name || "(默认text)"}]→"${(ruleStr([items[0]], r.name || "text", res.url) || "✗空").slice(0, 24)}"`,
+          `bookUrl[${r.bookUrl || "✗未配置"}]→"${(ruleStr([items[0]], r.bookUrl || "", res.url) || "✗空").slice(0, 40)}"`,
+          `author→"${(ruleStr([items[0]], r.author || "", res.url) || "✗空").slice(0, 24)}"`,
+        ].join(" · "),
+    );
   return books;
 }
 
@@ -123,6 +134,14 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log): Promis
     .filter((c) => c.title && c.url)
     .map((c) => ({ ...c, url: ensureAbs(c.url, res.url) }));
   log?.(chapters.length ? "ok" : "warn", "toc", `章节 ${chapters.length} 章${chapters.length ? `，首章: ${chapters[0].title}` : ""}`);
+  if (!chapters.length && items.length && log)
+    log?.(
+      "warn",
+      "toc",
+      `chapterList 命中 ${items.length} 个元素但章节数为 0（chapterName/chapterUrl 为空即丢弃）。首元素提取: ` +
+        `chapterName[${r.chapterName || "(默认text)"}]→"${(ruleStr([items[0]], r.chapterName || "text", res.url) || "✗空").slice(0, 24)}" · ` +
+        `chapterUrl[${r.chapterUrl || "✗未配置"}]→"${(ruleStr([items[0]], r.chapterUrl || "", res.url) || "✗空").slice(0, 40)}"`,
+    );
   return chapters;
 }
 
