@@ -38,6 +38,18 @@ beforeAll(() => {
           { headers: { "Content-Type": "text/html; charset=utf-8" } },
         );
       }
+      if (u.pathname === "/book/2") {
+        // 无目录链接的详情页，目录地址靠 {{bookUrl}} 模板推出
+        return new Response(
+          html(`<div id="info"><h1>斗破苍穹</h1><p>作者：天蚕土豆</p></div>`),
+          { headers: { "Content-Type": "text/html; charset=utf-8" } },
+        );
+      }
+      if (u.pathname === "/chapter/2.html") {
+        return new Response(html(`<ul class="chapterlist"><li><a href="/chapter/2_1.html">第一章</a></li><li><a href="/chapter/2_2.html">第二章</a></li></ul>`), {
+          headers: { "Content-Type": "text/html; charset=utf-8" },
+        });
+      }
       if (u.pathname === "/book/1/toc") {
         const items = Array.from({ length: 3 }, (_, i) => `<li><a href="/book/1/c${i + 1}">第${i + 1}章 测试</a></li>`).join("");
         return new Response(html(`<ul class="chapterlist">${items}</ul>`), {
@@ -123,6 +135,20 @@ describe("书源引擎全链路", () => {
     expect(content).toContain("\n第2段："); // textNodes 按 <br> 分行
     expect(content).not.toContain("advertisement");
     expect(isPlaceholder(content)).toBe(false);
+  });
+
+  test("tocUrl 规则：|| 回退到 {{bookUrl}} 模板跳转", async () => {
+    const src2 = {
+      bookSourceUrl: base,
+      ruleBookInfo: {
+        tocUrl: "id.allchapter@tag.a.-1@href||{{bookUrl}}##/book/(\\d+)##/chapter/$1.html",
+      },
+    };
+    const info = await getBookInfo(src2, `${base}/book/2`);
+    expect(info.tocUrl).toBe(`${base}/chapter/2.html`);
+    const toc = await getToc(src2, info.tocUrl);
+    expect(toc.length).toBe(2);
+    expect(toc[0].title).toBe("第一章");
   });
 
   test("占位判定：短内容 + 关键词", () => {

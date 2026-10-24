@@ -173,6 +173,8 @@ export function applyRule(input: Node[], rule: string, base = ""): Node[] {
   let cur: Node[] = input;
   if (main) {
     if (main.startsWith("$")) cur = applyJsonPath(cur, main);
+    // URL 模板段：{{bookUrl}}/{{baseUrl}} 产出当前页地址，配合 ## 正则实现固定格式跳转（如 /book/1 → /chapter/1）
+    else if (/^\{\{(?:baseUrl|bookUrl)\}\}$/.test(main)) cur = [{ kind: "json", v: base }];
     else {
       const segs = main.split("@");
       for (let i = 0; i < segs.length; i++) {
