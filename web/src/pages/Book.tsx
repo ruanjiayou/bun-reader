@@ -32,9 +32,17 @@ export default function Book() {
   const [cur, setCur] = useState<number | null>(null); // 当前进度章节
   const [asc, setAsc] = useState(true);
   const [msg, setMsg] = useState("");
+  const [loadErr, setLoadErr] = useState("");
   const [refreshing, setRefreshing] = useState(false);
   const [cache, setCache] = useState<CacheStatus | null>(null);
   const [caching, setCaching] = useState(false);
+
+  // 操作提示 4s 自动消失
+  useEffect(() => {
+    if (!msg) return;
+    const t = setTimeout(() => setMsg(""), 4000);
+    return () => clearTimeout(t);
+  }, [msg]);
 
   const loadCache = async () => {
     try {
@@ -56,7 +64,7 @@ export default function Book() {
       const info = await api<BookInfo>(`/api/books/${bookId}`);
       setBook({ ...cat.book, ...info, progress: info.progress });
     } catch (e: any) {
-      setMsg(e.message);
+      setLoadErr(e.message);
     }
   };
   useEffect(() => {
@@ -130,7 +138,11 @@ export default function Book() {
       <header className="mb-4 flex items-center gap-2">
         <Link to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
       </header>
-      {msg && <div className="mb-3 rounded-lg bg-neutral-800 px-3 py-2 text-sm text-amber-400">{msg}</div>}
+      {msg && (
+        <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-neutral-700 px-4 py-2 text-sm text-neutral-100 shadow-lg">
+          {msg}
+        </div>
+      )}
 
       {/* 缓存条：全本缓存状态 + 操作 */}
       <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl bg-neutral-800/60 px-3 py-2 text-xs">
@@ -212,7 +224,7 @@ export default function Book() {
               {ch.idx === cur && <span className="ml-2 text-xs text-neutral-500">· 上次读到</span>}
             </Link>
           ))}
-          {!chapters.length && !msg && <div className="p-6 text-center text-neutral-600">目录加载中…</div>}
+          {!chapters.length && !loadErr && <div className="p-6 text-center text-neutral-600">目录加载中…</div>}
         </div>
       </section>
     </div>

@@ -78,8 +78,8 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
       }
       const cur = jobStmt.get.get(key) as any;
       jobStmt.update.run((cur?.done ?? 0) + (ok ? 1 : 0), (cur?.failed ?? 0) + (ok ? 0 : 1), "running", Date.now(), key);
-      // 成功 250ms 限速；失败后按 2s/4s/6s… 递增（上限 30s），给源站喘息
-      const delay = ok ? 250 : Math.min(2000 * failStreak, 30000);
+      // 成功 250ms 限速；失败按 5s/10s/30s/60s 递增（封顶 60s），给源站喘息
+      const delay = ok ? 250 : [5000, 10000, 30000, 60000][Math.min(failStreak - 1, 3)];
       await new Promise((r) => setTimeout(r, delay));
     }
     const cur = jobStmt.get.get(key) as any;

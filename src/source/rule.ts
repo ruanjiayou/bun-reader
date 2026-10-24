@@ -73,7 +73,7 @@ export function legadoToOurs(rule: string): string {
     .join("||");
 }
 
-const RULE_FIELDS = new Set(["bookList", "name", "author", "lastChapter", "intro", "coverUrl", "bookUrl", "tocUrl", "chapterList", "chapterName", "chapterUrl", "nextTocUrl", "content"]);
+const RULE_FIELDS = new Set(["bookList", "name", "author", "lastChapter", "intro", "coverUrl", "bookUrl", "tocUrl", "chapterList", "chapterName", "chapterUrl", "nextTocUrl", "content", "nextContentUrl"]);
 
 // 书源 JSON 规则字段统一转换为本项目语法（幂等，导入与运行前都调用）
 export function normalizeSource(src: any): any {

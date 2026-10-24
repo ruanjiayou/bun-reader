@@ -226,9 +226,7 @@ export async function getContent(src: BookSource, chapterUrl: string, log?: Log)
   let lastErr: unknown;
   for (let i = 0; i < 3; i++) {
     try {
-      const res = await httpText(url, opts);
-      if (res.status >= 400) throw new Error(`HTTP ${res.status} · ${res.charset}`);
-      return await parseContent(src, res.text, res.url, log);
+      return await fetchChapter(src, url, opts, log);
     } catch (e) {
       lastErr = e;
       if (i < 2) await sleep(1000 * 2 ** i);
@@ -237,19 +235,67 @@ export async function getContent(src: BookSource, chapterUrl: string, log?: Log)
   throw lastErr;
 }
 
-async function parseContent(src: BookSource, text: string, baseUrl: string, log?: Log): Promise<string> {
-  const nodes = guessNodes(text);
-  let content = ruleStr(nodes, src.ruleContent?.content ?? "", baseUrl);
-  if (!content) throw new Error("正文规则未命中");
-  content = applyReplace(content, src.ruleContent?.replaceRegex);
-  content = content
+// 抓单章并合并全部分页：ruleContent.nextContentUrl 命中即抓下一页拼接；href 空=结束；visited 防环，上限 50 页。
+// 首页失败 → 抛错走重试；第 2 页起失败 → 记 warn 返回已抓到的部分（好过整章失败）。
+async function fetchChapter(src: BookSource, url: string, opts: FetchOpts, log?: Log): Promise<string> {
+  const rule = src.ruleContent ?? {};
+  const visited = new Set<string>();
+  const parts: string[] = [];
+  let next: string | null = url;
+  let page = 0;
+
+  while (next && page < 50) {
+    if (visited.has(next)) {
+      log?.("warn", "content", `第 ${page + 1} 页地址已抓过，停止翻页`);
+      break;
+    }
+    visited.add(next);
+    page++;
+    const res = await httpText(next, opts);
+    if (res.status >= 400) {
+      if (page > 1) {
+        log?.("warn", "content", `第 ${page} 页 HTTP ${res.status}，返回已抓取的 ${page - 1} 页`);
+        break;
+      }
+      throw new Error(`HTTP ${res.status} · ${res.charset}`);
+    }
+    const nodes = guessNodes(res.text);
+    const content = ruleStr(nodes, rule.content ?? "", res.url);
+    if (!content) {
+      if (page > 1) {
+        log?.("warn", "content", `第 ${page} 页正文规则未命中，返回已抓取的 ${page - 1} 页`);
+        break;
+      }
+      throw new Error("正文规则未命中");
+    }
+    parts.push(applyReplace(content, rule.replaceRegex));
+
+    next = null;
+    if (rule.nextContentUrl) {
+      const nRaw = ruleStr(nodes, rule.nextContentUrl, res.url)
+        .split(/\s+/)
+        .filter(Boolean)
+        .map((u) => ensureAbs(u, res.url));
+      if (nRaw.length > 1) log?.("warn", "content", `nextContentUrl 命中 ${nRaw.length} 个链接，已取最后一个`);
+      const n = nRaw[nRaw.length - 1] ?? "";
+      next = n && !visited.has(n) ? n : null;
+      if (next) {
+        log?.("info", "content", `正文第 ${page + 1} 页: ${next}`);
+        await sleep(250);
+      }
+    }
+  }
+  if (page > 1) log?.("ok", "content", `分页合并完成：${page} 页`);
+
+  const merged = parts
+    .join("\n")
     .split("\n")
     .map((l) => l.trim())
     .join("\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
-  const ph = isPlaceholder(content);
-  log?.("ok", "content", `正文 ${content.length} 字${ph ? " · ⚠️疑似占位内容" : ""}`);
-  if (log) log("info", "content", `预览: ${content.slice(0, 80)}…`);
-  return content;
+  const ph = isPlaceholder(merged);
+  log?.("ok", "content", `正文 ${merged.length} 字${ph ? " · ⚠️疑似占位内容" : ""}`);
+  if (log) log("info", "content", `预览: ${merged.slice(0, 80)}…`);
+  return merged;
 }
