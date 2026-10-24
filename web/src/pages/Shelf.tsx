@@ -27,7 +27,7 @@ export default function Shelf({ username, onLogout }: { username?: string; onLog
       <header className="mb-4 flex items-center justify-between">
         <h1 className="text-lg font-bold">书架</h1>
         <div className="flex items-center gap-3 text-sm text-neutral-400">
-          <Link to="/search" className="hover:text-neutral-200">＋加书</Link>
+          <Link to="/search" className="hover:text-neutral-200">搜索</Link>
           <Link to="/sources" className="hover:text-neutral-200">书源</Link>
           <span>{username}</span>
           <button onClick={onLogout} className="hover:text-neutral-200">退出</button>

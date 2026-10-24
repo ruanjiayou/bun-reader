@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, rmSync 
 import { and, eq, inArray } from "drizzle-orm";
 import { db, sqlite } from "../db";
 import { books, chapters, chapterCache, progress, sources } from "../schema";
-import { getBookInfo, getToc, getContent, isPlaceholder } from "../source/engine";
+import { getBookInfo, getToc, getContent, isPlaceholder, searchSource } from "../source/engine";
 import { normalizeSource } from "../source/rule";
 import { log } from "../log";
 import type { AuthEnv } from "../auth";
@@ -263,6 +263,43 @@ bookRoutes.put("/:id/refresh", async (c) => {
     .where(eq(books.id, bookId));
   log.info("refresh", `《${book.name}》检查更新：${oldCount} → ${toc.length} 章`);
   return c.json({ chapterCount: toc.length, added: Math.max(0, toc.length - oldCount), oldCount });
+});
+
+// 换源候选：并发搜索全部启用书源，只返回"拥有这本书"的源（书名精确命中优先，当前源标记 current）
+bookRoutes.get("/:id/sources", async (c) => {
+  const uid = c.get("uid");
+  const bookId = Number(c.req.param("id"));
+  const [book] = await db.select().from(books).where(and(eq(books.id, bookId), eq(books.userId, uid)));
+  if (!book) return c.json({ error: "书籍不存在" }, 404);
+  const rows = await db.select({ id: sources.id, json: sources.json }).from(sources).where(eq(sources.enabled, true));
+  const engines = rows.map((r) => ({ id: r.id, src: normalizeSource(JSON.parse(r.json)) }));
+  const results: {
+    sourceId: number; sourceName: string; name: string; author: string; bookUrl: string; latestChapter: string; current: boolean;
+  }[] = [];
+  let cursor = 0; // 4 路并发 worker 共享游标
+  const worker = async () => {
+    while (cursor < engines.length) {
+      const { id, src } = engines[cursor++];
+      try {
+        const found = await searchSource(src, book.name);
+        const hit = found.find((b) => b.name === book.name) ?? found[0];
+        if (hit)
+          results.push({
+            sourceId: id,
+            sourceName: src.sourceName || `源#${id}`,
+            name: hit.name,
+            author: hit.author,
+            bookUrl: hit.bookUrl,
+            latestChapter: hit.latestChapter,
+            current: id === book.sourceId && hit.bookUrl === book.bookUrl,
+          });
+      } catch {} // 单源失败/超时直接跳过
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(4, engines.length || 1) }, worker));
+  results.sort((a, b) => Number(b.name === book.name) - Number(a.name === book.name) || Number(a.current ? 0 : 1) - Number(b.current ? 0 : 1));
+  log.info("source", `《${book.name}》换源候选：${engines.length} 个启用源中 ${results.length} 个拥有此书`);
+  return c.json(results);
 });
 
 // 换源：更换书源+详情地址，重抓目录快照；书架 id 与阅读进度保留

@@ -19,11 +19,12 @@ api.route("/books", bookRoutes);
 api.route("/search", searchRoutes);
 app.route("/api", api);
 
-// SPA：构建产物托管，未命中路径回退 index.html
+// SPA：挂在 /reader 前缀下，未命中路径回退 index.html
 const webDist = "web/dist";
-app.use("*", serveStatic({ root: webDist, rewriteRequestPath: (p) => p }));
-app.get("*", serveStatic({ root: webDist, path: "index.html" }));
+app.use("/reader/*", serveStatic({ root: webDist, rewriteRequestPath: (p) => p.slice("/reader".length) || "/" }));
+app.get("/reader/*", serveStatic({ root: webDist, path: "index.html" }));
+app.get("/", (c) => c.redirect("/reader/"));
 
-const port = Number(process.env.PORT ?? 3000);
+const port = Number(process.env.PORT ?? 8094);
 log.info("boot", `bun-reader listening on http://localhost:${port}`);
 Bun.serve({ port, fetch: app.fetch });
