@@ -195,13 +195,14 @@ export default function Sources() {
       setMsg(e.message);
     }
   };
-  // JSON → 表单（失焦时静默同步），非法 JSON 不覆盖表单
+  // JSON → 表单（失焦时静默同步），非法 JSON 不覆盖表单并给出提示，避免后续表单失焦把 JSON 改动悄悄冲掉
   const syncJsonToForm = (): boolean => {
     try {
       const parsed = JSON.parse(jsonText);
       setForm({ ...emptyForm(), ...parsed });
       return true;
     } catch {
+      if (jsonText.trim()) setMsg("JSON 格式有误，未同步到左侧表单（修正后再失焦即可）");
       return false;
     }
   };
