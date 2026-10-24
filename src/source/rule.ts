@@ -210,6 +210,7 @@ export function applyRule(input: Node[], rule: string, base = ""): Node[] {
   let main = rule.trim();
   let regex: RegExp | null = null;
   let rep = "";
+  let xf = "";
   const hash = main.indexOf("##");
   if (hash > -1) {
     const parts = main.slice(hash + 2).split("##");
@@ -220,6 +221,12 @@ export function applyRule(input: Node[], rule: string, base = ""): Node[] {
       regex = null;
     }
     rep = parts[1] ?? "";
+    xf = parts[2] ?? ""; // 第三段：变换函数（逗号分隔按序执行）
+    // 无正则时（####变换）第二段就是变换函数，避免被当成替换文本
+    if (!parts[0] && !xf && /^(urlDecode|base64Decode)(,|$)/.test(rep)) {
+      xf = rep;
+      rep = "";
+    }
   }
   let cur: Node[] = input;
   if (main) {
@@ -239,6 +246,25 @@ export function applyRule(input: Node[], rule: string, base = ""): Node[] {
     }
   }
   if (regex) cur = cur.map((n) => ({ kind: "json", v: nodeText(n).replace(regex!, rep) }));
+  // 变换段：##正则##替换##urlDecode,base64Decode —— 处理站点把真实地址藏在
+  // onclick 里做 base64 跳转参数的情况（如 ?action=go&t=aHR0cHM6...%3D）
+  if (xf) {
+    for (const t of xf.split(",").map((s) => s.trim()).filter(Boolean)) {
+      cur = cur.map((n) => {
+        let v = nodeText(n);
+        try {
+          if (t === "urlDecode") v = decodeURIComponent(v);
+          else if (t === "base64Decode") {
+            const s = v.replace(/-/g, "+").replace(/_/g, "/").replace(/[^A-Za-z0-9+/=]/g, "");
+            v = Buffer.from(s, "base64").toString("utf-8");
+          }
+        } catch {
+          /* 解码失败保留原值 */
+        }
+        return { kind: "json", v };
+      });
+    }
+  }
   return cur;
 }
 

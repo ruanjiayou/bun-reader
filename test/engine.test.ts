@@ -225,4 +225,20 @@ describe("书源引擎全链路", () => {
     const out = legadoToOurs("tag.a.-1@href");
     expect(out).toBe("a.-1@href");
   });
+
+  test("## 第三段变换：onclick base64 跳转参数解出真实 URL", () => {
+    // 模拟幽香书房网关：window.open('?action=go&t=aHR0cHM6...%3D&s=..&e=..')
+    const nodes = htmlNodes(
+      `<div><a onclick="window.open('?action=go&t=${encodeURIComponent(Buffer.from("https://www.yxshufang.com/book/51RA9.html").toString("base64"))}&s=S%2FIQ6m2aXMA%3D&e=1792847961', '_blank')">书名</a></div>`,
+    );
+    const rule = `a@onclick##.*?t=([^&]*).*##$1##urlDecode,base64Decode`;
+    expect(nodeText(applyRule(nodes, rule)[0])).toBe("https://www.yxshufang.com/book/51RA9.html");
+  });
+
+  test("## 第三段变换：无正则时 ####urlDecode 形式 + 非法输入返回空", () => {
+    const nodes = htmlNodes(`<div><a data-u="%E4%B8%AD%E6%96%87" data-b="!!!!">x</a></div>`);
+    expect(nodeText(applyRule(nodes, "a@data-u####urlDecode")[0])).toBe("中文");
+    // 完全不含合法 base64 字符的输入过滤后为空串，由引擎的空值过滤兜底
+    expect(nodeText(applyRule(nodes, "a@data-b####base64Decode")[0])).toBe("");
+  });
 });

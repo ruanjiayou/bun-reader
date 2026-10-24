@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
 
 interface SourceRow {
@@ -13,6 +13,15 @@ interface DebugEvt {
   level: "info" | "ok" | "warn" | "err";
   step: string;
   msg: string;
+  info?: DebugBookInfo;
+}
+interface DebugBookInfo {
+  bookUrl: string;
+  name: string;
+  author: string;
+  cover: string;
+  intro: string;
+  latestChapter: string;
 }
 interface SearchBook {
   name: string;
@@ -128,6 +137,9 @@ export default function Sources() {
   const [logs, setLogs] = useState<DebugEvt[]>([]);
   const [debugging, setDebugging] = useState(false);
   const [dirty, setDirty] = useState(false); // 表单/JSON 有未保存改动 → 保存按钮高亮
+  const [dbgBook, setDbgBook] = useState<DebugBookInfo | null>(null); // 调试全链路成功后的书籍信息，可加书架
+  const [addingBook, setAddingBook] = useState(false);
+  const nav = useNavigate();
   const logBox = useRef<HTMLDivElement>(null);
 
   const load = () => api<SourceRow[]>("/api/sources").then(setRows).catch((e) => setMsg(e.message));
@@ -253,6 +265,7 @@ export default function Sources() {
     setDebugging(true);
     setSearchResults([]);
     setLogs([]);
+    setDbgBook(null);
     try {
       const r = await api<{ books: SearchBook[]; logs: DebugEvt[]; error?: string }>(
         `/api/sources/${editId}/debug-search`,
@@ -272,6 +285,7 @@ export default function Sources() {
     if (editId === null) return setMsg("先保存源再调试");
     if (!debugBookUrl.trim()) return setMsg("输入书籍详情页 URL");
     setLogs([]);
+    setDbgBook(null);
     setDebugging(true);
     try {
       const res = await fetch(`/api/sources/${editId}/debug`, {
@@ -290,13 +304,38 @@ export default function Sources() {
         buf = parts.pop()!;
         for (const p of parts) {
           const line = p.trim();
-          if (line.startsWith("data: ")) setLogs((l) => [...l, JSON.parse(line.slice(6))]);
+          if (line.startsWith("data: ")) {
+            const evt = JSON.parse(line.slice(6)) as DebugEvt;
+            if (evt.step === "bookinfo" && evt.info) setDbgBook(evt.info);
+            else setLogs((l) => [...l, evt]);
+          }
         }
       }
     } catch (e: any) {
       setLogs((l) => [...l, { level: "err", step: "client", msg: e.message }]);
     } finally {
       setDebugging(false);
+    }
+  };
+
+  // 调试全链路成功后一键加书架（无搜索的源靠这个入库）：books 表立即落库，目录后台异步补
+  const addBookFromDebug = async () => {
+    if (!dbgBook || editId === null) return;
+    setAddingBook(true);
+    try {
+      const r = await api<{ id: number }>("/api/books", {
+        method: "POST",
+        body: JSON.stringify({
+          bookUrl: dbgBook.bookUrl,
+          sourceId: editId,
+          info: { name: dbgBook.name, author: dbgBook.author, cover: dbgBook.cover, intro: dbgBook.intro, latestChapter: dbgBook.latestChapter },
+        }),
+      });
+      setMsg(`已加入书架：《${dbgBook.name}》`);
+      nav(`/book/${r.id}`);
+    } catch (e: any) {
+      setMsg(`加书架失败：${e.message}`);
+      setAddingBook(false);
     }
   };
 
@@ -499,14 +538,25 @@ export default function Sources() {
               )}
               {/* 调书籍：SSE 日志 */}
               {dbgMode === "book" && (
-                <div ref={logBox} className="h-96 flex-1 overflow-y-auto rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5 md:h-auto">
-                  {logs.map((l, i) => (
-                    <div key={i} className={levelColor[l.level]}>
-                      <span className="text-neutral-600">[{l.step}]</span> {l.msg}
-                    </div>
-                  ))}
-                  {!logs.length && <div className="text-neutral-600">粘贴书籍详情页 URL 点运行：详情 → 目录 → 首章正文</div>}
-                </div>
+                <>
+                  <div ref={logBox} className="h-96 flex-1 overflow-y-auto rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5 md:h-auto">
+                    {logs.map((l, i) => (
+                      <div key={i} className={levelColor[l.level]}>
+                        <span className="text-neutral-600">[{l.step}]</span> {l.msg}
+                      </div>
+                    ))}
+                    {!logs.length && <div className="text-neutral-600">粘贴书籍详情页 URL 点运行：详情 → 目录 → 首章正文</div>}
+                  </div>
+                  {dbgBook && !debugging && (
+                    <button
+                      onClick={addBookFromDebug}
+                      disabled={addingBook}
+                      className="w-full rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-neutral-900 hover:bg-amber-400 disabled:opacity-50"
+                    >
+                      {addingBook ? "加入中…" : `＋ 加入书架《${dbgBook.name}》`}
+                    </button>
+                  )}
+                </>
               )}
             </div>
           )}
