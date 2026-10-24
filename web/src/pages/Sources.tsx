@@ -363,15 +363,6 @@ export default function Sources() {
         {/* 中：操作列 */}
         <div className="flex flex-row flex-wrap gap-2 md:sticky md:top-4 md:flex-col">
           <button onClick={saveSource} className={btnPrimary}>保存源</button>
-          <button
-            onClick={() => {
-              if (editId === null) setMsg("新建源先保存再调试");
-              else setRightTab("debug");
-            }}
-            className={btn}
-          >
-            ⇏ 调试
-          </button>
           <button onClick={formToJson} className={btn}>表单→JSON</button>
           <button onClick={jsonToForm} className={btn}>表单←JSON</button>
           <button onClick={() => selectSource(null)} className={btn}>✗ 清空新建</button>
@@ -457,10 +448,22 @@ export default function Sources() {
                         </div>
                       </div>
                       {b.intro && <div className="mt-1 line-clamp-2 text-neutral-500">{b.intro}</div>}
-                      <div className="mt-1 truncate text-neutral-600">{b.bookUrl}</div>
+                      <button
+                        onClick={() => {
+                          setDebugBookUrl(b.bookUrl);
+                          setDbgMode("book");
+                          setRightTab("debug");
+                          setLogs([]);
+                          setMsg(`已填入调书籍：${b.name}`);
+                        }}
+                        className="mt-1 max-w-full truncate rounded bg-neutral-700 px-1.5 py-0.5 text-left font-mono text-[11px] text-sky-400 hover:bg-neutral-600 hover:text-sky-300"
+                        title="点击填入「调书籍」继续测试"
+                      >
+                        {b.bookUrl}
+                      </button>
                     </div>
                   ))}
-                  {!searchResults.length && <div className="p-2 text-neutral-600">输入关键词点运行，返回每条的书名/作者/最新章节等</div>}
+                  {!searchResults.length && <div className="p-2 text-neutral-600">输入关键词点运行，结果里的书籍 URL 可点击，直接填入「调书籍」继续测试</div>}
                   {logs.map((l, i) => (
                     <div key={`lg${i}`} className={levelColor[l.level]}>
                       <span className="text-neutral-600">[{l.step}]</span> {l.msg}
