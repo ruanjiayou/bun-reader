@@ -56,6 +56,17 @@ async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<
 
 const abs2 = (u: string, base = ""): string => {
   if (!u) return u;
+  // 绝对地址原样返回（与旧引擎 ensureAbs 一致：new URL 会把 {} 编码成 %7Bpage%7D）
+  if (/^(https?:)?\/\//i.test(u)) return u;
+  // 相对地址 + {page} 模板：手动补 origin，不走 URL 解析
+  if (/\{\{?page\}?\}|%7[Bb]page%7[Dd]/.test(u)) {
+    if (!base) return u;
+    try {
+      return new URL(base).origin + (u.startsWith("/") ? u : "/" + u);
+    } catch {
+      return u;
+    }
+  }
   try {
     return new URL(u, base || undefined).toString();
   } catch {

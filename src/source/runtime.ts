@@ -26,12 +26,22 @@ export const parse = (html: string) => cheerio.load(html);
 // 规则求值用的节点包装（ruleText/ruleSel 入参；转换器生成的代码用）
 export const nodes = (text: string): Node[] => guessNodes(text);
 
-// 相对 URL → 绝对；base 缺省取实例的 base 成员
+// 相对 URL → 绝对；base 缺省取实例的 base 成员。
+// 绝对地址原样返回；含 {page} 模板的相对地址手动补 origin（new URL 会把 {} 编码成 %7B，模板展开就失效了）
 export function abs(u: string, base?: string): string {
   if (!u) return u;
+  if (/^(https?:)?\/\//i.test(u)) return u;
   const b = base ?? als.getStore()?.base ?? "";
+  if (!b) return u;
+  if (/\{\{?page\}?\}|%7[Bb]page%7[Dd]/.test(u)) {
+    try {
+      return new URL(b).origin + (u.startsWith("/") ? u : "/" + u);
+    } catch {
+      return u;
+    }
+  }
   try {
-    return new URL(u, b || undefined).toString();
+    return new URL(u, b).toString();
   } catch {
     return u;
   }

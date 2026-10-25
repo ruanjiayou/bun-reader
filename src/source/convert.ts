@@ -141,7 +141,7 @@ export function rulesToScript(src: any): string {
     out.push(`    const list = [];`);
     out.push(`    const seen = new Set();`);
     out.push(`    for (let page = 1; page <= 200; page++) {`);
-    out.push(`      const res = await fetchText(String(url).replace(/\\{\\{?page\\}?\\}/g, String(page)));`);
+    out.push(`      const res = await fetchText(String(url).replace(/\\{\\{?page\\}?\\}/g, String(page)).replace(/%7[Bb]page%7[Dd]/g, String(page)));`);
     out.push(`      if (res.status >= 400) break; // 到末页（4xx）即停`);
     out.push(`      const ns = nodes(res.text);`);
     out.push(`      const items = ${ind(chMap, 6)};`);
