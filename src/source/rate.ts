@@ -28,7 +28,8 @@ export class RateLimiter {
   high: number;
   readonly windowMs: number;
   private lastFailAt: number;
-  private times: number[] = []; // 窗口内成功请求的时间戳
+  private times: number[] = []; // 窗口内成功请求的时间戳（纯内存，不落库）
+  private okSinceFail = 0; // 距上次失败以来的成功数：>0 才允许减频（前面成功后面失败才算学到信息）
 
   private constructor(s: RateState) {
     this.cap = s.cap;
@@ -78,6 +79,7 @@ export class RateLimiter {
     const now = Date.now();
     this.prune(now);
     this.times.push(now);
+    this.okSinceFail++;
     if (this.cap > 0 && this.high > this.cap && now - this.lastFailAt >= this.windowMs) {
       const next = Math.min(this.high - 1, Math.floor((this.cap + this.high) / 2));
       if (next !== this.cap && next > 0) {
@@ -88,18 +90,23 @@ export class RateLimiter {
     }
   }
 
-  // 失败：频率减半向下取整（不限速时以窗口内实测成功数为基准）
+  // 失败：仅当「前面有成功、这次失败」才减频减半（向下取整）；连续失败不改频率，只靠重试退避拉长间隔
   onFailure(id: number) {
     this.lastFailAt = Date.now();
-    if (this.cap === 0) {
-      this.high = Math.max(2, this.observed());
-      this.cap = Math.max(1, Math.floor(this.high / 2));
-    } else if (this.cap > 1) {
-      this.high = Math.max(this.high, this.cap);
-      this.cap = Math.max(1, Math.floor(this.cap / 2));
+    if (this.okSinceFail > 0) {
+      if (this.cap === 0) {
+        this.high = Math.max(2, this.observed());
+        this.cap = Math.max(1, Math.floor(this.high / 2));
+      } else if (this.cap > 1) {
+        this.high = Math.max(this.high, this.cap);
+        this.cap = Math.max(1, Math.floor(this.cap / 2));
+      }
+      log.info("cache", `前面成功后失败，频率降为 ${this.cap} 次/${this.windowMs / 1000}s（上限 ${this.high}）`);
+      this.save(id);
+    } else {
+      log.info("cache", `连续失败，频率保持 ${this.cap === 0 ? "不限速" : `${this.cap} 次/${this.windowMs / 1000}s`}，靠重试间隔降温`);
     }
-    log.info("cache", `请求失败，频率降为 ${this.cap} 次/${this.windowMs / 1000}s（上限 ${this.high}）`);
-    this.save(id);
+    this.okSinceFail = 0;
   }
 }
 

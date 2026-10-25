@@ -25,9 +25,26 @@ describe("自适应限速器", () => {
     expect(l.cap).toBe(1);
     (l as any).cap = 8;
     (l as any).high = 8;
+    (l as any).okSinceFail = 1; // 模拟前面有成功
     l.onFailure(SRC);
     expect(l.cap).toBe(4);
     expect(l.high).toBe(8);
+  });
+
+  test("连续失败不改频率：前面失败后面也失败只靠重试间隔降温", () => {
+    const l = fresh();
+    for (let i = 0; i < 16; i++) l.onSuccess(SRC);
+    l.onFailure(SRC); // cap=8, high=16
+    l.onFailure(SRC); // 前面也失败（okSinceFail=0）→ 频率不动
+    expect(l.cap).toBe(8);
+    expect(l.high).toBe(16);
+    l.onFailure(SRC); // 三连失败依旧不动
+    expect(l.cap).toBe(8);
+    // 中间穿插成功后再失败 → 才再次减半
+    l.onSuccess(SRC);
+    l.onFailure(SRC);
+    expect(l.cap).toBe(4);
+    expect(l.high).toBe(16);
   });
 
   test("距上次失败满一个窗口无错误 → 频率向下取整收缩，恒低于失败过的频率", () => {
