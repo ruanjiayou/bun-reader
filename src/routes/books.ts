@@ -62,7 +62,7 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
   log.info("cache", `任务启动：${key.slice(0, 8)}… 共 ${list.length} 章待抓`);
   cacheLog("info", `任务启动：共 ${list.length} 章待抓`);
   try {
-    let failStreak = 0; // 连续失败次数：用于拉长间隔，避免被源站反爬锁死
+    let delay = 0; // 自适应请求间隔（ms）：起步不限速；出错翻倍降温，稳定后保持当前间隔
     for (const ch of list) {
       if (stopper.stop) {
         const cur = (jobStmt.get.get(key) ?? {}) as any;
@@ -85,19 +85,19 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
       }
       try {
         await fetchAndSave(eng, ch.url, key, ch.idx);
-        failStreak = 0;
         cacheLog("info", `第 ${ch.idx + 1} 章《${ch.title}》缓存成功`);
       } catch (e: any) {
         ok = false;
-        failStreak++;
-        log.warn("cache", `第 ${ch.idx + 1} 章抓取失败（连续 ${failStreak} 次）：${e?.message ?? e}`);
+        const old = delay;
+        // 自适应降温：首次失败 2s 起，之后每次翻倍，封顶 60s；成功后不再升也不自动降（保持能跑通的节奏）
+        delay = Math.min(Math.max(delay * 2, 2000), 60000);
+        if (delay !== old) cacheLog("info", `触发限流：请求间隔调整为 ${(delay / 1000).toFixed(0)}s`);
+        log.warn("cache", `第 ${ch.idx + 1} 章抓取失败（间隔将调整为 ${(delay / 1000).toFixed(0)}s）：${e?.message ?? e}`);
         cacheLog("warn", `第 ${ch.idx + 1} 章《${ch.title}》失败：${e?.message ?? e}`);
       }
       const cur = jobStmt.get.get(key) as any;
       jobStmt.update.run((cur?.done ?? 0) + (ok ? 1 : 0), (cur?.failed ?? 0) + (ok ? 0 : 1), "running", Date.now(), key);
-      // 成功 1s 限速；失败按 5s/10s/30s/60s 递增（封顶 60s），给源站喘息
-      const delay = ok ? 1000 : [5000, 10000, 30000, 60000][Math.min(failStreak - 1, 3)];
-      await new Promise((r) => setTimeout(r, delay));
+      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
     }
     const cur = jobStmt.get.get(key) as any;
     jobStmt.update.run(cur.done, cur.failed, "done", Date.now(), key);
