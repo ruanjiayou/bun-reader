@@ -36,7 +36,7 @@ async function getContext(): Promise<any> {
       const { chromium } = await import("playwright");
       const headless = process.env.BROWSER_HEADLESS === "1";
       const tries: Record<string, string>[] = [{ channel: "chrome" }, { channel: "msedge" }, {}];
-      let lastErr: any;
+      const errs: string[] = [];
       for (const opt of tries) {
         try {
           const ctx = await chromium.launchPersistentContext("data/browser-profile", {
@@ -50,11 +50,14 @@ async function getContext(): Promise<any> {
           });
           log.info("browser", `浏览器已启动（${opt.channel ?? "chromium"} · ${headless ? "无头" : "有头"} · 持久化 data/browser-profile）`);
           return ctx;
-        } catch (e) {
-          lastErr = e;
+        } catch (e: any) {
+          errs.push(`${opt.channel ?? "chromium"}: ${String(e?.message ?? e).split("\n")[0]}`);
         }
       }
-      throw lastErr;
+      throw new Error(
+        `浏览器启动失败（依次尝试 chrome/msedge/chromium）——${errs.join("；")}。` +
+          `常见原因：另一个进程（如正在运行的 bun-reader 服务或残留 chrome 窗口）占用了同一 profile 目录，请先关闭后重试`,
+      );
     })();
     // 进程退出时顺手关浏览器，避免残留 chrome 进程
     process.once("exit", () => ctxP?.then((c) => c.close()).catch(() => {}));

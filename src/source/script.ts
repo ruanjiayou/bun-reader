@@ -168,6 +168,7 @@ function polish(text: string, inst: any): string {
 export async function scriptSearch(row: { id: number }, key: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<BookItem[]> {
   const inst = await loadInst(row.id);
   if (typeof inst.search !== "function") return []; // 未实现搜索 = 该源不参与聚合
+  log?.("info", "search", `脚本源搜索: ${key}`);
   const items = await withTimeout(runWithInst(inst, () => inst.search(key, 1)), timeoutMs, "search");
   if (!Array.isArray(items)) throw new Error("search 必须返回数组");
   const books = items
@@ -192,6 +193,7 @@ export async function scriptBookInfo(
 ): Promise<{ name: string; author: string; intro: string; cover: string; latestChapter: string; latestChapterUrl: string; tocUrl: string }> {
   const inst = await loadInst(row.id);
   if (typeof inst.getDetail !== "function") throw new Error("该源未实现 getDetail");
+  log?.("info", "book", `脚本源详情: ${url}`);
   const info = await withTimeout(runWithInst(inst, () => inst.getDetail(url)), timeoutMs, "getDetail");
   return {
     name: String(info?.title ?? ""),
@@ -221,6 +223,8 @@ export async function scriptToc(row: { id: number }, tocUrl: string, log?: Log, 
     visited.add(url);
     page++;
     const cur: string = url;
+    // 每页两条日志：SSE 调试面板能看到进度，同时充当连接心跳（长时间静默会被 idleTimeout 掐）
+    log?.("info", "toc", page === 1 ? `目录: ${cur}` : `目录第 ${page} 页: ${cur}`);
     const r: any = await withTimeout(runWithInst(inst, () => inst.getChapters(cur)), TOC_TIMEOUT, "getChapters");
     const list = Array.isArray(r) ? r : (r?.list ?? []);
     for (const c of list ?? []) {
@@ -231,6 +235,7 @@ export async function scriptToc(row: { id: number }, tocUrl: string, log?: Log, 
       chapters.push({ title: t, url: u });
     }
     const next: string = Array.isArray(r) ? "" : String(r?.next ?? "");
+    log?.("info", "toc", `第 ${page} 页 +${list.length} 章（新增 ${chapters.length} 累计）${next ? "，下一页 " + next : "，无下一页"}`);
     url = next ? abs2(next, inst.base) : null;
   }
   log?.(chapters.length ? "ok" : "warn", "toc", `脚本源目录：${chapters.length} 章 · ${page} 页`);
@@ -253,6 +258,7 @@ export async function scriptContent(row: { id: number }, chapterUrl: string, log
     visited.add(url);
     page++;
     const cur: string = url;
+    if (page > 1) log?.("info", "content", `正文第 ${page} 页: ${cur}`);
     const r: any = await withTimeout(runWithInst(inst, () => inst.getContent(cur)), timeoutMs, "getContent");
     const text = typeof r === "string" ? r : String(r?.text ?? "");
     if (!text.trim()) {
