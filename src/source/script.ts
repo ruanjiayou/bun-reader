@@ -20,7 +20,7 @@ export function saveScriptFile(id: number, code: string) {
   mkdirSync(SOURCES_DIR, { recursive: true });
   const scaffold =
     `// AUTO SCAFFOLD —— 由引擎生成，请勿修改本段\n` +
-    `import { fetchText, parse, abs, log, ruleText, ruleSel } from "${RUNTIME_URL}";\n\n`;
+    `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel } from "${RUNTIME_URL}";\n\n`;
   writeFileSync(`${SOURCES_DIR}/${id}.js`, scaffold + code.trim() + "\n");
 }
 

@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as cheerio from "cheerio";
 import { httpText, type FetchOpts } from "./fetcher";
-import { ruleStr, ruleList, type Node } from "./rule";
+import { ruleStr, ruleList, guessNodes, type Node } from "./rule";
 import { log as fileLog } from "../log";
 
 // —— 脚本书源运行时 ——
@@ -22,6 +22,9 @@ export async function fetchText(url: string, opts: Omit<FetchOpts, "headers"> & 
 }
 
 export const parse = (html: string) => cheerio.load(html);
+
+// 规则求值用的节点包装（ruleText/ruleSel 入参；转换器生成的代码用）
+export const nodes = (text: string): Node[] => guessNodes(text);
 
 // 相对 URL → 绝对；base 缺省取实例的 base 成员
 export function abs(u: string, base?: string): string {
