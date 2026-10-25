@@ -153,11 +153,12 @@ const NavItem = ({ icon, label, onClick }: { icon: string; label: string; onClic
     <span className="text-xs leading-none">{label}</span>
   </button>
 );
-// 纯图标悬浮钮（title 提示；透明背景，跟随主题色）
-const FloatBtn = ({ icon, title, onClick, active }: { icon: string; title: string; onClick: () => void; active?: boolean }) => (
+// 纯图标悬浮钮（title 提示；可传入底色描边样式，暗色主题下也看得清）
+const FloatBtn = ({ icon, title, onClick, active, style }: { icon: string; title: string; onClick: () => void; active?: boolean; style?: React.CSSProperties }) => (
   <button
     onClick={onClick}
     title={title}
+    style={style}
     className={`flex h-10 w-10 items-center justify-center rounded-full transition-opacity hover:opacity-100 ${active ? "text-amber-500 opacity-100" : "opacity-75"}`}
   >
     <Icon name={icon} size={19} />
@@ -401,8 +402,13 @@ export default function Reader() {
   }, [toast]);
 
   const bookPct = chapters.length ? `${Math.round(((idx + 1) / chapters.length) * 1000) / 10}%` : "";
-  // 细线总进度 = (当前章 + 章内滚动) / 总章数，滚动时平滑推进
-  const linePct = chapters.length ? Math.min(((idx + scrollFrac) / chapters.length) * 100, 100) : 0;
+  // 底部细线 = 章内滚动进度（滚到底 100%），纯前端派生不同步后端；章节进度在底栏文字里
+  const linePct = Math.min(scrollFrac * 100, 100);
+  // 浮动圆钮底色：暗色主题黑底、亮色主题白底，避免图标与背景混在一起
+  const floatBtnStyle: React.CSSProperties = {
+    background: theme.dark ? "rgba(0,0,0,.45)" : "rgba(255,255,255,.65)",
+    border: "1px solid rgba(128,128,128,.28)",
+  };
 
   return (
     <div className="fixed inset-0" style={{ background: theme.bg, color: theme.text }}>
@@ -455,9 +461,9 @@ export default function Reader() {
         </div>
       )}
 
-      {/* PC 左栏：悬浮在内容左侧 */}
+      {/* PC 左栏：≥900px 时紧贴正文左缘（留 12px 间隙），窄视口退回贴窗口边 */}
       {chrome && (
-        <div className="absolute left-1 top-3 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2">
+        <div className="absolute left-1 top-3 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2 min-[900px]:left-[calc(50%-320px)] min-[900px]:-translate-x-[calc(100%+12px)]">
           <NavItem icon="home" label="首页" onClick={() => nav("/")} />
           <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
           <NavItem icon="globe" label="书源" onClick={openSources} />
@@ -465,29 +471,29 @@ export default function Reader() {
         </div>
       )}
 
-      {/* PC 右栏：悬浮在内容右侧靠底 */}
+      {/* PC 右栏：≥900px 时紧贴正文右缘（留 12px 间隙） */}
       {chrome && (
-        <div className="absolute bottom-3 right-1 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-end min-[501px]:gap-3">
-          <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} />
-          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} />
-          <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} />
-          <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} />
+        <div className="absolute bottom-3 right-1 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-end min-[501px]:gap-3 min-[900px]:right-auto min-[900px]:left-[calc(50%+320px)] min-[900px]:translate-x-[12px]">
+          <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} style={floatBtnStyle} />
+          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} style={floatBtnStyle} />
+          <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} style={floatBtnStyle} />
+          <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} style={floatBtnStyle} />
         </div>
       )}
 
-      {/* 手机左侧悬浮：书籍详情 / 缓存下载 */}
+      {/* 手机左侧悬浮：书籍详情 / 缓存下载（半透明底色，暗色主题下也看得清） */}
       {chrome && (
         <div className="absolute bottom-20 left-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
-          <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} />
-          <FloatBtn icon="download" title="缓存下载" onClick={cacheAll} />
+          <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} style={floatBtnStyle} />
+          <FloatBtn icon="download" title="缓存下载" onClick={cacheAll} style={floatBtnStyle} />
         </div>
       )}
-      {/* 手机右侧悬浮：刷新 / 朗读 / 设置 */}
+      {/* 手机右侧悬浮：刷新 / 朗读 / 设置（设置入口在右侧按钮组，底栏不放） */}
       {chrome && (
         <div className="absolute bottom-20 right-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
-          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} />
-          <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} />
-          <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} />
+          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} style={floatBtnStyle} />
+          <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} style={floatBtnStyle} />
+          <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} style={floatBtnStyle} />
         </div>
       )}
 
@@ -500,17 +506,16 @@ export default function Reader() {
         </div>
       )}
 
-      {/* 手机底栏：上一章 · 百分比进度 · 下一章 · 设置（悬浮） */}
+      {/* 手机底栏：上一章 · 章节进度 · 下一章（设置入口在右侧浮动按钮组） */}
       {chrome && (
         <div className="absolute inset-x-0 bottom-0 z-30 flex items-center justify-around border-t px-2 py-2 backdrop-blur-sm min-[501px]:hidden" style={{ background: theme.bg, borderColor: "rgba(128,128,128,.25)" }}>
           <button onClick={() => goChapter(idx - 1)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">上一章</button>
           <span className="min-w-14 text-center text-xs opacity-60">{bookPct}</span>
           <button onClick={() => goChapter(idx + 1)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">下一章</button>
-          <button onClick={() => setShowSettings(true)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">设置</button>
         </div>
       )}
 
-      {/* 底部细线进度：总进度 = (当前章 + 章内滚动) / 总章数，常驻显示（不受菜单显隐影响） */}
+      {/* 底部细线进度：章内滚动进度（滚到底 100%），常驻显示（不受菜单显隐影响，不同步后端） */}
       <div className="pointer-events-none absolute inset-x-0 bottom-0 z-50 h-0.5" style={{ background: "rgba(128,128,128,.2)" }}>
         <div className="h-full transition-[width] duration-150" style={{ width: `${linePct}%`, background: "rgba(245,158,11,.85)" }} />
       </div>
