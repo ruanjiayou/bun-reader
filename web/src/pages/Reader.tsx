@@ -384,10 +384,46 @@ export default function Reader() {
   const bookPct = chapters.length ? `${Math.round(((idx + 1) / chapters.length) * 1000) / 10}%` : "";
 
   return (
-    <div className="fixed inset-0 flex flex-col" style={{ background: theme.bg, color: theme.text }}>
+    <div className="fixed inset-0" style={{ background: theme.bg, color: theme.text }}>
+      {/* 正文铺满全屏（不随工具栏显隐移动，避免阅读中内容跳动）；点击切换工具栏；PC 固定 640px */}
+      <div ref={scrollRef} onScroll={onScroll} onClick={() => setChrome((v) => !v)} className="no-scrollbar absolute inset-0 overflow-y-auto">
+        <div className="mx-auto px-4 py-6 max-[500px]:px-5 min-[501px]:w-[640px]" style={{ fontSize: prefs.fontSize, lineHeight: prefs.lineHeight }}>
+          {ch ? (
+            <>
+              <h2 className="mb-4 font-bold" style={{ fontSize: prefs.fontSize + 4 }}>
+                {ch.title}
+              </h2>
+              {ch.content.split("\n").map((p, i) =>
+                p.trim() ? (
+                  <p key={i} className="mb-3 indent-8">
+                    {p}
+                  </p>
+                ) : null,
+              )}
+              <div className="mb-16 mt-8 text-center text-xs" style={{ color: theme.sub }}>— 本章完 · 下一章继续 —</div>
+            </>
+          ) : (
+            <div className="flex h-[60vh] items-center justify-center text-sm" style={{ color: theme.sub }}>
+              {error ? (
+                <div className="text-center" onClick={(e) => e.stopPropagation()}>
+                  <p className="mb-3">{error}</p>
+                  <button onClick={() => setTick((t) => t + 1)} className="rounded-lg bg-black/30 px-4 py-2 text-sm">
+                    重试
+                  </button>
+                </div>
+              ) : (
+                "加载中…"
+              )}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* 以下全部悬浮定位（absolute），显隐不影响正文布局 */}
+
       {/* 手机顶栏：默认隐藏，点击正文切换；左 icon 右文字；返回=上一个路由 */}
       {chrome && (
-        <div className="flex items-center gap-0.5 border-b px-1 py-1.5 min-[501px]:hidden" style={{ borderColor: "rgba(128,128,128,.25)" }}>
+        <div className="absolute inset-x-0 top-0 z-30 flex items-center gap-0.5 border-b px-1 py-1.5 backdrop-blur-sm min-[501px]:hidden" style={{ background: theme.bg, borderColor: "rgba(128,128,128,.25)" }}>
           <button onClick={() => nav(-1)} className="flex h-9 w-9 flex-none items-center justify-center opacity-75 hover:opacity-100" title="返回上一页">
             <Icon name="back" size={18} />
           </button>
@@ -398,90 +434,54 @@ export default function Reader() {
         </div>
       )}
 
-      <div className="flex min-h-0 flex-1 justify-center">
-        {/* PC 左栏：默认隐藏，点击正文切换 */}
-        {chrome && (
-          <div className="hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2 min-[501px]:py-4">
-            <NavItem icon="home" label="首页" onClick={() => nav("/")} />
-            <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
-            <NavItem icon="globe" label="书源" onClick={openSources} />
-            <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
-          </div>
-        )}
-
-        {/* 正文：滚动阅读（隐藏滚动条）；点击切换工具栏；PC 固定 640px */}
-        <div ref={scrollRef} onScroll={onScroll} onClick={() => setChrome((v) => !v)} className="no-scrollbar w-full min-w-0 flex-1 overflow-y-auto min-[501px]:w-[640px] min-[501px]:flex-none">
-          <div className="mx-auto px-4 py-6 max-[500px]:px-5" style={{ fontSize: prefs.fontSize, lineHeight: prefs.lineHeight }}>
-            {ch ? (
-              <>
-                <h2 className="mb-4 font-bold" style={{ fontSize: prefs.fontSize + 4 }}>
-                  {ch.title}
-                </h2>
-                {ch.content.split("\n").map((p, i) =>
-                  p.trim() ? (
-                    <p key={i} className="mb-3 indent-8">
-                      {p}
-                    </p>
-                  ) : null,
-                )}
-                <div className="mt-8 text-center text-xs" style={{ color: theme.sub }}>— 本章完 · 下一章继续 —</div>
-              </>
-            ) : (
-              <div className="flex h-[60vh] items-center justify-center text-sm" style={{ color: theme.sub }}>
-                {error ? (
-                  <div className="text-center" onClick={(e) => e.stopPropagation()}>
-                    <p className="mb-3">{error}</p>
-                    <button onClick={() => setTick((t) => t + 1)} className="rounded-lg bg-black/30 px-4 py-2 text-sm">
-                      重试
-                    </button>
-                  </div>
-                ) : (
-                  "加载中…"
-                )}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* PC 右栏：默认隐藏 */}
-        {chrome && (
-          <div className="hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-end min-[501px]:justify-end min-[501px]:gap-3 min-[501px]:py-4">
-            <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} />
-            <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} />
-            <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} />
-            <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} />
-          </div>
-        )}
-
-        {/* 手机左侧悬浮：书籍详情 / 缓存下载 */}
-        {chrome && (
-          <div className="fixed bottom-20 left-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
-            <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} />
-            <FloatBtn icon="download" title="缓存下载" onClick={cacheAll} />
-          </div>
-        )}
-        {/* 手机右侧悬浮：刷新 / 朗读 / 设置 */}
-        {chrome && (
-          <div className="fixed bottom-20 right-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
-            <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} />
-            <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} />
-            <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} />
-          </div>
-        )}
-      </div>
-
-      {/* PC 底部：上一章 · 进度 · 下一章（随工具栏显隐） */}
+      {/* PC 左栏：悬浮在内容左侧 */}
       {chrome && (
-        <div className="flex items-center justify-center gap-8 pb-3 text-xs min-[501px]:flex max-[500px]:hidden" style={{ color: theme.sub }}>
-          <button onClick={() => goChapter(idx - 1)} className="px-3 py-1.5 opacity-75 transition-opacity hover:opacity-100">上一章</button>
-          <span className="min-w-16 text-center">{chapters.length ? `${idx + 1}/${chapters.length} · ${bookPct}` : ""}</span>
-          <button onClick={() => goChapter(idx + 1)} className="px-3 py-1.5 opacity-75 transition-opacity hover:opacity-100">下一章</button>
+        <div className="absolute left-1 top-3 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2">
+          <NavItem icon="home" label="首页" onClick={() => nav("/")} />
+          <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
+          <NavItem icon="globe" label="书源" onClick={openSources} />
+          <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
         </div>
       )}
 
-      {/* 手机底栏：上一章 · 百分比进度 · 下一章 · 设置（随工具栏显隐） */}
+      {/* PC 右栏：悬浮在内容右侧靠底 */}
       {chrome && (
-        <div className="flex items-center justify-around border-t px-2 py-2 min-[501px]:hidden" style={{ borderColor: "rgba(128,128,128,.25)" }}>
+        <div className="absolute bottom-3 right-1 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-end min-[501px]:gap-3">
+          <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} />
+          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} />
+          <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} />
+          <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} />
+        </div>
+      )}
+
+      {/* 手机左侧悬浮：书籍详情 / 缓存下载 */}
+      {chrome && (
+        <div className="absolute bottom-20 left-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
+          <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} />
+          <FloatBtn icon="download" title="缓存下载" onClick={cacheAll} />
+        </div>
+      )}
+      {/* 手机右侧悬浮：刷新 / 朗读 / 设置 */}
+      {chrome && (
+        <div className="absolute bottom-20 right-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
+          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} />
+          <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} />
+          <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} />
+        </div>
+      )}
+
+      {/* PC 底部：上一章 · 进度 · 下一章（悬浮） */}
+      {chrome && (
+        <div className="absolute inset-x-0 bottom-0 z-30 hidden items-center justify-center gap-8 border-t bg-inherit py-2 text-xs min-[501px]:flex max-[500px]:hidden backdrop-blur-sm" style={{ color: theme.sub, borderColor: "rgba(128,128,128,.2)", background: theme.bg }}>
+          <button onClick={() => goChapter(idx - 1)} className="px-3 py-1 opacity-75 transition-opacity hover:opacity-100">上一章</button>
+          <span className="min-w-16 text-center">{chapters.length ? `${idx + 1}/${chapters.length} · ${bookPct}` : ""}</span>
+          <button onClick={() => goChapter(idx + 1)} className="px-3 py-1 opacity-75 transition-opacity hover:opacity-100">下一章</button>
+        </div>
+      )}
+
+      {/* 手机底栏：上一章 · 百分比进度 · 下一章 · 设置（悬浮） */}
+      {chrome && (
+        <div className="absolute inset-x-0 bottom-0 z-30 flex items-center justify-around border-t px-2 py-2 backdrop-blur-sm min-[501px]:hidden" style={{ background: theme.bg, borderColor: "rgba(128,128,128,.25)" }}>
           <button onClick={() => goChapter(idx - 1)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">上一章</button>
           <span className="min-w-14 text-center text-xs opacity-60">{bookPct}</span>
           <button onClick={() => goChapter(idx + 1)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">下一章</button>
