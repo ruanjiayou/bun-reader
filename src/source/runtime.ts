@@ -4,6 +4,9 @@ import { httpText, type FetchOpts } from "./fetcher";
 import { ruleStr, ruleList, guessNodes, type Node } from "./rule";
 import { log as fileLog } from "../log";
 
+// 浏览器抓取（WAF/验证码/加密 AJAX 站点）：透传给脚本书源使用
+export { browserOpen, browserText, type BrowserPage } from "./browser";
+
 // —— 脚本书源运行时 ——
 // 注入到 data/sources/{id}.js 的唯一 API 面（scaffold 的 import 行从这里解析）。
 // 源内可用：fetchText / parse / abs / log / ruleText / ruleSel

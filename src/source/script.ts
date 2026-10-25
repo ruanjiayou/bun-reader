@@ -12,6 +12,7 @@ import { isPlaceholder, type BookItem, type ChapterItem, type Log } from "./engi
 const SOURCES_DIR = "data/sources";
 const RUNTIME_URL = pathToFileURL(path.resolve(import.meta.dir, "runtime.ts")).href;
 const DEFAULT_TIMEOUT = 30_000;
+const TOC_TIMEOUT = 600_000; // 目录抓取放宽：加密翻页多屏 + 验证码人工验证最长 180s
 const TOC_MAX_PAGES = 200;
 const CONTENT_MAX_PAGES = 50;
 
@@ -20,7 +21,7 @@ export function saveScriptFile(id: number, code: string) {
   mkdirSync(SOURCES_DIR, { recursive: true });
   const scaffold =
     `// AUTO SCAFFOLD —— 由引擎生成，请勿修改本段\n` +
-    `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel } from "${RUNTIME_URL}";\n\n`;
+    `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel, browserOpen, browserText } from "${RUNTIME_URL}";\n\n`;
   writeFileSync(`${SOURCES_DIR}/${id}.js`, scaffold + code.trim() + "\n");
 }
 
@@ -64,7 +65,7 @@ export function formToCode(form: ScriptForm): string {
 
 // 保存前校验：scaffold + 生成代码可解析且 default 导出为 class
 export async function validateScriptCode(code: string): Promise<string | null> {
-  const scaffold = `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel } from ${JSON.stringify(RUNTIME_URL)};\n\n`;
+  const scaffold = `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel, browserOpen, browserText } from ${JSON.stringify(RUNTIME_URL)};\n\n`;
   try {
     const mod = await import(`data:text/javascript;base64,${Buffer.from(scaffold + code).toString("base64")}`);
     if (typeof mod.default !== "function") return "必须导出 export default class Source";
@@ -204,7 +205,7 @@ export async function scriptToc(row: { id: number }, tocUrl: string, log?: Log, 
     visited.add(url);
     page++;
     const cur: string = url;
-    const r: any = await withTimeout(runWithInst(inst, () => inst.getChapters(cur)), timeoutMs, "getChapters");
+    const r: any = await withTimeout(runWithInst(inst, () => inst.getChapters(cur)), TOC_TIMEOUT, "getChapters");
     const list = Array.isArray(r) ? r : (r?.list ?? []);
     for (const c of list ?? []) {
       const t = String(c?.title ?? "").trim();
