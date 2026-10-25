@@ -21,6 +21,7 @@ interface CacheStatus {
   cachedCount: number;
   running: boolean;
   job: { total: number; done: number; failed: number; status: string } | null;
+  logs?: { level: "ok" | "warn" | "info"; msg: string; t: number }[];
 }
 
 export default function Book() {
@@ -188,6 +189,17 @@ export default function Book() {
           <button onClick={cacheRelease} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-400 hover:bg-red-950 hover:text-red-400">释放缓存</button>
         </div>
       </div>
+
+      {/* 缓存活动日志：最近 30 条（最新在上），成功/失败都显示章节标题 */}
+      {cache?.logs && cache.logs.length > 0 && (
+        <div className="mb-4 max-h-40 overflow-y-auto rounded-xl bg-neutral-900 p-2 font-mono text-xs leading-5">
+          {[...cache.logs].reverse().map((l, i) => (
+            <div key={i} className={l.level === "ok" ? "text-emerald-400/80" : l.level === "warn" ? "text-amber-400/80" : "text-neutral-400"}>
+              <span className="text-neutral-600">{new Date(l.t).toLocaleTimeString("zh-CN", { hour12: false })}</span> {l.msg}
+            </div>
+          ))}
+        </div>
+      )}
 
       {book && (
         <div className="mb-4 flex gap-4 rounded-xl bg-neutral-800 p-4">
