@@ -193,8 +193,8 @@ export default function Reader() {
   const [switching, setSwitching] = useState(false);
   const [srcErr, setSrcErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
-  const saveTimer = useRef<ReturnType<typeof setTimeout>>(null);
   const [scrollFrac, setScrollFrac] = useState(0); // 章内滚动比例 0-1（底部细线进度实时用）
+  const lastSent = useRef<{ idx: number; pct: number }>({ idx: -1, pct: -1 }); // 上次已上报的进度（去重用）
   const preloaded = useRef<Map<number, ContentResp>>(new Map());
   const firstLoad = useRef(true); // 只有首次进入阅读器才恢复上次进度，章节间跳转一律回到开头
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -226,6 +226,11 @@ export default function Reader() {
     setShowSettings(false);
     setCh(null);
     setScrollFrac(0);
+    // 进度上报：进章/跳章立即发一次；阅读中由定时器比对、有变化才发
+    const report = (pct: number) => {
+      lastSent.current = { idx, pct };
+      api(`/api/books/${bookId}/progress`, { method: "PUT", body: JSON.stringify({ chapterIdx: idx, scrollPos: pct }) }).catch(() => {});
+    };
     const cached = preloaded.current.get(idx);
     const apply = (r: ContentResp) => {
       if (!alive) return;
@@ -237,6 +242,7 @@ export default function Reader() {
           .then((b) => {
             if (!alive) return;
             const p = b.progress?.scrollPos ?? 0;
+            report(p); // 进章立即上报一次进度
             requestAnimationFrame(() => {
               const el = scrollRef.current;
               if (el) el.scrollTop = ((el.scrollHeight - el.clientHeight) * Math.min(p, 100)) / 100;
@@ -245,6 +251,7 @@ export default function Reader() {
           .catch(() => {});
       } else {
         // 章节间跳转：直接回到开头
+        report(0); // 跳章立即上报一次进度
         requestAnimationFrame(() => {
           if (scrollRef.current) scrollRef.current.scrollTop = 0;
         });
@@ -264,24 +271,33 @@ export default function Reader() {
         .catch((e) => alive && setError(e.message));
     return () => {
       alive = false;
-      clearTimeout(saveTimer.current!);
       window.speechSynthesis?.cancel();
       setSpeaking(false);
     };
   }, [idx, bookId, tick]);
 
-  // 滚动 → 细线进度实时跟随 + 防抖上报进度（scrollPos = 章内滚动百分比）
+  // 滚动 → 细线进度实时跟随（进度上报由下方定时器统一处理，滚动本身不发请求）
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
     const max = el.scrollHeight - el.clientHeight;
     setScrollFrac(max > 0 ? el.scrollTop / max : 0);
-    clearTimeout(saveTimer.current!);
-    saveTimer.current = setTimeout(() => {
-      const pct = max > 0 ? Math.round((el.scrollTop / max) * 1000) / 10 : 0;
-      api(`/api/books/${bookId}/progress`, { method: "PUT", body: JSON.stringify({ chapterIdx: idx, scrollPos: pct }) }).catch(() => {});
-    }, 800);
   };
+
+  // 阅读中定时比对进度（5s），有变化才上报；进章/跳章的立即上报在加载 effect 里
+  useEffect(() => {
+    const timer = setInterval(() => {
+      const el = scrollRef.current;
+      if (!el) return;
+      const max = el.scrollHeight - el.clientHeight;
+      const pct = max > 0 ? Math.round((el.scrollTop / max) * 1000) / 10 : 0;
+      if (lastSent.current.idx !== idx || Math.abs(pct - lastSent.current.pct) >= 0.5) {
+        lastSent.current = { idx, pct };
+        api(`/api/books/${bookId}/progress`, { method: "PUT", body: JSON.stringify({ chapterIdx: idx, scrollPos: pct }) }).catch(() => {});
+      }
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [idx, bookId]);
 
   // 当前书名（换源搜索关键词）
   useEffect(() => {

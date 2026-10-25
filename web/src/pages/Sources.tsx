@@ -86,7 +86,7 @@ const SECTIONS: { title: string; fields: { path: string; label: string; ph?: str
   {
     title: "正文",
     fields: [
-      { path: "ruleContent.content", label: "正文规则（多行文本用 .textNodes()）", rows: 2, ph: "'#content'.textNodes()\n或 '.readcontent'.text()" },
+      { path: "ruleContent.content", label: "正文规则（段落换行用 .textBlocks()，多行直文本用 .textNodes()）", rows: 2, ph: "'#content'.textBlocks()（每个 p/div 一行）\n或 '.readcontent'.textBlocks()\n或 '.readcontent'.textNodes()（正文是裸文本节点时）" },
       { path: "ruleContent.replaceRegex", label: "替换净化（正则##替换为，替换为留空=删除）", ph: "广告.*?<br>##\n（##广告.*?##  删除匹配内容）" },
     ],
   },
@@ -282,8 +282,11 @@ export default function Sources() {
         const { code } = await api<{ code: string }>(`/api/sources/${id}/code`);
         setScriptCode(code);
       } else {
-        setForm(JSON.parse(row.json));
-        setJsonText(JSON.stringify(JSON.parse(row.json), null, 2));
+        // header 数据库统一存对象，textarea 里以 JSON 文本展示
+        const parsed = JSON.parse(row.json);
+        if (parsed.header && typeof parsed.header === "object") parsed.header = JSON.stringify(parsed.header, null, 2);
+        setForm(parsed);
+        setJsonText(JSON.stringify(parsed, null, 2));
         setScriptCode("");
       }
       setMsg("");
@@ -295,6 +298,7 @@ export default function Sources() {
   const syncJsonToForm = (): boolean => {
     try {
       const parsed = JSON.parse(jsonText);
+      if (parsed.header && typeof parsed.header === "object") parsed.header = JSON.stringify(parsed.header, null, 2);
       setForm({ ...emptyForm(), ...parsed });
       return true;
     } catch {
@@ -622,7 +626,7 @@ export default function Sources() {
                   ))}
                   <div className="pt-1 text-xs leading-5 text-neutral-500">
                     可用 API：fetchText(url, opts?) → {"{status, text, url}"}；parse(html) → cheerio $；abs(u, base?) 相对转绝对；log(msg)；
-                    nodes(html) / ruleText(ns, 规则) / ruleSel(ns, 规则)（规则语法兼容）。this.base / this.headers / this.replace 为类成员。
+                    nodes(html) / ruleText(ns, 规则) / ruleSel(ns, 规则)（规则语法兼容，正文换行推荐 .textBlocks()）。this.base / this.headers / this.replace 为类成员。
                   </div>
                 </div>
               </fieldset>

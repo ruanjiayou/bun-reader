@@ -325,6 +325,28 @@ describe("v2 链式调用语法求值", () => {
   test("空规则返回空；JSON 字符串值经 nodeText 原样输出", () => {
     expect(applyRule(htmlNodes("<div>x</div>"), "")).toEqual([]);
   });
+
+  test("textBlocks：段落级换行提取（嵌套 p 去重、br 转行、跳过裸文本）", () => {
+    // 嵌套 <p><p>…</p></p>（htmlparser2 不自动闭合 p）：只取最内层，不重复
+    const nested = applyRule(htmlNodes(`<div id="c"><p><p>第一段</p><p>第二段</p></p><p>第三段</p></div>`), "'#c'.textBlocks()");
+    expect(nested.map(nodeText).join("\n")).toBe("第一段\n第二段\n第三段");
+    // <br> 视为换行；容器 div 里的裸文本（广告行）不进结果
+    const br = applyRule(htmlNodes(`<div id="c">广告文字<p>一行一<br>一行二</p><p>一行三</p></div>`), "'#c'.textBlocks()");
+    expect(br.map(nodeText).join("\n")).toBe("一行一\n一行二\n一行三");
+  });
+});
+
+describe("header 统一对象化（normalizeSource）", () => {
+  test("legado 字符串 header 解析为对象；解析失败保留原样", () => {
+    expect(normalizeSource({ header: '{"User-Agent":"Mozilla/5.0"}' }).header).toEqual({ "User-Agent": "Mozilla/5.0" });
+    expect(normalizeSource({ header: { a: "b" } }).header).toEqual({ a: "b" });
+    expect(normalizeSource({ header: "不是json" }).header).toBe("不是json");
+  });
+
+  test("devtools Copy as fetch 片段（平衡对象后跟垃圾）宽松截取", () => {
+    const broken = '{\n  "accept": "text/html",\n  "cookie": "a=1"\n},\n  "referrer": "https://x.com/",\n  "method": "GET"}';
+    expect(normalizeSource({ header: broken }).header).toEqual({ accept: "text/html", cookie: "a=1" });
+  });
 });
 
 describe("旧语法 → v2 迁移转换（normalizeSource，幂等）", () => {

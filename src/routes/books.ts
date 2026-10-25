@@ -466,8 +466,18 @@ bookRoutes.get("/:id/content/:idx", async (c) => {
     return c.json({ idx, title: ch.title, content, isPlaceholder: cached.isPlaceholder, cached: true });
   }
 
+  // 抓取走同源限速器（与全本缓存任务共享同一预算：阅读请求计入频率，窗口满时排队等待）
   const eng = await loadEngine(book.sourceId);
-  const raw = await fetchAndSave(eng, ch.url, key, idx);
+  const limiter = book.sourceId != null ? limiterFor(book.sourceId) : null;
+  if (limiter) await limiter.acquire(book.sourceId!);
+  let raw: string;
+  try {
+    raw = await fetchAndSave(eng, ch.url, key, idx);
+    limiter?.onSuccess(book.sourceId!);
+  } catch (e) {
+    limiter?.onFailure(book.sourceId!);
+    throw e;
+  }
   return c.json({ idx, title: ch.title, content: raw, isPlaceholder: isPlaceholder(raw), cached: false });
 });
 

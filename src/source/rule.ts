@@ -46,7 +46,7 @@ const isJsRule = (r: string) => r.includes("<js>") || r.startsWith("@js:") || r.
 // —— 旧语法 → v2 迁移（normalizeSource 在导入与运行前调用，幂等）——
 // 裸取值器 text/href → .text()/.attr('href')；a@text → a.text()；sel.N → .eq(N)；
 // attr(x) → .attr(x)；tag(x) → x；children → .children()；Legado 关键字 class./tag./id. 照旧
-const CONTENT_CALLS: Record<string, string> = { text: ".text()", textNodes: ".textNodes()", ownText: ".ownText()", html: ".html()", all: ".all()" };
+const CONTENT_CALLS: Record<string, string> = { text: ".text()", textNodes: ".textNodes()", textBlocks: ".textBlocks()", ownText: ".ownText()", html: ".html()", all: ".all()" };
 const ATTR_KEYWORDS = new Set(["href", "src", "content", "value", "title", "alt"]);
 // 标准 HTML 标签名：裸单词命中则按标签选择，否则视为属性名
 const HTML_TAGS = new Set(
@@ -58,7 +58,7 @@ const HTML_TAGS = new Set(
 const IDX = /^(.+)\.(-?\d+)$/;
 // 纯标签/类/id（可含连字符和数字，如 h1、.item-2、#grid-12）→ 不拆索引，避免误伤合法类名
 const PLAIN_SEL = /^[.#]?[A-Za-z][A-Za-z0-9_-]*$/;
-const CALL_NAMES = "text|textNodes|ownText|html|all|attr|find|children|eq|first|last|parent|next|prev";
+const CALL_NAMES = "text|textNodes|textBlocks|ownText|html|all|attr|find|children|eq|first|last|parent|next|prev";
 // 规则末尾已是 .xxx(...) 方法调用，或选择器整体引号包裹 → 判定为 v2 语法，转换器原样返回（幂等）
 const ALREADY_V2 = new RegExp(`\\.(${CALL_NAMES})\\((?:[^()']|'[^']*'|"[^"]*")*\\)$`);
 const FULLY_QUOTED = /^'[^']*'$|^"[^"]*"$/;
@@ -165,10 +165,50 @@ export function legadoToOurs(rule: string): string {
 
 const RULE_FIELDS = new Set(["bookList", "name", "author", "lastChapter", "intro", "coverUrl", "bookUrl", "tocUrl", "chapterList", "chapterName", "chapterUrl", "nextTocUrl", "content", "nextContentUrl"]);
 
-// 书源 JSON 规则字段统一转换为 v2 语法（幂等，导入与运行前都调用）
+// header 宽松解析：标准 JSON 失败时截取首个平衡的 {...} 对象（容错 devtools「Copy as fetch」复制出来的片段）。
+// 本项目 header 统一以对象存储（legado 的字符串约定在导入时解析掉），运行期 parseHeader 不再做字符串兼容
+function parseHeaderLoose(s: string): Record<string, string> | null {
+  const tryParse = (t: string) => {
+    try {
+      const v = JSON.parse(t);
+      return v && typeof v === "object" && !Array.isArray(v) ? v : null;
+    } catch {
+      return null;
+    }
+  };
+  const direct = tryParse(s);
+  if (direct) return direct;
+  const start = s.indexOf("{");
+  if (start < 0) return null;
+  let depth = 0;
+  let inStr = false;
+  let esc = false;
+  for (let i = start; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") depth++;
+    else if (ch === "}") {
+      depth--;
+      if (!depth) return tryParse(s.slice(start, i + 1));
+    }
+  }
+  return null;
+}
+
+// 书源 JSON 规则字段统一转换为 v2 语法（幂等，导入与运行前都调用）；header 统一对象化
 export function normalizeSource(src: any): any {
   if (!src || typeof src !== "object") return src;
   const out = { ...src };
+  if (typeof out.header === "string") {
+    const h = parseHeaderLoose(out.header);
+    if (h) out.header = h;
+  }
   for (const grp of ["ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent"]) {
     if (out[grp] && typeof out[grp] === "object")
       out[grp] = Object.fromEntries(
@@ -198,6 +238,26 @@ function textNodes($: CheerioAPI, el: AnyNode): string {
       if (c.type === "text" && (c.data ?? "").trim()) parts.push((c.data as string).trim());
     });
   return parts.join("\n");
+}
+
+const BLOCK_SEL = "p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,div,td,th,section,article";
+
+// 段落级正文提取：取最内层块级元素的文本（内部还嵌套块的容器跳过，避免嵌套 p 重复），<br> 视为换行，按文档序 \n 连接
+// 对比 .text()（全部拼一行无换行）和 .textNodes()（只取直接文本节点）：正文场景两者都不对，这个才是想要的
+function textBlocks($: CheerioAPI, el: AnyNode): string {
+  const out: string[] = [];
+  $(el)
+    .find(BLOCK_SEL)
+    .each((_, n) => {
+      if ($(n).find(BLOCK_SEL).length) return; // 容器块：子块会各自产出
+      const c = $(n).clone();
+      c.find("br").replaceWith("\n");
+      for (const line of c.text().split("\n")) {
+        const t = line.replace(/[ \t\u3000]+/g, " ").trim();
+        if (t) out.push(t);
+      }
+    });
+  return out.join("\n");
 }
 
 function safeFind($: CheerioAPI, el: AnyNode, sel: string): AnyNode[] {
@@ -281,6 +341,9 @@ function evalChain(cur: Node[], calls: Call[]): Node[] {
         break;
       case "textNodes":
         for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: textNodes(n.$, n.el) });
+        break;
+      case "textBlocks":
+        for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: textBlocks(n.$, n.el) });
         break;
       case "attr": {
         const name = unquote(c.arg);
