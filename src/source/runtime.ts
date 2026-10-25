@@ -5,7 +5,8 @@ import { ruleStr, ruleList, guessNodes, type Node } from "./rule";
 import { log as fileLog } from "../log";
 
 // 浏览器抓取（WAF/验证码/加密 AJAX 站点）：透传给脚本书源使用
-export { browserOpen, browserText, type BrowserPage } from "./browser";
+import { browserCookieHeader, browserOpen, browserText, type BrowserPage } from "./browser";
+export { browserCookieHeader, browserOpen, browserText, type BrowserPage };
 
 // —— 脚本书源运行时 ——
 // 注入到 data/sources/{id}.js 的唯一 API 面（scaffold 的 import 行从这里解析）。
@@ -34,7 +35,14 @@ export function runWithInst(inst: any, fn: () => Promise<any>): Promise<any> {
 
 export async function fetchText(url: string, opts: Omit<FetchOpts, "headers"> & { headers?: Record<string, string> } = {}) {
   const ctx = als.getStore();
-  const res = await httpText(url, { ...opts, headers: { ...(ctx?.headers ?? {}), ...(opts.headers ?? {}) } });
+  const headers = { ...(ctx?.headers ?? {}), ...(opts.headers ?? {}) };
+  // WAF 站点复用：浏览器（browserOpen/browserText）过完人机验证后 cookie 存在持久化 profile，
+  // 这里把同域 cookie 合并进请求头（用户显式设置了 cookie 则不覆盖）；浏览器未启动时不拉起
+  if (!headers.cookie && !headers.Cookie) {
+    const ck = await browserCookieHeader(url);
+    if (ck) headers.cookie = ck;
+  }
+  const res = await httpText(url, { ...opts, headers });
   return { status: res.status, text: res.text, url: res.url };
 }
 
