@@ -47,14 +47,8 @@ interface CacheJobState {
   status: "running" | "done" | "stopped" | "error";
 }
 const runningJobs = new Map<string, { stop: boolean }>();
-// 缓存任务活动日志（内存环形，最近 100 条）：成功/失败都记（含章节标题），随进度接口轮询带出
-const cacheLogs = new Map<string, { level: "ok" | "warn" | "info"; msg: string; t: number }[]>();
-const pushCacheLog = (key: string, level: "ok" | "warn" | "info", msg: string) => {
-  const arr = cacheLogs.get(key) ?? [];
-  arr.push({ level, msg, t: Date.now() });
-  if (arr.length > 100) arr.splice(0, arr.length - 100);
-  cacheLogs.set(key, arr);
-};
+// 缓存章节日志：只打后端日志（控制台 + data/logs/日期.log），前端不展示
+const cacheLog = (level: "info" | "warn" | "error", msg: string) => log[level]("cache", msg);
 const jobStmt = {
   upsert: sqlite.query("INSERT OR REPLACE INTO cache_jobs (content_key, total, done, failed, status, updated_at) VALUES (?, ?, 0, 0, 'running', ?)"),
   update: sqlite.query("UPDATE cache_jobs SET done = ?, failed = ?, status = ?, updated_at = ? WHERE content_key = ?"),
@@ -66,7 +60,7 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
   runningJobs.set(key, stopper);
   jobStmt.upsert.run(key, list.length, Date.now());
   log.info("cache", `任务启动：${key.slice(0, 8)}… 共 ${list.length} 章待抓`);
-  pushCacheLog(key, "info", `任务启动：共 ${list.length} 章待抓`);
+  cacheLog("info", `任务启动：共 ${list.length} 章待抓`);
   try {
     let failStreak = 0; // 连续失败次数：用于拉长间隔，避免被源站反爬锁死
     for (const ch of list) {
@@ -74,7 +68,7 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
         const cur = (jobStmt.get.get(key) ?? {}) as any;
         jobStmt.update.run(cur.done ?? 0, cur.failed ?? 0, "stopped", Date.now(), key);
         log.info("cache", `任务停止：${key.slice(0, 8)}… 已完成 ${cur.done ?? 0}/${list.length}`);
-        pushCacheLog(key, "info", `任务停止：已完成 ${cur.done ?? 0}/${list.length}`);
+        cacheLog("info", `任务停止：已完成 ${cur.done ?? 0}/${list.length}`);
         return;
       }
       let ok = true;
@@ -86,18 +80,18 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
       if (exists && existsSync(exists.filePath)) {
         const cur = jobStmt.get.get(key) as any;
         jobStmt.update.run((cur?.done ?? 0) + 1, cur?.failed ?? 0, "running", Date.now(), key);
-        pushCacheLog(key, "info", `第 ${ch.idx + 1} 章《${ch.title}》阅读时已缓存，跳过`);
+        cacheLog("info", `第 ${ch.idx + 1} 章《${ch.title}》阅读时已缓存，跳过`);
         continue;
       }
       try {
         await fetchAndSave(eng, ch.url, key, ch.idx);
         failStreak = 0;
-        pushCacheLog(key, "ok", `第 ${ch.idx + 1} 章《${ch.title}》缓存成功`);
+        cacheLog("info", `第 ${ch.idx + 1} 章《${ch.title}》缓存成功`);
       } catch (e: any) {
         ok = false;
         failStreak++;
         log.warn("cache", `第 ${ch.idx + 1} 章抓取失败（连续 ${failStreak} 次）：${e?.message ?? e}`);
-        pushCacheLog(key, "warn", `第 ${ch.idx + 1} 章《${ch.title}》失败：${e?.message ?? e}`);
+        cacheLog("warn", `第 ${ch.idx + 1} 章《${ch.title}》失败：${e?.message ?? e}`);
       }
       const cur = jobStmt.get.get(key) as any;
       jobStmt.update.run((cur?.done ?? 0) + (ok ? 1 : 0), (cur?.failed ?? 0) + (ok ? 0 : 1), "running", Date.now(), key);
@@ -108,12 +102,12 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
     const cur = jobStmt.get.get(key) as any;
     jobStmt.update.run(cur.done, cur.failed, "done", Date.now(), key);
     log.info("cache", `任务完成：${key.slice(0, 8)}… 成功 ${cur.done}，失败 ${cur.failed}`);
-    pushCacheLog(key, "info", `任务完成：成功 ${cur.done}，失败 ${cur.failed}`);
+    cacheLog("info", `任务完成：成功 ${cur.done}，失败 ${cur.failed}`);
   } catch (e: any) {
     const cur = jobStmt.get.get(key) as any;
     jobStmt.update.run(cur?.done ?? 0, cur?.failed ?? 0, "error", Date.now(), key);
     log.error("cache", `任务异常终止：${key.slice(0, 8)}… ${e?.message ?? e}`);
-    pushCacheLog(key, "warn", `任务异常终止：${e?.message ?? e}`);
+    cacheLog("warn", `任务异常终止：${e?.message ?? e}`);
   } finally {
     runningJobs.delete(key);
   }
@@ -148,7 +142,7 @@ bookRoutes.get("/:id/cache-all", async (c) => {
   const job = jobStmt.get.get(key) as any;
   const cachedCount = (await db.select({ idx: chapterCache.idx }).from(chapterCache).where(eq(chapterCache.contentKey, key))).length;
   const total = (await db.select({ idx: chapters.idx }).from(chapters).where(eq(chapters.bookId, bookId))).length;
-  return c.json({ total, cachedCount, job: job ?? null, running: runningJobs.has(key), logs: (cacheLogs.get(key) ?? []).slice(-30) });
+  return c.json({ total, cachedCount, job: job ?? null, running: runningJobs.has(key) });
 });
 
 // 停止缓存任务（已抓的保留）
@@ -179,7 +173,6 @@ bookRoutes.post("/:id/cache-release", async (c) => {
   const rows = await db.select({ idx: chapterCache.idx, filePath: chapterCache.filePath }).from(chapterCache).where(eq(chapterCache.contentKey, key));
   await db.delete(chapterCache).where(eq(chapterCache.contentKey, key));
   sqlite.query("DELETE FROM cache_jobs WHERE content_key = ?").run(key);
-  cacheLogs.delete(key);
   for (const r of rows) {
     try {
       unlinkSync(r.filePath);

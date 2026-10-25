@@ -387,7 +387,7 @@ export default function Reader() {
     <div className="fixed inset-0" style={{ background: theme.bg, color: theme.text }}>
       {/* 正文铺满全屏（不随工具栏显隐移动，避免阅读中内容跳动）；点击切换工具栏；PC 固定 640px */}
       <div ref={scrollRef} onScroll={onScroll} onClick={() => setChrome((v) => !v)} className="no-scrollbar absolute inset-0 overflow-y-auto">
-        <div className="mx-auto px-4 py-6 max-[500px]:px-5 min-[501px]:w-[640px]" style={{ fontSize: prefs.fontSize, lineHeight: prefs.lineHeight }}>
+        <div className="mx-auto px-4 pt-16 pb-24 max-[500px]:px-5 min-[501px]:w-[640px] min-[501px]:pt-6 min-[501px]:pb-16" style={{ fontSize: prefs.fontSize, lineHeight: prefs.lineHeight }}>
           {ch ? (
             <>
               <h2 className="mb-4 font-bold" style={{ fontSize: prefs.fontSize + 4 }}>
@@ -400,7 +400,7 @@ export default function Reader() {
                   </p>
                 ) : null,
               )}
-              <div className="mb-16 mt-8 text-center text-xs" style={{ color: theme.sub }}>— 本章完 · 下一章继续 —</div>
+              <div className="mt-8 text-center text-xs" style={{ color: theme.sub }}>— 本章完 · 下一章继续 —</div>
             </>
           ) : (
             <div className="flex h-[60vh] items-center justify-center text-sm" style={{ color: theme.sub }}>
