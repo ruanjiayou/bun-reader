@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, API_BASE } from "../api";
 
 interface SourceRow {
   id: number;
@@ -436,7 +436,7 @@ export default function Sources() {
     setDbgBook(null);
     setDebugging(true);
     try {
-      const res = await fetch(`/api/sources/${editId}/debug`, {
+      const res = await fetch(`${API_BASE}/api/sources/${editId}/debug`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ bookUrl: debugBookUrl.trim() }),

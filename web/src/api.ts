@@ -1,6 +1,10 @@
 // 统一 API 封装：带 cookie、非 2xx 抛错
+// API 前缀：默认 /gw/reader（网关路径）。dev 由 vite 代理转发到 http://192.168.1.124/gw/reader（路径原样保留）；
+// 可用 VITE_API_BASE 覆盖（如置空串则直连同源 /api，本地直连后端调试用）
+export const API_BASE: string = import.meta.env.VITE_API_BASE ?? "/gw/reader";
+
 export async function api<T = any>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetch(API_BASE + path, {
     headers: { "Content-Type": "application/json" },
     ...init,
   });

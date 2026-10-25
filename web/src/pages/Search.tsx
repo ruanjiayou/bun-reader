@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, API_BASE } from "../api";
 
 interface SBook {
   name: string;
@@ -51,7 +51,7 @@ export default function Search() {
     setGroups([]);
     setMsg("");
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q.trim())}`, { signal: ac.signal });
+      const res = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q.trim())}`, { signal: ac.signal });
       const reader = res.body!.getReader();
       const dec = new TextDecoder();
       let buf = "";

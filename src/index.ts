@@ -19,6 +19,11 @@ api.route("/books", bookRoutes);
 api.route("/search", searchRoutes);
 app.route("/api", api);
 
+// 网关前缀别名：前端请求统一带 /gw/reader 前缀；网关不剥前缀直接转发时命中这里
+// （本地直连后端仍走 /api、/auth，两条路径等价）
+app.route("/gw/reader/auth", auth);
+app.route("/gw/reader/api", api);
+
 // SPA：挂在 /reader 前缀下，未命中路径回退 index.html
 const webDist = "web/dist";
 app.get("/reader", (c) => c.redirect("/reader/")); // 无尾斜杠也进应用（须注册在 /reader/* 通配之前，否则被截胡返回空响应）
