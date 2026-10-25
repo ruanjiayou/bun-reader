@@ -7,7 +7,7 @@ import { engineFor } from "../source/facade";
 import type { LogLevel } from "../source/engine";
 import { normalizeSource } from "../source/rule";
 import { rulesToScript } from "../source/convert";
-import { saveScriptFile } from "../source/script";
+import { saveScriptFile, formToCode, validateScriptCode, type ScriptForm } from "../source/script";
 import type { AuthEnv } from "../auth";
 import { log } from "../log";
 
@@ -51,34 +51,35 @@ sourceRoutes.get("/:id/code", async (c) => {
   return c.json({ code: row.code || rulesToScript(JSON.parse(row.json)), generated: true });
 });
 
-// 新建脚本源（code 必填；name 缺省从 // @name 提取；bookUrl 缺省从 base = "..." 提取）
-sourceRoutes.post("/script", async (c) => {
-  const body = await readBody<{ name?: string; bookUrl?: string; code?: string }>(c);
-  const code = (body.code ?? "").trim();
-  if (!code) return c.json({ error: "缺少 code" }, 400);
-  const name = body.name?.trim() || code.match(/@name\s+(.+)/)?.[1]?.trim() || "脚本源";
-  const bookUrl = body.bookUrl?.trim() || code.match(/base\s*=\s*["']([^"']+)["']/)?.[1] || "";
-  const [row] = await db
-    .insert(sources)
-    .values({ name, bookUrl, group: "脚本", json: "{}", type: "script", code })
-    .returning({ id: sources.id });
-  saveScriptFile(row.id, code);
-  log.info("source", `新建脚本源「${name}」id=${row.id}`);
-  return c.json({ id: row.id, name });
-});
-
-// 更新脚本源代码（rules 源不可直改——编辑规则保存时自动重新生成）
-sourceRoutes.put("/:id/code", async (c) => {
-  const body = await readBody<{ code?: string }>(c);
-  const code = (body.code ?? "").trim();
-  if (!code) return c.json({ error: "缺少 code" }, 400);
-  const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
+// 新建/更新脚本源：表单数据（name/base/headers/replace/methods）→ 合并生成 class 代码
+// 表单给人看和编辑，生成的 js 脚本是给程序执行的产物（json 存表单、code 存生成结果）
+async function saveScriptSource(c: any, existId: number | null) {
+  const form = await readBody<ScriptForm>(c);
+  const name = (form.name ?? "").trim();
+  if (!name) return c.json({ error: "缺少源名称" }, 400);
+  const code = formToCode(form);
+  const err = await validateScriptCode(code);
+  if (err) return c.json({ error: `脚本校验失败：${err}` }, 400);
+  if (existId === null) {
+    const [row] = await db
+      .insert(sources)
+      .values({ name, bookUrl: (form.base ?? "").trim(), group: "脚本", json: JSON.stringify(form), type: "script", code })
+      .returning({ id: sources.id });
+    saveScriptFile(row.id, code);
+    log.info("source", `新建脚本源「${name}」id=${row.id}`);
+    return c.json({ id: row.id, name });
+  }
+  const [row] = await db.select().from(sources).where(eq(sources.id, existId));
   if (!row) return c.json({ error: "书源不存在" }, 404);
-  if (row.type !== "script") return c.json({ error: "规则源不可直接编辑脚本，编辑规则保存后会自动重新生成" }, 400);
-  await db.update(sources).set({ code }).where(eq(sources.id, row.id));
-  saveScriptFile(row.id, code);
-  return c.json({ ok: true });
-});
+  if (row.type !== "script") return c.json({ error: "规则源请编辑规则表单，保存时会自动重新生成脚本" }, 400);
+  await db.update(sources).set({ name, bookUrl: (form.base ?? "").trim(), json: JSON.stringify(form), code }).where(eq(sources.id, existId));
+  saveScriptFile(existId, code);
+  log.info("source", `更新脚本源「${name}」id=${existId}`);
+  return c.json({ ok: true, id: existId });
+}
+
+sourceRoutes.post("/script", (c) => saveScriptSource(c, null));
+sourceRoutes.put("/script/:id", (c) => saveScriptSource(c, Number(c.req.param("id"))));
 
 sourceRoutes.put("/:id", async (c) => {
   const body = await readBody<{ enabled?: boolean; name?: string }>(c);

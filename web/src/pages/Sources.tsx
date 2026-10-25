@@ -122,50 +122,48 @@ const levelColor: Record<DebugEvt["level"], string> = {
   err: "text-red-400",
 };
 
-// 脚本源新建模板：class 四方法全可选，配置在类成员里（base/headers/replace）
-const SCRIPT_TEMPLATE = `// @name 新脚本源
-// 可用 API：fetchText(url, opts?) → {status,text,url}；parse(html) → cheerio $；
-//           abs(u, base?) 相对转绝对；log(msg)；nodes(html)/ruleText(ns,规则)/ruleSel(ns,规则)（规则语法兼容）
-export default class Source {
-  base = "https://www.example.com";      // 相对地址补全的默认 base
-  headers = {};                          // 注入到每次 fetchText（如 Cookie）
-  replace = [];                          // 正文净化：{ regex, replacement } 数组
+// 脚本源按表单编辑：每个方法一个表单项，内容是基础模板（留空 = 未实现），保存时合并拼接为 class 文件
+const METHOD_DEFS: { key: "search" | "getDetail" | "getChapters" | "getContent"; label: string; tpl: string }[] = [
+  {
+    key: "search",
+    label: "搜索 search(name, page) → [{title, author, desc, cover, detailUrl}]",
+    tpl: `async search(name, page = 1) {
+  // 此处添加逻辑
+  // const res = await fetchText(\`\${this.base}/search?kw=\${encodeURIComponent(name)}\`)
+  // const $ = parse(res.text)
+}`,
+  },
+  {
+    key: "getDetail",
+    label: "获取详情 getDetail(url) → { title, author, desc, cover, tocUrl }",
+    tpl: `async getDetail(url) {
+  // 此处添加逻辑
+}`,
+  },
+  {
+    key: "getChapters",
+    label: "获取目录 getChapters(url) → { list: [{title, url}], next? }（翻页由引擎按 next 循环）",
+    tpl: `async getChapters(url) {
+  // 此处添加逻辑
+}`,
+  },
+  {
+    key: "getContent",
+    label: "获取正文 getContent(url) → string 或 { text, next? }（翻页引擎拼接）",
+    tpl: `async getContent(url) {
+  // 此处添加逻辑
+}`,
+  },
+];
 
-  async search(name, page = 1) {
-    const res = await fetchText(\`\${this.base}/search?kw=\${encodeURIComponent(name)}\`);
-    if (res.status >= 400) throw new Error("HTTP " + res.status);
-    const $ = parse(res.text);
-    return $(".item").map((_, el) => ({
-      title: $(el).find(".t").text().trim(),
-      author: $(el).find(".a").text().trim(),
-      desc: $(el).find(".d").text().trim(),
-      cover: abs($(el).find("img").attr("src"), res.url),
-      detailUrl: abs($(el).find("a").attr("href"), res.url),
-    })).get();
-  }
-
-  async getDetail(url) {
-    const res = await fetchText(url);
-    const $ = parse(res.text);
-    return { title: $("#t").text().trim(), author: "", desc: "", cover: "", tocUrl: abs($("#toc").attr("href"), res.url) };
-  }
-
-  // 返回 { list: [{title, url}], next? }：翻页由引擎按 next 循环（去重/上限引擎负责）
-  async getChapters(url) {
-    const res = await fetchText(url);
-    const $ = parse(res.text);
-    const list = $("li a").map((_, el) => ({ title: $(el).text().trim(), url: abs($(el).attr("href"), res.url) })).get();
-    const next = $(".next").attr("href") ? abs($(".next").attr("href"), res.url) : "";
-    return { list, next: next || undefined };
-  }
-
-  // 返回 string（单页）或 { text, next? }（章节内部翻页，引擎拼接）
-  async getContent(url) {
-    const res = await fetchText(url);
-    const $ = parse(res.text);
-    return $("#content").text();
-  }
-}`;
+const emptyScriptForm = () => ({
+  name: "",
+  base: "",
+  headersText: "", // headers 成员（JSON 文本）
+  replaceText: "", // replace 成员（每行 正则##替换为）
+  enabled: true,
+  methods: { search: "", getDetail: "", getChapters: "", getContent: "" } as Record<string, string>,
+});
 
 export default function Sources() {
   const [rows, setRows] = useState<SourceRow[]>([]);
@@ -186,7 +184,8 @@ export default function Sources() {
   const [dbgBook, setDbgBook] = useState<DebugBookInfo | null>(null); // 调试全链路成功后的书籍信息，可加书架
   const [addingBook, setAddingBook] = useState(false);
   const [srcType, setSrcType] = useState<"rules" | "script">("rules"); // 当前编辑上下文的源类型
-  const [scriptCode, setScriptCode] = useState(""); // script 源编辑器内容 / rules 源只读预览
+  const [scriptForm, setScriptForm] = useState(emptyScriptForm()); // 脚本源表单（保存时合并生成 class 脚本）
+  const [scriptCode, setScriptCode] = useState(""); // 右侧「生成的 JS」只读预览（rules/script 都是生成产物）
   const nav = useNavigate();
   const logBox = useRef<HTMLDivElement>(null);
 
@@ -232,6 +231,7 @@ export default function Sources() {
       setForm(emptyForm());
       setJsonText("");
       setSrcType("rules");
+      setScriptForm(emptyScriptForm());
       setScriptCode("");
       setMsg("");
       return;
@@ -241,20 +241,37 @@ export default function Sources() {
       setForm(emptyForm());
       setJsonText("");
       setSrcType("script");
-      setScriptCode(SCRIPT_TEMPLATE);
-      setRightTab("json");
-      setMsg("新建脚本源：改好代码后点「保存源」");
+      setScriptForm(emptyScriptForm());
+      setScriptCode("");
+      setRightTab("debug");
+      setMsg("新建脚本源：填好方法后点「保存源」，保存时自动合并生成 class 脚本");
       return;
     }
     try {
-      const row = await api<{ id: number; json: string; type: string }>(`/api/sources/${id}`);
+      const row = await api<{ id: number; json: string; type: string; enabled: boolean }>(`/api/sources/${id}`);
       setEditId(id);
       setSrcType(row.type === "script" ? "script" : "rules");
       if (row.type === "script") {
-        const { code } = await api<{ code: string }>(`/api/sources/${id}/code`);
-        setScriptCode(code);
+        // script 源的 json 存的是表单数据（保存时的真相），code 是生成产物（只读）
+        const f = JSON.parse(row.json || "{}");
+        setScriptForm({
+          name: f.name ?? row.name ?? "",
+          base: f.base ?? "",
+          headersText: f.headers && Object.keys(f.headers).length ? JSON.stringify(f.headers, null, 2) : "",
+          replaceText: (f.replace ?? []).map((r: any) => `${r.regex}##${r.replacement ?? ""}`).join("\n"),
+          enabled: row.enabled !== false,
+          methods: {
+            search: f.methods?.search ?? "",
+            getDetail: f.methods?.getDetail ?? "",
+            getChapters: f.methods?.getChapters ?? "",
+            getContent: f.methods?.getContent ?? "",
+          },
+        });
         setForm(emptyForm());
         setJsonText("");
+        setRightTab((t) => (t === "json" ? "debug" : t));
+        const { code } = await api<{ code: string }>(`/api/sources/${id}/code`);
+        setScriptCode(code);
       } else {
         setForm(JSON.parse(row.json));
         setJsonText(JSON.stringify(JSON.parse(row.json), null, 2));
@@ -280,19 +297,46 @@ export default function Sources() {
   const saveSource = async (): Promise<number | null> => {
     try {
       if (srcType === "script") {
-        if (!scriptCode.trim()) {
-          setMsg("脚本是空的");
+        if (!scriptForm.name.trim()) {
+          setMsg("缺少源名称");
           return null;
         }
-        if (editId === null) {
-          const r = await api<{ id: number }>("/api/sources/script", { method: "POST", body: JSON.stringify({ code: scriptCode }) });
-          await load();
-          setEditId(r.id);
-          setMsg("脚本源已创建");
-        } else {
-          await api(`/api/sources/${editId}/code`, { method: "PUT", body: JSON.stringify({ code: scriptCode }) });
-          setMsg("脚本已保存并生效");
+        let headers: Record<string, string> = {};
+        if (scriptForm.headersText.trim()) {
+          try {
+            headers = JSON.parse(scriptForm.headersText);
+            if (typeof headers !== "object" || headers === null || Array.isArray(headers)) throw new Error("not object");
+          } catch {
+            setMsg("请求头 headers 不是合法的 JSON 对象");
+            return null;
+          }
         }
+        const replace = scriptForm.replaceText
+          .split("\n")
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .map((l) => {
+            const i = l.indexOf("##");
+            return i === -1 ? { regex: l, replacement: "" } : { regex: l.slice(0, i), replacement: l.slice(i + 2) };
+          });
+        const methods: Record<string, string> = {};
+        for (const k of ["search", "getDetail", "getChapters", "getContent"]) if (scriptForm.methods[k]?.trim()) methods[k] = scriptForm.methods[k];
+        const body = { name: scriptForm.name.trim(), base: scriptForm.base.trim(), headers, replace, methods };
+        if (editId === null) {
+          const r = await api<{ id: number }>("/api/sources/script", { method: "POST", body: JSON.stringify(body) });
+          setEditId(r.id);
+          await load();
+          const { code } = await api<{ code: string }>(`/api/sources/${r.id}/code`);
+          setScriptCode(code);
+          setMsg("脚本源已创建（已合并生成 class 脚本）");
+          setDirty(false);
+          return r.id;
+        }
+        await api(`/api/sources/script/${editId}`, { method: "PUT", body: JSON.stringify(body) });
+        await load();
+        const { code } = await api<{ code: string }>(`/api/sources/${editId}/code`);
+        setScriptCode(code);
+        setMsg("已保存，class 脚本已重新生成");
         setDirty(false);
         return editId;
       }
@@ -312,15 +356,18 @@ export default function Sources() {
   };
   const del = async () => {
     if (editId === null) return setMsg("当前是未保存的新源");
-    if (!confirm(`删除书源「${form.bookSourceName}」？`)) return;
+    const name = srcType === "script" ? scriptForm.name : form.bookSourceName;
+    if (!confirm(`删除书源「${name}」？`)) return;
     await api(`/api/sources/${editId}`, { method: "DELETE" });
     await selectSource(null);
     load();
   };
   const toggleEnabled = async () => {
     if (editId === null) return setMsg("先保存后再启停");
-    await api(`/api/sources/${editId}`, { method: "PUT", body: JSON.stringify({ enabled: !form.enabled }) });
-    setForm((f: any) => ({ ...f, enabled: !f.enabled }));
+    const cur = srcType === "script" ? scriptForm.enabled : !!form.enabled;
+    await api(`/api/sources/${editId}`, { method: "PUT", body: JSON.stringify({ enabled: !cur }) });
+    if (srcType === "script") setScriptForm((f) => ({ ...f, enabled: !f.enabled }));
+    else setForm((f: any) => ({ ...f, enabled: !f.enabled }));
     load();
   };
   const doImportUrl = async () => {
@@ -430,6 +477,7 @@ export default function Sources() {
   const cur = rows.find((r) => r.id === editId);
   const btn = "w-full rounded-lg bg-neutral-600 px-3 py-1.5 text-sm hover:bg-neutral-500";
   const btnPrimary = "w-full rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-neutral-900 hover:bg-amber-400";
+  const inpMono = "w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500";
 
   return (
     <div className="mx-auto min-h-dvh max-w-7xl p-4">
@@ -469,7 +517,7 @@ export default function Sources() {
             }
           >
             <option value="">＋ 新建源（规则）</option>
-            <option value="new-script">＋ 新建脚本源（JS class）</option>
+            <option value="new-script">＋ 新建脚本源（表单方法）</option>
             {shown.map((r) => (
               <option key={r.id} value={r.id}>
                 {r.type === "script" ? "⚙ " : ""}
@@ -478,23 +526,98 @@ export default function Sources() {
             ))}
           </select>
           {srcType === "script" ? (
-            <div className="rounded-xl bg-neutral-800 p-3">
-              <div className="mb-2 flex items-center justify-between text-xs text-neutral-400">
-                <span>脚本书源（class，四方法全可选）</span>
-                <span className="text-neutral-500">名称取 // @name</span>
+            <>
+              <div className="rounded-xl bg-neutral-800 p-3 text-xs leading-5 text-neutral-400">
+                脚本源按表单编辑：每个方法留空即未实现；保存时把各方法合并拼接成 class 脚本文件供程序执行（右侧「生成的 JS」只读预览）。
               </div>
-              <textarea
-                rows={28}
-                spellCheck={false}
-                className="w-full rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5"
-                placeholder="export default class Source { ... }"
-                value={scriptCode}
-                onChange={(e) => {
-                  setScriptCode(e.target.value);
-                  setDirty(true);
-                }}
-              />
-            </div>
+              <fieldset className="rounded-xl bg-neutral-800 p-4">
+                <legend className="px-1 text-sm font-bold text-amber-400">基本</legend>
+                <div className="space-y-2">
+                  <label className="block">
+                    <span className="mb-0.5 block text-xs text-neutral-400">源名称（必填）</span>
+                    <input
+                      className={inpMono}
+                      placeholder="示例脚本源"
+                      value={scriptForm.name}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setScriptForm((f) => ({ ...f, name: v }));
+                        setDirty(true);
+                      }}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="mb-0.5 block text-xs text-neutral-400">源域名 base（相对地址补全，等价类成员 base）</span>
+                    <input
+                      className={inpMono}
+                      placeholder="https://www.example.com"
+                      value={scriptForm.base}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setScriptForm((f) => ({ ...f, base: v }));
+                        setDirty(true);
+                      }}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="mb-0.5 block text-xs text-neutral-400">请求头 headers（JSON 对象，注入每次 fetchText）</span>
+                    <textarea
+                      rows={3}
+                      className={inpMono}
+                      placeholder={'{"Cookie":"...","Referer":"https://www.example.com/"}'}
+                      value={scriptForm.headersText}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setScriptForm((f) => ({ ...f, headersText: v }));
+                        setDirty(true);
+                      }}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="mb-0.5 block text-xs text-neutral-400">替换净化 replace（每行：正则##替换为，替换为留空=删除）</span>
+                    <textarea
+                      rows={2}
+                      className={inpMono}
+                      placeholder={"广告.*?##\n（本章完）##"}
+                      value={scriptForm.replaceText}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setScriptForm((f) => ({ ...f, replaceText: v }));
+                        setDirty(true);
+                      }}
+                    />
+                  </label>
+                </div>
+              </fieldset>
+              <fieldset className="rounded-xl bg-neutral-800 p-4">
+                <legend className="px-1 text-sm font-bold text-amber-400">方法（全可选，○ 未实现 ● 已填写）</legend>
+                <div className="space-y-2">
+                  {METHOD_DEFS.map((m) => (
+                    <details key={m.key} className="rounded-lg bg-neutral-900">
+                      <summary className="cursor-pointer select-none px-3 py-2 text-xs text-neutral-300">
+                        {scriptForm.methods[m.key]?.trim() ? "●" : "○"} {m.label}
+                      </summary>
+                      <textarea
+                        rows={10}
+                        spellCheck={false}
+                        className="w-full border-t border-neutral-700 bg-neutral-900 p-3 font-mono text-xs leading-5 text-neutral-200 placeholder:text-neutral-600"
+                        placeholder={m.tpl}
+                        value={scriptForm.methods[m.key] ?? ""}
+                        onChange={(e) => {
+                          const v = e.target.value;
+                          setScriptForm((f) => ({ ...f, methods: { ...f.methods, [m.key]: v } }));
+                          setDirty(true);
+                        }}
+                      />
+                    </details>
+                  ))}
+                  <div className="pt-1 text-xs leading-5 text-neutral-500">
+                    可用 API：fetchText(url, opts?) → {"{status, text, url}"}；parse(html) → cheerio $；abs(u, base?) 相对转绝对；log(msg)；
+                    nodes(html) / ruleText(ns, 规则) / ruleSel(ns, 规则)（规则语法兼容）。this.base / this.headers / this.replace 为类成员。
+                  </div>
+                </div>
+              </fieldset>
+            </>
           ) : (
             SECTIONS.map((sec) => (
             <fieldset key={sec.title} className="rounded-xl bg-neutral-800 p-4">
@@ -540,7 +663,13 @@ export default function Sources() {
           </button>
           <button onClick={() => selectSource(null)} className={btn}>✗ 清空新建</button>
           <label className="flex items-center gap-2 px-1 text-sm text-neutral-400">
-            <input type="checkbox" checked={!!form.enabled} onChange={toggleEnabled} className="accent-amber-500" disabled={editId === null} />
+            <input
+              type="checkbox"
+              checked={srcType === "script" ? scriptForm.enabled : !!form.enabled}
+              onChange={toggleEnabled}
+              className="accent-amber-500"
+              disabled={editId === null}
+            />
             启用搜索
           </label>
           <button onClick={del} className="w-full rounded-lg px-3 py-1.5 text-sm text-red-400 hover:bg-red-950">删除此源</button>
@@ -550,7 +679,7 @@ export default function Sources() {
         <div className="flex flex-col rounded-xl bg-neutral-800 p-3 md:sticky md:top-4 md:max-h-[calc(100dvh-2rem)]">
           <div className="mb-2 flex flex-wrap items-center gap-1">
             {(["json", "js", "debug"] as const).map((t) =>
-              t === "js" && (srcType === "script" || editId === null) ? null : (
+              (t === "js" && editId === null) || (t === "json" && srcType === "script") ? null : (
                 <button
                   key={t}
                   onClick={() => {

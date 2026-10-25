@@ -1,0 +1,11 @@
+# M2 脚本引擎工作日志（2026-10-25）
+- 设计 docs/plans/2026-10-25-source-script-engine.md，计划 -source-script-plan.md
+- 实现：src/source/runtime.ts（fetchText ALS 注入 headers/parse/abs/log/nodes/ruleText/ruleSel）+ script.ts（saveScriptFile 落盘、data:URL 动态 import 按 mtime 缓存、四适配函数）
+- 关键坑1：Bun 在 Windows 动态 import 新落盘文件有目录缓存竞态（Cannot find module 偶发）→ 改 data:text/javascript;base64 直载
+- 关键坑2：Bun 的 new URL 会把 {} 编码成 %7Bpage%7D → abs/abs2 对绝对地址短路、模板 URL 手动补 origin；ensureAbs 旧引擎当年没踩坑是因为绝对地址直接跳过
+- facade.ts 按 sources.type 分流（rules/script），books/sources 路由调用点全部改 Engine 接口
+- 转换器 convert.ts：searchUrl 插值（,opts 解析）、目录三形态（单页/nextTocUrl 引擎翻页/{page} 源内展开）、replaceRegex→replace 成员
+- 测试 37 全绿（script-engine 9 + convert 5 + 原有 23）
+- 迁移：scripts/migrate-to-script.ts，id=1/2/3 全部转 script；sto66 全链路验证通过（搜索12条/1406章/正文）
+- 幽香书房：目录翻页是加密 AJAX（page2 按钮 + 站点专属 JS Jg3pAjIOpMBLjvw3yG8HcIMLUVA9TWqT.js + crypto-js），规则引擎与转换脚本都只能拿第 1 页 100 章（站点行为：/book/51RA9-N.html = 第 N 章正文页，不是目录页；目录第 2 页起走加密请求）——需要用户手写 getChapters 调加密接口，脚本引擎已具备能力（fetchText + headers 成员 + JS 算 token）
+- 源格式：export default class Source，方法 search/getDetail/getChapters/getContent 全可选；成员 base/headers/replace（{regex,replacement} 对象数组）；getChapters 返回 {list,next} 引擎循环；getContent 返回 string | {text,next}

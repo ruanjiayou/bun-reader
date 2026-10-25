@@ -24,6 +24,56 @@ export function saveScriptFile(id: number, code: string) {
   writeFileSync(`${SOURCES_DIR}/${id}.js`, scaffold + code.trim() + "\n");
 }
 
+// —— 表单 → class 代码：表单给人看和编辑，生成的脚本是给程序执行的产物 ——
+
+export interface ScriptForm {
+  name?: string;
+  base?: string;
+  headers?: Record<string, string>;
+  replace?: { regex: string; replacement: string }[];
+  methods?: Partial<Record<"search" | "getDetail" | "getChapters" | "getContent", string>>;
+}
+
+const METHOD_NAMES = ["search", "getDetail", "getChapters", "getContent"] as const;
+
+// 方法体剥掉整行注释后只剩空壳（async xxx(...) {}）→ 视为未实现，不写入 class
+function hasMethodImpl(name: string, body: string): boolean {
+  const stripped = body
+    .split("\n")
+    .filter((l) => !l.trim().startsWith("//"))
+    .join("");
+  const rest = stripped.replace(/\s+/g, "");
+  if (!rest) return false;
+  return !new RegExp(`^async${name}\\([^)]*\\)\\{\\}$`).test(rest);
+}
+
+// 表单数据合并拼接为 class 源码（与前端各方法模板无关，留空/空壳的方法自动省略）
+export function formToCode(form: ScriptForm): string {
+  const lines: string[] = ["export default class Source {"];
+  if (form.base?.trim()) lines.push(`  base = ${JSON.stringify(form.base.trim())};`);
+  if (form.headers && Object.keys(form.headers).length) lines.push(`  headers = ${JSON.stringify(form.headers)};`);
+  if (form.replace?.length) lines.push(`  replace = ${JSON.stringify(form.replace)};`);
+  for (const m of METHOD_NAMES) {
+    const body = (form.methods?.[m] ?? "").trim();
+    if (!body || !hasMethodImpl(m, body)) continue;
+    lines.push("", body);
+  }
+  lines.push("}");
+  return lines.join("\n");
+}
+
+// 保存前校验：scaffold + 生成代码可解析且 default 导出为 class
+export async function validateScriptCode(code: string): Promise<string | null> {
+  const scaffold = `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel } from ${JSON.stringify(RUNTIME_URL)};\n\n`;
+  try {
+    const mod = await import(`data:text/javascript;base64,${Buffer.from(scaffold + code).toString("base64")}`);
+    if (typeof mod.default !== "function") return "必须导出 export default class Source";
+    return null;
+  } catch (e: any) {
+    return e?.message ?? String(e);
+  }
+}
+
 // 加载实例：按文件 mtime 缓存；模块经 data: URL 直载（Windows 下动态 import 新落盘文件有目录缓存竞态）
 const cache = new Map<number, { mtime: number; inst: any }>();
 

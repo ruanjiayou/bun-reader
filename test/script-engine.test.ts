@@ -1,6 +1,6 @@
 import { describe, test, expect, beforeAll, afterAll } from "bun:test";
 import { existsSync, rmSync } from "node:fs";
-import { saveScriptFile, loadInst, scriptSearch, scriptBookInfo, scriptToc, scriptContent } from "../src/source/script";
+import { saveScriptFile, loadInst, scriptSearch, scriptBookInfo, scriptToc, scriptContent, formToCode, validateScriptCode } from "../src/source/script";
 import type { BookItem, ChapterItem } from "../src/source/engine";
 
 // 本地 fixture 站点：验证 class 书源的全链路（headers 注入 / 翻页 / 正文合并 / replace / 超时 / 缓存失效）
@@ -173,5 +173,30 @@ describe("书源脚本引擎", () => {
   test("BookItem 类型兼容：search 产出可直接喂给书架快照流程", async () => {
     const books: BookItem[] = await scriptSearch({ id: TID }, "凡人");
     expect(Object.keys(books[0]).sort()).toEqual(["author", "bookUrl", "cover", "intro", "latestChapter", "name"]);
+  });
+
+  test("formToCode：表单方法合并为 class，空壳/纯注释方法不写入，成员落为类字段", async () => {
+    const code = formToCode({
+      name: "测试",
+      base: "https://x.com/",
+      headers: { Cookie: "a=1" },
+      replace: [{ regex: "广告.*?", replacement: "" }],
+      methods: {
+        getDetail: "async getDetail(url) {\n  // 此处添加逻辑\n}", // 空壳 → 省略
+        getContent: 'async getContent(url) {\n  const res = await fetchText(url);\n  return "正文";\n}',
+      },
+    });
+    expect(code).toContain('base = "https://x.com/"');
+    expect(code).toContain('headers = {"Cookie":"a=1"}');
+    expect(code).toContain('"regex":"广告.*?"');
+    expect(code).toContain("getContent");
+    expect(code).not.toContain("getDetail");
+    expect(code).not.toContain("search");
+    expect(await validateScriptCode(code)).toBeNull();
+  });
+
+  test("validateScriptCode：语法错误/缺 default 导出被拦截", async () => {
+    expect(await validateScriptCode("export default class Source {")).toBeTruthy(); // 语法错误
+    expect(await validateScriptCode("export const x = 1;")).toMatch(/default/); // 缺 default 导出
   });
 });
