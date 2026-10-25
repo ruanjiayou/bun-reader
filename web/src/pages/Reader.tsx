@@ -9,26 +9,61 @@ interface ContentResp {
   isPlaceholder: boolean;
   cached: boolean;
 }
-type Theme = "dark" | "paper" | "black";
+type ThemeId = "dark" | "paper" | "black" | "star" | "green" | "gray" | "custom";
 interface Prefs {
   fontSize: number;
   lineHeight: number;
-  theme: Theme;
-  rate?: number; // TTS 语速 0.5-2
+  theme: ThemeId;
+  customColor?: string; // 自定义主题色（hex）
+  customAlpha?: number; // 自定义透明度 0.2-1
+  rate?: number; // TTS 语速 0.5-1.5
   voiceURI?: string; // TTS 发音人
 }
+interface ThemeSpec {
+  bg: string;
+  text: string;
+  sub: string;
+  dark: boolean;
+}
 
-const THEMES: Record<Theme, { bg: string; text: string; sub: string }> = {
-  dark: { bg: "bg-neutral-900", text: "text-neutral-200", sub: "text-neutral-500" },
-  paper: { bg: "bg-[#f5efdc]", text: "text-[#3b3021]", sub: "text-[#8a7a5c]" },
-  black: { bg: "bg-black", text: "text-neutral-400", sub: "text-neutral-600" },
+const PRESETS: Record<Exclude<ThemeId, "custom">, { name: string; spec: ThemeSpec }> = {
+  dark: { name: "暗色", spec: { bg: "#171717", text: "#e5e5e5", sub: "rgba(229,229,229,.45)", dark: true } },
+  paper: { name: "羊皮纸", spec: { bg: "#f5efdc", text: "#3b3021", sub: "rgba(59,48,33,.55)", dark: false } },
+  black: { name: "纯黑", spec: { bg: "#000000", text: "#a3a3a3", sub: "rgba(163,163,163,.45)", dark: true } },
+  star: { name: "星空蓝", spec: { bg: "#141f33", text: "#c7d3e8", sub: "rgba(199,211,232,.5)", dark: true } },
+  green: { name: "护眼绿", spec: { bg: "#cfe6cf", text: "#2b3a2c", sub: "rgba(43,58,44,.55)", dark: false } },
+  gray: { name: "柔和灰", spec: { bg: "#e4e4e1", text: "#3a3a3a", sub: "rgba(58,58,58,.55)", dark: false } },
+};
+
+const hex2rgb = (hex: string) => {
+  const m = hex.replace("#", "");
+  const n = m.length === 3 ? m.split("").map((c) => c + c).join("") : m;
+  const v = parseInt(n.slice(0, 6), 16);
+  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
+};
+
+// 自定义主题：按「颜色亮度 × 透明度」与黑底混合后的亮度决定文字用亮色还是暗色
+const resolveTheme = (p: Prefs): ThemeSpec => {
+  if (p.theme !== "custom" || !p.customColor) return PRESETS[p.theme]?.spec ?? PRESETS.dark.spec;
+  const { r, g, b } = hex2rgb(p.customColor);
+  const a = Math.min(Math.max(p.customAlpha ?? 1, 0.2), 1);
+  const lum = ((0.299 * r + 0.587 * g + 0.114 * b) / 255) * a;
+  const dark = lum < 0.5;
+  return {
+    bg: `rgba(${r},${g},${b},${a})`,
+    text: dark ? "#e5e5e5" : "#333333",
+    sub: dark ? "rgba(229,229,229,.5)" : "rgba(51,51,51,.55)",
+    dark,
+  };
 };
 
 const loadPrefs = (): Prefs => {
   try {
-    return { fontSize: 18, lineHeight: 1.7, theme: "dark", ...JSON.parse(localStorage.getItem("reader-prefs") ?? "{}") };
+    const p = { fontSize: 18, lineHeight: 1.7, theme: "dark" as ThemeId, ...JSON.parse(localStorage.getItem("reader-prefs") ?? "{}") };
+    p.rate = Math.min(Math.max(p.rate ?? 1, 0.5), 1.5); // 语速范围收口 0.5-1.5
+    return p;
   } catch {
-    return { fontSize: 18, lineHeight: 1.7, theme: "dark" };
+    return { fontSize: 18, lineHeight: 1.7, theme: "dark" as ThemeId };
   }
 };
 
@@ -111,11 +146,11 @@ const Icon = ({ name, size = 22 }: { name: string; size?: number }) => (
   </svg>
 );
 
-// 图标+文字（手机顶栏 / PC 左栏）
+// 图标+文字（左 icon 右文字，手机顶栏 / PC 左栏）
 const NavItem = ({ icon, label, onClick }: { icon: string; label: string; onClick: () => void }) => (
-  <button onClick={onClick} className="flex flex-col items-center gap-1 px-2 py-1.5 opacity-75 transition-opacity hover:opacity-100">
-    <Icon name={icon} size={20} />
-    <span className="text-[10px] leading-none">{label}</span>
+  <button onClick={onClick} className="flex items-center gap-1.5 px-2 py-1.5 opacity-75 transition-opacity hover:opacity-100">
+    <Icon name={icon} size={17} />
+    <span className="text-xs leading-none">{label}</span>
   </button>
 );
 // 纯图标悬浮钮（title 提示；透明背景，跟随主题色）
@@ -128,6 +163,10 @@ const FloatBtn = ({ icon, title, onClick, active }: { icon: string; title: strin
     <Icon name={icon} size={19} />
   </button>
 );
+
+// 设置面板控制按钮：半透明黑底+浅描边，暗色主题下也不和文字混在一起
+const CTRL = "rounded border px-3 py-1 text-sm leading-5";
+const ctrlStyle = { background: "rgba(0,0,0,.35)", borderColor: "rgba(255,255,255,.15)" };
 
 // 阅读器：滚动模式；>500px 为 PC 布局（内容固定宽，左右紧贴工具栏），否则手机布局（顶栏+底栏+两侧悬浮钮）
 export default function Reader() {
@@ -142,6 +181,7 @@ export default function Reader() {
   const [showToc, setShowToc] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [prefs, setPrefs] = useState<Prefs>(loadPrefs);
+  const [chrome, setChrome] = useState(false); // 阅读界面按钮/栏默认隐藏，点击正文切换显示
   const [speaking, setSpeaking] = useState(false);
   const [toast, setToast] = useState("");
   const [tick, setTick] = useState(0); // 错误重试触发器
@@ -167,8 +207,8 @@ export default function Reader() {
     return () => window.speechSynthesis.removeEventListener("voiceschanged", load);
   }, []);
 
-  useEffect(() => localStorage.setItem("reader-prefs", JSON.stringify(prefs)), [prefs]);
-  const theme = THEMES[prefs.theme];
+  useEffect(() => localStorage.setItem("reader-prefs", JSON.stringify(prefs)), [prefs]); // 设置持久化到浏览器
+  const theme = resolveTheme(prefs);
 
   // 章节列表（目录弹层 / 上下章 / 百分比进度）
   useEffect(() => {
@@ -344,29 +384,33 @@ export default function Reader() {
   const bookPct = chapters.length ? `${Math.round(((idx + 1) / chapters.length) * 1000) / 10}%` : "";
 
   return (
-    <div className={`fixed inset-0 flex flex-col ${theme.bg} ${theme.text}`}>
-      {/* 手机顶栏：返回 + 首页/书架/书源/目录 */}
-      <div className="flex items-center gap-1 border-b border-neutral-700/50 px-1 py-1.5 min-[501px]:hidden" style={{ borderColor: "rgba(128,128,128,.25)" }}>
-        <button onClick={() => nav(-1)} className="flex h-10 w-10 items-center justify-center opacity-75 hover:opacity-100" title="返回">
-          <Icon name="back" />
-        </button>
-        <NavItem icon="home" label="首页" onClick={() => nav("/")} />
-        <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
-        <NavItem icon="globe" label="书源" onClick={openSources} />
-        <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
-      </div>
-
-      <div className="flex min-h-0 flex-1 justify-center">
-        {/* PC 左栏：图标+文字，靠顶，紧贴内容左侧 */}
-        <div className="hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2 min-[501px]:py-4">
+    <div className="fixed inset-0 flex flex-col" style={{ background: theme.bg, color: theme.text }}>
+      {/* 手机顶栏：默认隐藏，点击正文切换；左 icon 右文字；返回=上一个路由 */}
+      {chrome && (
+        <div className="flex items-center gap-0.5 border-b px-1 py-1.5 min-[501px]:hidden" style={{ borderColor: "rgba(128,128,128,.25)" }}>
+          <button onClick={() => nav(-1)} className="flex h-9 w-9 flex-none items-center justify-center opacity-75 hover:opacity-100" title="返回上一页">
+            <Icon name="back" size={18} />
+          </button>
           <NavItem icon="home" label="首页" onClick={() => nav("/")} />
           <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
           <NavItem icon="globe" label="书源" onClick={openSources} />
           <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
         </div>
+      )}
 
-        {/* 正文：滚动阅读（隐藏滚动条）；PC 固定 640px，两侧工具栏紧贴 */}
-        <div ref={scrollRef} onScroll={onScroll} className="no-scrollbar w-full min-w-0 flex-1 overflow-y-auto min-[501px]:w-[640px] min-[501px]:flex-none">
+      <div className="flex min-h-0 flex-1 justify-center">
+        {/* PC 左栏：默认隐藏，点击正文切换 */}
+        {chrome && (
+          <div className="hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2 min-[501px]:py-4">
+            <NavItem icon="home" label="首页" onClick={() => nav("/")} />
+            <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
+            <NavItem icon="globe" label="书源" onClick={openSources} />
+            <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
+          </div>
+        )}
+
+        {/* 正文：滚动阅读（隐藏滚动条）；点击切换工具栏；PC 固定 640px */}
+        <div ref={scrollRef} onScroll={onScroll} onClick={() => setChrome((v) => !v)} className="no-scrollbar w-full min-w-0 flex-1 overflow-y-auto min-[501px]:w-[640px] min-[501px]:flex-none">
           <div className="mx-auto px-4 py-6 max-[500px]:px-5" style={{ fontSize: prefs.fontSize, lineHeight: prefs.lineHeight }}>
             {ch ? (
               <>
@@ -380,14 +424,14 @@ export default function Reader() {
                     </p>
                   ) : null,
                 )}
-                <div className={`mt-8 text-center text-xs ${theme.sub}`}>— 本章完 · 下一章继续 —</div>
+                <div className="mt-8 text-center text-xs" style={{ color: theme.sub }}>— 本章完 · 下一章继续 —</div>
               </>
             ) : (
-              <div className={`flex h-[60vh] items-center justify-center text-sm ${theme.sub}`}>
+              <div className="flex h-[60vh] items-center justify-center text-sm" style={{ color: theme.sub }}>
                 {error ? (
-                  <div className="text-center">
+                  <div className="text-center" onClick={(e) => e.stopPropagation()}>
                     <p className="mb-3">{error}</p>
-                    <button onClick={() => setTick((t) => t + 1)} className="rounded-lg bg-neutral-700 px-4 py-2 text-sm">
+                    <button onClick={() => setTick((t) => t + 1)} className="rounded-lg bg-black/30 px-4 py-2 text-sm">
                       重试
                     </button>
                   </div>
@@ -399,41 +443,51 @@ export default function Reader() {
           </div>
         </div>
 
-        {/* PC 右栏：纯图标，靠底，紧贴内容 */}
-        <div className="hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-end min-[501px]:justify-end min-[501px]:gap-3 min-[501px]:py-4">
-          <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} />
-          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} />
-          <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} />
-          <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} />
-        </div>
+        {/* PC 右栏：默认隐藏 */}
+        {chrome && (
+          <div className="hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-end min-[501px]:justify-end min-[501px]:gap-3 min-[501px]:py-4">
+            <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} />
+            <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} />
+            <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} />
+            <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} />
+          </div>
+        )}
 
         {/* 手机左侧悬浮：书籍详情 / 缓存下载 */}
-        <div className="fixed bottom-20 left-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
-          <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} />
-          <FloatBtn icon="download" title="缓存下载" onClick={cacheAll} />
-        </div>
+        {chrome && (
+          <div className="fixed bottom-20 left-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
+            <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} />
+            <FloatBtn icon="download" title="缓存下载" onClick={cacheAll} />
+          </div>
+        )}
         {/* 手机右侧悬浮：刷新 / 朗读 / 设置 */}
-        <div className="fixed bottom-20 right-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
-          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} />
-          <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} />
-          <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} />
+        {chrome && (
+          <div className="fixed bottom-20 right-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
+            <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} />
+            <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} />
+            <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} />
+          </div>
+        )}
+      </div>
+
+      {/* PC 底部：上一章 · 进度 · 下一章（随工具栏显隐） */}
+      {chrome && (
+        <div className="flex items-center justify-center gap-8 pb-3 text-xs min-[501px]:flex max-[500px]:hidden" style={{ color: theme.sub }}>
+          <button onClick={() => goChapter(idx - 1)} className="px-3 py-1.5 opacity-75 transition-opacity hover:opacity-100">上一章</button>
+          <span className="min-w-16 text-center">{chapters.length ? `${idx + 1}/${chapters.length} · ${bookPct}` : ""}</span>
+          <button onClick={() => goChapter(idx + 1)} className="px-3 py-1.5 opacity-75 transition-opacity hover:opacity-100">下一章</button>
         </div>
-      </div>
+      )}
 
-      {/* PC 底部：上一章 · 进度 · 下一章 */}
-      <div className={`flex items-center justify-center gap-8 pb-3 text-xs min-[501px]:flex max-[500px]:hidden ${theme.sub}`}>
-        <button onClick={() => goChapter(idx - 1)} className="px-3 py-1.5 opacity-75 transition-opacity hover:opacity-100">上一章</button>
-        <span className="min-w-16 text-center">{chapters.length ? `${idx + 1}/${chapters.length} · ${bookPct}` : ""}</span>
-        <button onClick={() => goChapter(idx + 1)} className="px-3 py-1.5 opacity-75 transition-opacity hover:opacity-100">下一章</button>
-      </div>
-
-      {/* 手机底栏：上一章 · 百分比进度 · 下一章 · 设置 */}
-      <div className="flex items-center justify-around border-t px-2 py-2 min-[501px]:hidden" style={{ borderColor: "rgba(128,128,128,.25)" }}>
-        <button onClick={() => goChapter(idx - 1)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">上一章</button>
-        <span className="min-w-14 text-center text-xs opacity-60">{bookPct}</span>
-        <button onClick={() => goChapter(idx + 1)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">下一章</button>
-        <button onClick={() => setShowSettings(true)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">设置</button>
-      </div>
+      {/* 手机底栏：上一章 · 百分比进度 · 下一章 · 设置（随工具栏显隐） */}
+      {chrome && (
+        <div className="flex items-center justify-around border-t px-2 py-2 min-[501px]:hidden" style={{ borderColor: "rgba(128,128,128,.25)" }}>
+          <button onClick={() => goChapter(idx - 1)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">上一章</button>
+          <span className="min-w-14 text-center text-xs opacity-60">{bookPct}</span>
+          <button onClick={() => goChapter(idx + 1)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">下一章</button>
+          <button onClick={() => setShowSettings(true)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">设置</button>
+        </div>
+      )}
 
       {/* 占位提示 toast */}
       {ch?.isPlaceholder && !showSettings && !showToc && (
@@ -446,7 +500,7 @@ export default function Reader() {
       {/* 目录弹层 */}
       {showToc && (
         <div className="absolute inset-0 z-40 overflow-y-auto bg-black/60" onClick={() => setShowToc(false)}>
-          <div className={`mx-auto min-h-full min-[501px]:w-[640px] max-w-full p-4 ${theme.bg} ${theme.text}`} onClick={(e) => e.stopPropagation()}>
+          <div className="mx-auto min-h-full min-[501px]:w-[640px] max-w-full p-4" style={{ background: theme.bg, color: theme.text }} onClick={(e) => e.stopPropagation()}>
             <div className="sticky top-0 mb-2 flex items-center bg-inherit pb-2 pt-1">
               <h3 className="text-sm font-bold">目录</h3>
               <span className="ml-2 text-xs opacity-50">共 {chapters.length} 章</span>
@@ -476,7 +530,7 @@ export default function Reader() {
       {/* 换源面板：后端并发搜全部启用源，只列拥有这本书的源，点击即换 */}
       {showSources && (
         <div className="absolute inset-0 z-40 overflow-y-auto bg-black/60" onClick={() => !switching && setShowSources(false)}>
-          <div className={`mx-auto min-h-full min-[501px]:w-[640px] max-w-full p-4 ${theme.bg} ${theme.text}`} onClick={(e) => e.stopPropagation()}>
+          <div className="mx-auto min-h-full min-[501px]:w-[640px] max-w-full p-4" style={{ background: theme.bg, color: theme.text }} onClick={(e) => e.stopPropagation()}>
             <div className="sticky top-0 mb-2 flex items-center gap-2 bg-inherit pb-2 pt-1">
               <h3 className="text-sm font-bold">换源</h3>
               <span className="truncate text-xs opacity-50">《{bookName || "…"}》</span>
@@ -509,10 +563,10 @@ export default function Reader() {
         </div>
       )}
 
-      {/* 设置弹层：字号/行距/主题 */}
+      {/* 设置弹层：字号/行距/主题/语速/发音人，全部实时持久化到 localStorage */}
       {showSettings && (
         <div className="absolute inset-0 z-40 bg-black/50" onClick={() => setShowSettings(false)}>
-          <div className={`absolute inset-x-0 bottom-0 rounded-t-2xl p-4 pb-8 ${theme.bg} ${theme.text}`} style={{ borderTop: "1px solid rgba(128,128,128,.35)" }} onClick={(e) => e.stopPropagation()}>
+          <div className="absolute inset-x-0 bottom-0 rounded-t-2xl p-4 pb-8" style={{ background: theme.bg, color: theme.text, borderTop: "1px solid rgba(128,128,128,.35)" }} onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-center">
               <h3 className="text-sm font-bold">设置</h3>
               <button onClick={() => setShowSettings(false)} className="ml-auto px-2 text-lg opacity-60 hover:opacity-100">×</button>
@@ -520,47 +574,80 @@ export default function Reader() {
             <div className="space-y-3 text-sm">
               <div className="flex items-center gap-3">
                 <span className="w-14 opacity-60">字号</span>
-                <button onClick={() => setPrefs((p) => ({ ...p, fontSize: Math.max(14, p.fontSize - 2) }))} className="rounded bg-black/30 px-3">A-</button>
-                <span>{prefs.fontSize}</span>
-                <button onClick={() => setPrefs((p) => ({ ...p, fontSize: Math.min(30, p.fontSize + 2) }))} className="rounded bg-black/30 px-3">A+</button>
+                <button onClick={() => setPrefs((p) => ({ ...p, fontSize: Math.max(14, p.fontSize - 2) }))} className={CTRL} style={ctrlStyle}>A-</button>
+                <span className="w-7 text-center">{prefs.fontSize}</span>
+                <button onClick={() => setPrefs((p) => ({ ...p, fontSize: Math.min(30, p.fontSize + 2) }))} className={CTRL} style={ctrlStyle}>A+</button>
               </div>
               <div className="flex items-center gap-3">
                 <span className="w-14 opacity-60">行距</span>
-                <input type="range" min={1.4} max={2.4} step={0.1} value={prefs.lineHeight} onChange={(e) => setPrefs((p) => ({ ...p, lineHeight: Number(e.target.value) }))} className="flex-1 accent-amber-500" />
+                <button onClick={() => setPrefs((p) => ({ ...p, lineHeight: Math.max(1.4, Math.round((p.lineHeight - 0.1) * 10) / 10) }))} className={CTRL} style={ctrlStyle}>−</button>
+                <span className="w-9 text-center">{prefs.lineHeight.toFixed(1)}</span>
+                <button onClick={() => setPrefs((p) => ({ ...p, lineHeight: Math.min(2.4, Math.round((p.lineHeight + 0.1) * 10) / 10) }))} className={CTRL} style={ctrlStyle}>＋</button>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="w-14 opacity-60">主题</span>
-                {(["dark", "paper", "black"] as Theme[]).map((t) => (
+              <div className="flex items-start gap-3">
+                <span className="w-14 flex-none pt-1.5 opacity-60">主题</span>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(Object.keys(PRESETS) as (keyof typeof PRESETS)[]).map((t) => (
+                    <button
+                      key={t}
+                      onClick={() => setPrefs((p) => ({ ...p, theme: t }))}
+                      className={`rounded-lg px-2.5 py-1 text-xs ${prefs.theme === t ? "ring-2 ring-amber-400" : ""}`}
+                      style={{ background: PRESETS[t].spec.bg, color: PRESETS[t].spec.text }}
+                    >
+                      {PRESETS[t].name}
+                    </button>
+                  ))}
                   <button
-                    key={t}
-                    onClick={() => setPrefs((p) => ({ ...p, theme: t }))}
-                    className={`rounded-lg px-3 py-1 text-xs ${prefs.theme === t ? "ring-2 ring-amber-400" : ""} ${
-                      t === "dark" ? "bg-neutral-900 text-neutral-200" : t === "paper" ? "bg-[#f5efdc] text-[#3b3021]" : "bg-black text-neutral-400"
-                    }`}
+                    onClick={() => setPrefs((p) => ({ ...p, theme: "custom" }))}
+                    className={`rounded-lg px-2.5 py-1 text-xs ${prefs.theme === "custom" ? "bg-amber-500/90 text-neutral-900 ring-2 ring-amber-400" : "text-neutral-300"}`}
+                    style={prefs.theme === "custom" ? undefined : { background: "rgba(0,0,0,.35)" }}
                   >
-                    {t === "dark" ? "暗色" : t === "paper" ? "羊皮纸" : "纯黑"}
+                    自定义
                   </button>
-                ))}
+                </div>
               </div>
+              {prefs.theme === "custom" && (
+                <div className="flex items-center gap-3">
+                  <span className="w-14 flex-none opacity-60">颜色</span>
+                  <input
+                    type="color"
+                    value={prefs.customColor ?? "#1a2b4c"}
+                    onChange={(e) => setPrefs((p) => ({ ...p, customColor: e.target.value }))}
+                    className="h-8 w-12 flex-none cursor-pointer rounded border p-0.5"
+                    style={{ background: "rgba(0,0,0,.35)", borderColor: "rgba(255,255,255,.15)" }}
+                  />
+                  <input
+                    type="range"
+                    min={0.2}
+                    max={1}
+                    step={0.05}
+                    value={prefs.customAlpha ?? 1}
+                    onChange={(e) => setPrefs((p) => ({ ...p, customAlpha: Number(e.target.value) }))}
+                    className="min-w-0 flex-1 accent-amber-500"
+                  />
+                  <span className="w-16 flex-none text-right text-xs opacity-70">{Math.round((prefs.customAlpha ?? 1) * 100)}%</span>
+                </div>
+              )}
               <div className="flex items-center gap-3">
                 <span className="w-14 opacity-60">语速</span>
                 <input
                   type="range"
                   min={0.5}
-                  max={2}
+                  max={1.5}
                   step={0.1}
                   value={prefs.rate ?? 1}
                   onChange={(e) => setPrefs((p) => ({ ...p, rate: Number(e.target.value) }))}
-                  className="flex-1 accent-amber-500"
+                  className="min-w-0 flex-1 accent-amber-500"
                 />
-                <span className="w-10 text-right">{(prefs.rate ?? 1).toFixed(1)}x</span>
+                <span className="w-10 flex-none text-right">{(prefs.rate ?? 1).toFixed(1)}x</span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="w-14 flex-none opacity-60">发音人</span>
                 <select
                   value={prefs.voiceURI ?? ""}
                   onChange={(e) => setPrefs((p) => ({ ...p, voiceURI: e.target.value }))}
-                  className="min-w-0 flex-1 rounded bg-black/30 px-2 py-1.5 text-xs"
+                  className="min-w-0 flex-1 rounded px-2 py-1.5 text-xs"
+                  style={{ background: "rgba(0,0,0,.35)", color: "inherit" }}
                 >
                   <option value="">系统默认</option>
                   {voices.map((v) => (
