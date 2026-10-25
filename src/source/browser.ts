@@ -1,12 +1,110 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { log } from "../log";
 
-// —— Playwright 有头浏览器（WAF / 验证码 / 加密 AJAX 站点专用）——
-// 持久化用户目录 data/browser-profile：cookie / localStorage 自动保存，
-// WAF 挑战种下的凭据过一次后续自动复用；验证码弹窗手动完成，最长等 180s。
+// —— Playwright 浏览器（WAF / 验证码 / 加密 AJAX 站点专用）——
+// 单实例双模式：headed（默认，调试/预览，窗口可见、人工能介入验证）/
+//              headless（真实抓取：目录后台补/全本缓存/正文/刷新，经 runWithBrowserMode("headless") 注入）。
+// 共用同一个 profile（data/browser-profile），cookie 天然互通：
+//   切换模式时等当前实例空闲（无未关页面）→ 关闭 → 以新模式重启（cookie 在 profile 里自动保留）。
+// 不能同时开两个实例：Bun 下同进程第二个浏览器实例会卡死（实测 headed/headless 顺序均复现）；
+//   因此调试与批量抓取并发时后到者等待，超时报「浏览器被 XX 占用」。
+// 无头 UA 覆写：Chromium 无头 UA 含 HeadlessChrome 会被 WAF 识别，固定为正常 Chrome UA。
+// BROWSER_HEADLESS=1 强制全局无头（服务器部署用）。
 // channel 探测顺序：系统 Chrome → 系统 Edge → playwright 自带 chromium。
-// BROWSER_HEADLESS=1 切无头（默认有头，本地调试用）。
 
-let ctxP: Promise<any> | null = null;
+type BMode = "headed" | "headless";
+
+const modeAls = new AsyncLocalStorage<BMode>();
+// 在 fn 执行期间把浏览器模式设为 mode（真实抓取路径用：runWithBrowserMode("headless", ...)）
+export function runWithBrowserMode<T>(mode: BMode, fn: () => T): T {
+  return modeAls.run(mode, fn);
+}
+
+function resolveMode(explicit?: boolean): BMode {
+  if (process.env.BROWSER_HEADLESS === "1") return "headless";
+  if (explicit !== undefined) return explicit ? "headless" : "headed";
+  return modeAls.getStore() ?? "headed";
+}
+
+// 无头上下文的 UA（去 HeadlessChrome；Chrome 大版本升级后需同步）
+const HEADLESS_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
+
+const PROFILE = "data/browser-profile";
+// 每模式在用页面数（page close 事件回调递减；等待模式切换的空闲判定用）
+const pageCnt: Record<BMode, number> = { headed: 0, headless: 0 };
+// 当前浏览器实例（同一时刻只有一个）
+let state: { mode: BMode; p: Promise<any> } | null = null;
+let switchChain: Promise<unknown> = Promise.resolve();
+let exitHooked = false;
+
+async function launch(mode: BMode): Promise<any> {
+  const { chromium } = await import("playwright");
+  const headless = mode === "headless";
+  // 进程退出时顺手关浏览器，避免残留 chrome 进程（只挂一次）
+  if (!exitHooked) {
+    exitHooked = true;
+    process.once("exit", () => {
+      state?.p.then((c) => c.close()).catch(() => {});
+    });
+  }
+  const tries: Record<string, string>[] = [{ channel: "chrome" }, { channel: "msedge" }, {}];
+  const errs: string[] = [];
+  for (const opt of tries) {
+    try {
+      const ctx = await chromium.launchPersistentContext(PROFILE, {
+        headless,
+        viewport: { width: 1280, height: 800 },
+        ...(headless ? { userAgent: HEADLESS_UA } : {}),
+        // 降低自动化特征（Cloudflare Turnstile 等会检测 navigator.webdriver / enable-automation）：
+        // --disable-blink-features=AutomationControlled 让 webdriver=false；去掉默认 --enable-automation 开关
+        args: ["--disable-blink-features=AutomationControlled"],
+        ignoreDefaultArgs: ["--enable-automation"],
+        ...opt,
+      });
+      log.info("browser", `浏览器已启动（${opt.channel ?? "chromium"} · ${headless ? "无头" : "有头"} · ${PROFILE}）`);
+      return ctx;
+    } catch (e: any) {
+      errs.push(`${opt.channel ?? "chromium"}: ${String(e?.message ?? e).split("\n")[0]}`);
+    }
+  }
+  throw new Error(
+    `浏览器启动失败（依次尝试 chrome/msedge/chromium）——${errs.join("；")}。` +
+      `常见原因：另一个进程（如正在运行的 bun-reader 服务或残留 chrome 窗口）占用了同一 profile 目录，请先关闭后重试`,
+  );
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// 切换到目标模式：串行化；切换前等当前实例空闲（无未关页面），关闭后以新模式重启（同 profile）
+function switchTo(mode: BMode): Promise<void> {
+  const run = switchChain.then(async () => {
+    if (state?.mode === mode) return;
+    if (state) {
+      const oldMode = state.mode;
+      const deadline = Date.now() + 120_000;
+      while (pageCnt[oldMode] > 0) {
+        if (Date.now() > deadline)
+          throw new Error(
+            `浏览器当前被${oldMode === "headless" ? "无头抓取任务" : "有头会话"}占用，无法切换到${mode === "headless" ? "无头" : "有头"}模式，请稍后重试`,
+          );
+        await sleep(300);
+      }
+      const old = state.p;
+      state = null;
+      await old.then((c) => c.close()).catch(() => {});
+      await sleep(500); // 等 profile 锁释放
+    }
+    state = { mode, p: launch(mode) };
+  });
+  switchChain = run.catch(() => {});
+  return run;
+}
+
+async function getContext(mode: BMode): Promise<any> {
+  if (!state || state.mode !== mode) await switchTo(mode);
+  return state!.p;
+}
 
 const CAPTCHA_RE = /验证码|人机验证|安全验证|安全挑战|请完成验证|captcha/i;
 // 判定收紧：标题命中，或「小页面 + 关键词」（正常内容页很大且可能内嵌含 captcha 字样的脚本，不能只看关键词）
@@ -30,41 +128,6 @@ async function safeContent(page: any, tries = 10): Promise<string> {
   }
 }
 
-async function getContext(): Promise<any> {
-  if (!ctxP) {
-    ctxP = (async () => {
-      const { chromium } = await import("playwright");
-      const headless = process.env.BROWSER_HEADLESS === "1";
-      const tries: Record<string, string>[] = [{ channel: "chrome" }, { channel: "msedge" }, {}];
-      const errs: string[] = [];
-      for (const opt of tries) {
-        try {
-          const ctx = await chromium.launchPersistentContext("data/browser-profile", {
-            headless,
-            viewport: { width: 1280, height: 800 },
-            // 降低自动化特征（Cloudflare Turnstile 等会检测 navigator.webdriver / enable-automation）：
-            // --disable-blink-features=AutomationControlled 让 webdriver=false；去掉默认 --enable-automation 开关
-            args: ["--disable-blink-features=AutomationControlled"],
-            ignoreDefaultArgs: ["--enable-automation"],
-            ...opt,
-          });
-          log.info("browser", `浏览器已启动（${opt.channel ?? "chromium"} · ${headless ? "无头" : "有头"} · 持久化 data/browser-profile）`);
-          return ctx;
-        } catch (e: any) {
-          errs.push(`${opt.channel ?? "chromium"}: ${String(e?.message ?? e).split("\n")[0]}`);
-        }
-      }
-      throw new Error(
-        `浏览器启动失败（依次尝试 chrome/msedge/chromium）——${errs.join("；")}。` +
-          `常见原因：另一个进程（如正在运行的 bun-reader 服务或残留 chrome 窗口）占用了同一 profile 目录，请先关闭后重试`,
-      );
-    })();
-    // 进程退出时顺手关浏览器，避免残留 chrome 进程
-    process.once("exit", () => ctxP?.then((c) => c.close()).catch(() => {}));
-  }
-  return ctxP;
-}
-
 export interface BrowserPage {
   html(): Promise<string>;
   url(): string;
@@ -77,10 +140,14 @@ export interface BrowserPage {
   close(): Promise<void>;
 }
 
-// 打开一个浏览器页：自动等 WAF 挑战/验证码通过（有头窗口里手动完成），返回页面操作句柄
-export async function browserOpen(url: string, opts: { timeoutMs?: number } = {}): Promise<BrowserPage> {
-  const ctx = await getContext();
+// 打开一个浏览器页：自动等 WAF 挑战/验证码通过（Turnstile 类自动过，图片验证码需有头窗口手动完成），返回页面操作句柄
+// headless 选项：true=无头（真实抓取路径经 runWithBrowserMode 注入，一般不用显式传）
+export async function browserOpen(url: string, opts: { headless?: boolean; timeoutMs?: number } = {}): Promise<BrowserPage> {
+  const mode = resolveMode(opts.headless);
+  const ctx = await getContext(mode);
   const page = await ctx.newPage();
+  pageCnt[mode]++;
+  page.once("close", () => pageCnt[mode]--); // 任何途径关闭（句柄 close / 出错兜底 / 用户关窗口）都递减
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: opts.timeoutMs ?? 45_000 });
     await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
@@ -148,7 +215,7 @@ export async function browserOpen(url: string, opts: { timeoutMs?: number } = {}
 }
 
 // 一次性抓取：打开 → 等验证/挑战 → 取 HTML → 关页
-export async function browserText(url: string, opts: { timeoutMs?: number } = {}) {
+export async function browserText(url: string, opts: { headless?: boolean; timeoutMs?: number } = {}) {
   const p = await browserOpen(url, opts);
   try {
     return { status: 200, text: await p.html(), url: p.url() };
@@ -158,11 +225,11 @@ export async function browserText(url: string, opts: { timeoutMs?: number } = {}
 }
 
 // 持久化 profile 里某 URL 同域的 cookie 串（"k=v; k=v"），供服务端 fetchText 合并复用；
-// 浏览器上下文未启动时返回空串（不会为了取 cookie 拉起浏览器）
-export async function browserCookieHeader(url: string): Promise<string> {
-  if (!ctxP) return "";
+// 浏览器实例未启动时返回空串（不会为了取 cookie 拉起浏览器；单实例共用 profile，无需分模式）
+export async function browserCookieHeader(url: string, headless?: boolean): Promise<string> {
+  if (!state) return "";
   try {
-    const ctx = await ctxP;
+    const ctx = await state.p;
     const cookies = await ctx.cookies(url);
     return cookies.map((c: any) => `${c.name}=${c.value}`).join("; ");
   } catch {

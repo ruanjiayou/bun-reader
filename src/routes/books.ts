@@ -7,6 +7,7 @@ import { books, chapters, chapterCache, progress, sources } from "../schema";
 import { isPlaceholder } from "../source/engine";
 import { engineFor, type Engine } from "../source/facade";
 import { limiterFor } from "../source/rate";
+import { runWithBrowserMode } from "../source/browser";
 import { log } from "../log";
 import type { AuthEnv } from "../auth";
 
@@ -138,7 +139,7 @@ bookRoutes.post("/:id/cache-all", async (c) => {
   const cached = new Set(cachedRows.map((r) => r.idx));
   const todo = list.filter((ch) => !cached.has(ch.idx)).sort((a, b) => a.idx - b.idx);
   if (!todo.length) return c.json({ nothing: true, cachedCount: cached.size });
-  runCacheJob(eng, key, todo, book.sourceId); // 后台执行，不 await
+  runWithBrowserMode("headless", () => runCacheJob(eng, key, todo, book.sourceId)); // 后台执行，不 await；真实抓取走无头浏览器
   return c.json({ queued: todo.length, cachedCount: cached.size });
 });
 
@@ -208,7 +209,8 @@ async function fillToc(bookId: number, eng: any, bookUrl: string) {
   if (tocJobs.has(bookId)) return;
   tocJobs.add(bookId);
   try {
-    const { info, toc } = await snapshotToc(eng, bookUrl);
+    // 真实抓取走无头浏览器（调试/预览才是有头）
+    const { info, toc } = await runWithBrowserMode("headless", () => snapshotToc(eng, bookUrl));
     const [b] = await db.select().from(books).where(eq(books.id, bookId));
     if (!b) return; // 书已被移出书架
     await db.delete(chapters).where(eq(chapters.bookId, bookId));
@@ -326,7 +328,7 @@ bookRoutes.put("/:id/refresh", async (c) => {
   const [book] = await db.select().from(books).where(and(eq(books.id, bookId), eq(books.userId, uid)));
   if (!book) return c.json({ error: "书籍不存在" }, 404);
   const eng = await loadEngine(book.sourceId);
-  const { info, toc } = await snapshotToc(eng, book.bookUrl);
+  const { info, toc } = await runWithBrowserMode("headless", () => snapshotToc(eng, book.bookUrl));
   const oldCount = (await db.select().from(chapters).where(eq(chapters.bookId, bookId))).length;
   await db.delete(chapters).where(eq(chapters.bookId, bookId));
   await db.insert(chapters).values(toc.map((ch, i) => ({ bookId, idx: i, title: ch.title, url: ch.url })));
@@ -426,7 +428,7 @@ bookRoutes.get("/:id/category", async (c) => {
   if (!book) return c.json({ error: "书籍不存在" }, 404);
   if (c.req.query("refresh")) {
     const eng = await loadEngine(book.sourceId);
-    const { info, toc } = await snapshotToc(eng, book.bookUrl);
+    const { info, toc } = await runWithBrowserMode("headless", () => snapshotToc(eng, book.bookUrl));
     const old = await db.select().from(chapters).where(eq(chapters.bookId, bookId));
     await db.delete(chapters).where(eq(chapters.bookId, bookId));
     await db.insert(chapters).values(toc.map((ch, i) => ({ bookId, idx: i, title: ch.title, url: ch.url })));
@@ -472,7 +474,7 @@ bookRoutes.get("/:id/content/:idx", async (c) => {
   if (limiter) await limiter.acquire(book.sourceId!);
   let raw: string;
   try {
-    raw = await fetchAndSave(eng, ch.url, key, idx);
+    raw = await runWithBrowserMode("headless", () => fetchAndSave(eng, ch.url, key, idx));
     limiter?.onSuccess(book.sourceId!);
   } catch (e) {
     limiter?.onFailure(book.sourceId!);
