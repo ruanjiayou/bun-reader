@@ -4,6 +4,7 @@
 
 ## 2026-10-25
 
+- **浏览器单实例双模式**：调试/预览有头、真实抓取（目录后台补/全本缓存/正文/检查更新）无头，`runWithBrowserMode` 注入；同 profile 切换（等空闲→重启，cookie 保留），无头 UA 去 HeadlessChrome 特征
 - **69书吧全浏览器链路**：全站 Cloudflare Turnstile + TLS 指纹校验（cookie 提取也不够），转脚本源四方法全走 Playwright；反自动化启动参数让 Turnstile 自动通过（webdriver 特征）；BrowserPage 页内 fetch 支持 POST（搜索表单）；fetchText 自动合并浏览器同域 cookie
 - **HTTP 空闲超时放宽**：Bun.serve idleTimeout 10s→255s（目录多页翻页等长请求不再被服务端掐断）
 - **阅读器 UI 细化**：底部细线改为章内滚动进度（滚到底 100%，不同步后端）；手机底栏去掉设置（入口移右侧按钮组）；PC 两侧菜单 ≥900px 贴正文边缘；浮动圆钮加半透明底色描边；新增阅读器 UI 设计规范（docs/design.md 第四部分）
