@@ -28,4 +28,6 @@ app.get("/", (c) => c.redirect("/reader/"));
 
 const port = Number(process.env.PORT ?? 8094);
 log.info("boot", `bun-reader listening on http://localhost:${port}`);
-Bun.serve({ port, fetch: app.fetch });
+// idleTimeout 默认 10s：目录多页翻页/全本缓存等长请求会被掐（warn: Bun.serve() timed out + Reader released），
+// 调到上限 255s（Bun 允许的最大值）
+Bun.serve({ port, idleTimeout: 255, fetch: app.fetch });

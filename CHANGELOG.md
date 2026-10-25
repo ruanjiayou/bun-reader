@@ -4,6 +4,8 @@
 
 ## 2026-10-25
 
+- **69书吧全浏览器链路**：全站 Cloudflare Turnstile + TLS 指纹校验（cookie 提取也不够），转脚本源四方法全走 Playwright；反自动化启动参数让 Turnstile 自动通过（webdriver 特征）；BrowserPage 页内 fetch 支持 POST（搜索表单）；fetchText 自动合并浏览器同域 cookie
+- **HTTP 空闲超时放宽**：Bun.serve idleTimeout 10s→255s（目录多页翻页等长请求不再被服务端掐断）
 - **阅读器 UI 细化**：底部细线改为章内滚动进度（滚到底 100%，不同步后端）；手机底栏去掉设置（入口移右侧按钮组）；PC 两侧菜单 ≥900px 贴正文边缘；浮动圆钮加半透明底色描边；新增阅读器 UI 设计规范（docs/design.md 第四部分）
 - **正文段落换行**：规则引擎新增 `.textBlocks()`（最内层块级元素、嵌套 p 去重、br 转换行、跳过裸广告文本）；思兔/幽香两源规则与脚本已迁移
 - **header 统一对象化**：normalizeSource 宽松解析字符串 header（容错 devtools 复制片段）入库为对象；修复思兔坏 JSON header、幽香脚本源 headers 二次编码（展示/生成代码/运行时三处 + 存量数据）
