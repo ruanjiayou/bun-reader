@@ -6,6 +6,7 @@ import { db, sqlite } from "../db";
 import { books, chapters, chapterCache, progress, sources } from "../schema";
 import { isPlaceholder } from "../source/engine";
 import { engineFor, type Engine } from "../source/facade";
+import { limiterFor } from "../source/rate";
 import { log } from "../log";
 import type { AuthEnv } from "../auth";
 
@@ -55,14 +56,14 @@ const jobStmt = {
   get: sqlite.query("SELECT total, done, failed, status, updated_at FROM cache_jobs WHERE content_key = ?"),
 };
 
-async function runCacheJob(eng: any, key: string, list: { idx: number; url: string; title: string }[]) {
+async function runCacheJob(eng: any, key: string, list: { idx: number; url: string; title: string }[], sourceId: number | null) {
   const stopper = { stop: false };
   runningJobs.set(key, stopper);
   jobStmt.upsert.run(key, list.length, Date.now());
+  const limiter = sourceId != null ? limiterFor(sourceId) : null;
   log.info("cache", `任务启动：${key.slice(0, 8)}… 共 ${list.length} 章待抓`);
-  cacheLog("info", `任务启动：共 ${list.length} 章待抓`);
+  cacheLog("info", `任务启动：共 ${list.length} 章待抓${limiter && limiter.cap > 0 ? `（沿用频率 ${limiter.cap} 次/${limiter.windowMs / 1000}s）` : "（起步不限速）"}`);
   try {
-    let delay = 0; // 自适应请求间隔（ms）：起步不限速；出错翻倍降温，稳定后保持当前间隔
     for (const ch of list) {
       if (stopper.stop) {
         const cur = (jobStmt.get.get(key) ?? {}) as any;
@@ -71,7 +72,6 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
         cacheLog("info", `任务停止：已完成 ${cur.done ?? 0}/${list.length}`);
         return;
       }
-      let ok = true;
       // 阅读时可能已把该章抓取落盘（内容接口共用 fetchAndSave）→ 跳过不重复请求
       const [exists] = await db
         .select({ filePath: chapterCache.filePath })
@@ -83,26 +83,36 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
         cacheLog("info", `第 ${ch.idx + 1} 章《${ch.title}》阅读时已缓存，跳过`);
         continue;
       }
-      try {
-        await fetchAndSave(eng, ch.url, key, ch.idx);
-        cacheLog("info", `第 ${ch.idx + 1} 章《${ch.title}》缓存成功`);
-      } catch (e: any) {
-        ok = false;
-        const old = delay;
-        // 自适应降温：首次失败 2s 起，之后每次翻倍，封顶 60s；成功后不再升也不自动降（保持能跑通的节奏）
-        delay = Math.min(Math.max(delay * 2, 2000), 60000);
-        if (delay !== old) cacheLog("info", `触发限流：请求间隔调整为 ${(delay / 1000).toFixed(0)}s`);
-        log.warn("cache", `第 ${ch.idx + 1} 章抓取失败（间隔将调整为 ${(delay / 1000).toFixed(0)}s）：${e?.message ?? e}`);
-        cacheLog("warn", `第 ${ch.idx + 1} 章《${ch.title}》失败：${e?.message ?? e}`);
+      // 抓取 + 失败重试：正式请求过限速器计频；重试等待指数退避（2s 起翻倍封顶 60s）且不计入频率
+      let ok = true;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          if (limiter) await limiter.acquire(sourceId!);
+          await fetchAndSave(eng, ch.url, key, ch.idx);
+          limiter?.onSuccess(sourceId!);
+          cacheLog("info", `第 ${ch.idx + 1} 章《${ch.title}》缓存成功`);
+          break;
+        } catch (e: any) {
+          limiter?.onFailure(sourceId!);
+          if (attempt >= 4) {
+            ok = false;
+            log.warn("cache", `第 ${ch.idx + 1} 章重试 ${attempt + 1} 次仍失败，放弃：${e?.message ?? e}`);
+            cacheLog("warn", `第 ${ch.idx + 1} 章《${ch.title}》失败：${e?.message ?? e}`);
+            break;
+          }
+          const wait = Math.min(2000 * 2 ** attempt, 60000);
+          log.warn("cache", `第 ${ch.idx + 1} 章失败，${wait / 1000}s 后重试（${attempt + 2}/5）：${e?.message ?? e}`);
+          cacheLog("warn", `第 ${ch.idx + 1} 章《${ch.title}》失败，${wait / 1000}s 后重试（${attempt + 2}/5）`);
+          await new Promise((r) => setTimeout(r, wait));
+        }
       }
       const cur = jobStmt.get.get(key) as any;
       jobStmt.update.run((cur?.done ?? 0) + (ok ? 1 : 0), (cur?.failed ?? 0) + (ok ? 0 : 1), "running", Date.now(), key);
-      if (delay > 0) await new Promise((r) => setTimeout(r, delay));
     }
     const cur = jobStmt.get.get(key) as any;
     jobStmt.update.run(cur.done, cur.failed, "done", Date.now(), key);
     log.info("cache", `任务完成：${key.slice(0, 8)}… 成功 ${cur.done}，失败 ${cur.failed}`);
-    cacheLog("info", `任务完成：成功 ${cur.done}，失败 ${cur.failed}`);
+    cacheLog("info", `任务完成：成功 ${cur.done}，失败 ${cur.failed}${limiter ? `，学习频率 ${limiter.cap === 0 ? "不限" : `${limiter.cap} 次/${limiter.windowMs / 1000}s`}` : ""}`);
   } catch (e: any) {
     const cur = jobStmt.get.get(key) as any;
     jobStmt.update.run(cur?.done ?? 0, cur?.failed ?? 0, "error", Date.now(), key);
@@ -128,7 +138,7 @@ bookRoutes.post("/:id/cache-all", async (c) => {
   const cached = new Set(cachedRows.map((r) => r.idx));
   const todo = list.filter((ch) => !cached.has(ch.idx)).sort((a, b) => a.idx - b.idx);
   if (!todo.length) return c.json({ nothing: true, cachedCount: cached.size });
-  runCacheJob(eng, key, todo); // 后台执行，不 await
+  runCacheJob(eng, key, todo, book.sourceId); // 后台执行，不 await
   return c.json({ queued: todo.length, cachedCount: cached.size });
 });
 

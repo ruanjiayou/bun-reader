@@ -77,6 +77,15 @@ CREATE TABLE IF NOT EXISTS progress (
   scroll_pos INTEGER NOT NULL DEFAULT 0,
   updated_at INTEGER NOT NULL
 );
+-- 缓存自适应限速状态：按书源维度学习（失败减半、整窗无错收敛），重启后沿用
+CREATE TABLE IF NOT EXISTS rate_states (
+  source_id INTEGER PRIMARY KEY,
+  cap INTEGER NOT NULL DEFAULT 0,      -- 窗口内允许的成功请求数；0 = 不限速
+  high INTEGER NOT NULL DEFAULT 0,     -- 最近一次降频前的频率（收敛上限）
+  window_ms INTEGER NOT NULL DEFAULT 60000,
+  last_fail_at INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE IF NOT EXISTS settings (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
