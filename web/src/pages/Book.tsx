@@ -21,7 +21,6 @@ interface CacheStatus {
   cachedCount: number;
   running: boolean;
   job: { total: number; done: number; failed: number; status: string } | null;
-  logs?: { level: "ok" | "warn" | "info"; msg: string; t: number }[];
 }
 
 export default function Book() {
@@ -169,34 +168,35 @@ export default function Book() {
 
       {book && (
         <div className="mb-4 rounded-xl bg-neutral-800 p-4">
+          {/* 封面在左，标题/作者/简介/进度/按钮都在右侧 */}
           <div className="flex gap-4">
             {book.cover ? (
-              <img src={book.cover} alt="" className="h-32 w-24 flex-none rounded-lg object-cover" onError={(e) => (e.currentTarget.style.display = "none")} />
+              <img src={book.cover} alt="" className="h-36 w-27 flex-none rounded-lg object-cover" onError={(e) => (e.currentTarget.style.display = "none")} />
             ) : (
-              <div className="flex h-32 w-24 flex-none items-center justify-center rounded-lg bg-neutral-700 text-3xl">📕</div>
+              <div className="flex h-36 w-27 flex-none items-center justify-center rounded-lg bg-neutral-700 text-3xl">📕</div>
             )}
             <div className="min-w-0 flex-1">
               <h1 className="text-lg font-bold">{book.name}</h1>
               <div className="mt-0.5 text-sm text-neutral-400">{book.author || "佚名"}</div>
               {book.intro && <p className="mt-2 line-clamp-3 text-xs text-neutral-500">{book.intro}</p>}
+              {/* 简介下方：最新章节 / 读到章节 各占一行 */}
+              {book.latestChapter && <div className="mt-2 truncate text-xs text-neutral-500">最新章节：{fmtLatest(book.latestChapter)}</div>}
+              <div className="mt-1 truncate text-xs text-neutral-500">
+                {cur !== null ? `读到：第 ${cur + 1} 章 ${chapters.find((c) => c.idx === cur)?.title ?? ""}` : "尚未开始阅读"}
+              </div>
+              {/* 继续阅读 / 移出书架 并排 */}
+              <div className="mt-3 flex gap-2">
+                <button
+                  onClick={() => nav(`/book/${bookId}/read/${startIdx}`)}
+                  className="rounded-lg bg-amber-500 px-5 py-2 text-sm font-medium text-neutral-900 hover:bg-amber-400"
+                >
+                  {cur !== null ? "继续阅读" : "开始阅读"}
+                </button>
+                <button onClick={remove} className="rounded-lg bg-neutral-700 px-5 py-2 text-sm text-red-400 hover:bg-red-950">
+                  移出书架
+                </button>
+              </div>
             </div>
-          </div>
-          {/* 简介下方：最新章节 / 读到章节 各占整行 */}
-          {book.latestChapter && <div className="mt-3 truncate text-xs text-neutral-500">最新章节：{fmtLatest(book.latestChapter)}</div>}
-          <div className="mt-1 truncate text-xs text-neutral-500">
-            {cur !== null ? `读到：第 ${cur + 1} 章 ${chapters.find((c) => c.idx === cur)?.title ?? ""}` : "尚未开始阅读"}
-          </div>
-          {/* 继续阅读 / 移出书架 并排 */}
-          <div className="mt-3 flex gap-2">
-            <button
-              onClick={() => nav(`/book/${bookId}/read/${startIdx}`)}
-              className="flex-1 rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-amber-400"
-            >
-              {cur !== null ? "继续阅读" : "开始阅读"}
-            </button>
-            <button onClick={remove} className="rounded-lg bg-neutral-700 px-4 py-2 text-sm text-red-400 hover:bg-red-950">
-              移出书架
-            </button>
           </div>
         </div>
       )}
@@ -226,17 +226,6 @@ export default function Book() {
           </button>
         </div>
       </div>
-
-      {/* 缓存活动日志：最近 30 条（最新在上），成功/失败都显示章节标题 */}
-      {cache?.logs && cache.logs.length > 0 && (
-        <div className="mb-4 max-h-40 overflow-y-auto rounded-xl bg-neutral-900 p-2 font-mono text-xs leading-5">
-          {[...cache.logs].reverse().map((l, i) => (
-            <div key={i} className={l.level === "ok" ? "text-emerald-400/80" : l.level === "warn" ? "text-amber-400/80" : "text-neutral-400"}>
-              <span className="text-neutral-600">{new Date(l.t).toLocaleTimeString("zh-CN", { hour12: false })}</span> {l.msg}
-            </div>
-          ))}
-        </div>
-      )}
 
       <section id="toc">
         <div className="mb-2 flex items-center">
