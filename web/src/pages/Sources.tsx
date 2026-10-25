@@ -8,6 +8,7 @@ interface SourceRow {
   bookUrl: string;
   group: string;
   enabled: boolean;
+  type: string; // rules = 规则表单源；script = class 脚本源
 }
 interface DebugEvt {
   level: "info" | "ok" | "warn" | "err";
@@ -121,13 +122,58 @@ const levelColor: Record<DebugEvt["level"], string> = {
   err: "text-red-400",
 };
 
+// 脚本源新建模板：class 四方法全可选，配置在类成员里（base/headers/replace）
+const SCRIPT_TEMPLATE = `// @name 新脚本源
+// 可用 API：fetchText(url, opts?) → {status,text,url}；parse(html) → cheerio $；
+//           abs(u, base?) 相对转绝对；log(msg)；nodes(html)/ruleText(ns,规则)/ruleSel(ns,规则)（规则语法兼容）
+export default class Source {
+  base = "https://www.example.com";      // 相对地址补全的默认 base
+  headers = {};                          // 注入到每次 fetchText（如 Cookie）
+  replace = [];                          // 正文净化：{ regex, replacement } 数组
+
+  async search(name, page = 1) {
+    const res = await fetchText(\`\${this.base}/search?kw=\${encodeURIComponent(name)}\`);
+    if (res.status >= 400) throw new Error("HTTP " + res.status);
+    const $ = parse(res.text);
+    return $(".item").map((_, el) => ({
+      title: $(el).find(".t").text().trim(),
+      author: $(el).find(".a").text().trim(),
+      desc: $(el).find(".d").text().trim(),
+      cover: abs($(el).find("img").attr("src"), res.url),
+      detailUrl: abs($(el).find("a").attr("href"), res.url),
+    })).get();
+  }
+
+  async getDetail(url) {
+    const res = await fetchText(url);
+    const $ = parse(res.text);
+    return { title: $("#t").text().trim(), author: "", desc: "", cover: "", tocUrl: abs($("#toc").attr("href"), res.url) };
+  }
+
+  // 返回 { list: [{title, url}], next? }：翻页由引擎按 next 循环（去重/上限引擎负责）
+  async getChapters(url) {
+    const res = await fetchText(url);
+    const $ = parse(res.text);
+    const list = $("li a").map((_, el) => ({ title: $(el).text().trim(), url: abs($(el).attr("href"), res.url) })).get();
+    const next = $(".next").attr("href") ? abs($(".next").attr("href"), res.url) : "";
+    return { list, next: next || undefined };
+  }
+
+  // 返回 string（单页）或 { text, next? }（章节内部翻页，引擎拼接）
+  async getContent(url) {
+    const res = await fetchText(url);
+    const $ = parse(res.text);
+    return $("#content").text();
+  }
+}`;
+
 export default function Sources() {
   const [rows, setRows] = useState<SourceRow[]>([]);
   const [filter, setFilter] = useState("");
   const [editId, setEditId] = useState<number | null>(null); // null = 新建未保存
   const [form, setForm] = useState<any>(emptyForm());
   const [jsonText, setJsonText] = useState("");
-  const [rightTab, setRightTab] = useState<"json" | "debug">("json");
+  const [rightTab, setRightTab] = useState<"json" | "debug" | "js">("json");
   const [msg, setMsg] = useState("");
   const [importUrl, setImportUrl] = useState("");
   const [debugKey, setDebugKey] = useState("我的");
@@ -139,6 +185,8 @@ export default function Sources() {
   const [dirty, setDirty] = useState(false); // 表单/JSON 有未保存改动 → 保存按钮高亮
   const [dbgBook, setDbgBook] = useState<DebugBookInfo | null>(null); // 调试全链路成功后的书籍信息，可加书架
   const [addingBook, setAddingBook] = useState(false);
+  const [srcType, setSrcType] = useState<"rules" | "script">("rules"); // 当前编辑上下文的源类型
+  const [scriptCode, setScriptCode] = useState(""); // script 源编辑器内容 / rules 源只读预览
   const nav = useNavigate();
   const logBox = useRef<HTMLDivElement>(null);
 
@@ -175,21 +223,43 @@ export default function Sources() {
       if (!Object.keys(clean[k] ?? {}).length) delete clean[k];
     return JSON.stringify(clean, null, 2);
   };
-  const selectSource = async (id: number | null) => {
+  const selectSource = async (id: number | null | "new-script") => {
     setLogs([]);
     setDirty(false);
+    setDbgBook(null);
     if (id === null) {
       setEditId(null);
       setForm(emptyForm());
       setJsonText("");
+      setSrcType("rules");
+      setScriptCode("");
       setMsg("");
       return;
     }
+    if (id === "new-script") {
+      setEditId(null);
+      setForm(emptyForm());
+      setJsonText("");
+      setSrcType("script");
+      setScriptCode(SCRIPT_TEMPLATE);
+      setRightTab("json");
+      setMsg("新建脚本源：改好代码后点「保存源」");
+      return;
+    }
     try {
-      const row = await api<{ id: number; json: string }>(`/api/sources/${id}`);
+      const row = await api<{ id: number; json: string; type: string }>(`/api/sources/${id}`);
       setEditId(id);
-      setForm(JSON.parse(row.json));
-      setJsonText(JSON.stringify(JSON.parse(row.json), null, 2));
+      setSrcType(row.type === "script" ? "script" : "rules");
+      if (row.type === "script") {
+        const { code } = await api<{ code: string }>(`/api/sources/${id}/code`);
+        setScriptCode(code);
+        setForm(emptyForm());
+        setJsonText("");
+      } else {
+        setForm(JSON.parse(row.json));
+        setJsonText(JSON.stringify(JSON.parse(row.json), null, 2));
+        setScriptCode("");
+      }
       setMsg("");
     } catch (e: any) {
       setMsg(e.message);
@@ -206,10 +276,27 @@ export default function Sources() {
       return false;
     }
   };
-  // 保存当前表单（upsert），返回源 id
+  // 保存当前源（upsert），返回源 id。rules 走 import 接口；script 走专用接口（新建/更新代码）
   const saveSource = async (): Promise<number | null> => {
-    const text = jsonText.trim().startsWith("{") ? jsonText : JSON.stringify(form);
     try {
+      if (srcType === "script") {
+        if (!scriptCode.trim()) {
+          setMsg("脚本是空的");
+          return null;
+        }
+        if (editId === null) {
+          const r = await api<{ id: number }>("/api/sources/script", { method: "POST", body: JSON.stringify({ code: scriptCode }) });
+          await load();
+          setEditId(r.id);
+          setMsg("脚本源已创建");
+        } else {
+          await api(`/api/sources/${editId}/code`, { method: "PUT", body: JSON.stringify({ code: scriptCode }) });
+          setMsg("脚本已保存并生效");
+        }
+        setDirty(false);
+        return editId;
+      }
+      const text = jsonText.trim().startsWith("{") ? jsonText : JSON.stringify(form);
       await api("/api/sources/import", { method: "POST", body: JSON.stringify({ text }) });
       await load();
       const url = JSON.parse(text).bookSourceUrl;
@@ -376,17 +463,40 @@ export default function Sources() {
         <div className="space-y-3 md:sticky md:top-4 md:max-h-[calc(100dvh-2rem)] md:overflow-y-auto md:pr-1">
           <select
             className="w-full rounded-lg bg-neutral-800 px-3 py-2 text-sm"
-            value={editId ?? ""}
-            onChange={(e) => selectSource(e.target.value === "" ? null : Number(e.target.value))}
+            value={editId ?? (srcType === "script" ? "new-script" : "")}
+            onChange={(e) =>
+              selectSource(e.target.value === "" ? null : e.target.value === "new-script" ? "new-script" : Number(e.target.value))
+            }
           >
-            <option value="">＋ 新建源</option>
+            <option value="">＋ 新建源（规则）</option>
+            <option value="new-script">＋ 新建脚本源（JS class）</option>
             {shown.map((r) => (
               <option key={r.id} value={r.id}>
+                {r.type === "script" ? "⚙ " : ""}
                 {r.name}（{r.enabled ? "启用" : "停用"}）
               </option>
             ))}
           </select>
-          {SECTIONS.map((sec) => (
+          {srcType === "script" ? (
+            <div className="rounded-xl bg-neutral-800 p-3">
+              <div className="mb-2 flex items-center justify-between text-xs text-neutral-400">
+                <span>脚本书源（class，四方法全可选）</span>
+                <span className="text-neutral-500">名称取 // @name</span>
+              </div>
+              <textarea
+                rows={28}
+                spellCheck={false}
+                className="w-full rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5"
+                placeholder="export default class Source { ... }"
+                value={scriptCode}
+                onChange={(e) => {
+                  setScriptCode(e.target.value);
+                  setDirty(true);
+                }}
+              />
+            </div>
+          ) : (
+            SECTIONS.map((sec) => (
             <fieldset key={sec.title} className="rounded-xl bg-neutral-800 p-4">
               <legend className="px-1 text-sm font-bold text-amber-400">{sec.title}</legend>
               <div className="space-y-2">
@@ -415,7 +525,8 @@ export default function Sources() {
                 ))}
               </div>
             </fieldset>
-          ))}
+            ))
+          )}
         </div>
 
         {/* 中：操作列 */}
@@ -438,15 +549,23 @@ export default function Sources() {
         {/* 右：JSON / 调试 */}
         <div className="flex flex-col rounded-xl bg-neutral-800 p-3 md:sticky md:top-4 md:max-h-[calc(100dvh-2rem)]">
           <div className="mb-2 flex flex-wrap items-center gap-1">
-            {(["json", "debug"] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => setRightTab(t)}
-                className={`rounded-lg px-3 py-1.5 text-sm ${rightTab === t ? "bg-amber-500 font-medium text-neutral-900" : "bg-neutral-700 text-neutral-300 hover:bg-neutral-600"}`}
-              >
-                {t === "json" ? "JSON" : "调试"}
-              </button>
-            ))}
+            {(["json", "js", "debug"] as const).map((t) =>
+              t === "js" && (srcType === "script" || editId === null) ? null : (
+                <button
+                  key={t}
+                  onClick={() => {
+                    setRightTab(t);
+                    if (t === "js" && editId !== null)
+                      api<{ code: string; generated: boolean }>(`/api/sources/${editId}/code`)
+                        .then((r) => setScriptCode(r.code))
+                        .catch((e) => setMsg(e.message));
+                  }}
+                  className={`rounded-lg px-3 py-1.5 text-sm ${rightTab === t ? "bg-amber-500 font-medium text-neutral-900" : "bg-neutral-700 text-neutral-300 hover:bg-neutral-600"}`}
+                >
+                  {t === "json" ? "JSON" : t === "js" ? "生成的 JS" : "调试"}
+                </button>
+              ),
+            )}
           </div>
           {rightTab === "json" ? (
             <textarea
@@ -459,6 +578,10 @@ export default function Sources() {
               }}
               onBlur={() => syncJsonToForm()}
             />
+          ) : rightTab === "js" ? (
+            <pre className="h-96 w-full flex-1 overflow-auto rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5 whitespace-pre text-neutral-300 md:h-auto">
+              {scriptCode}
+            </pre>
           ) : (
             <div className="flex flex-1 flex-col gap-2 overflow-hidden">
               {/* 子模式切换 + 输入 */}

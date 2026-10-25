@@ -6,7 +6,10 @@ import { httpText } from "../source/fetcher";
 import { engineFor } from "../source/facade";
 import type { LogLevel } from "../source/engine";
 import { normalizeSource } from "../source/rule";
+import { rulesToScript } from "../source/convert";
+import { saveScriptFile } from "../source/script";
 import type { AuthEnv } from "../auth";
+import { log } from "../log";
 
 export const sourceRoutes = new Hono<AuthEnv>();
 
@@ -21,6 +24,7 @@ sourceRoutes.get("/", async (c) => {
       bookUrl: sources.bookUrl,
       group: sources.group,
       enabled: sources.enabled,
+      type: sources.type,
       lastUseAt: sources.lastUseAt,
     })
     .from(sources);
@@ -37,6 +41,43 @@ sourceRoutes.get("/:id", async (c) => {
   const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
   if (!row) return c.json({ error: "书源不存在" }, 404);
   return c.json(row);
+});
+
+// 当前生效的脚本代码：script 源 = 用户代码；rules 源 = 转换器生成的只读代码
+sourceRoutes.get("/:id/code", async (c) => {
+  const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
+  if (!row) return c.json({ error: "书源不存在" }, 404);
+  if (row.type === "script") return c.json({ code: row.code ?? "", generated: false });
+  return c.json({ code: row.code || rulesToScript(JSON.parse(row.json)), generated: true });
+});
+
+// 新建脚本源（code 必填；name 缺省从 // @name 提取；bookUrl 缺省从 base = "..." 提取）
+sourceRoutes.post("/script", async (c) => {
+  const body = await readBody<{ name?: string; bookUrl?: string; code?: string }>(c);
+  const code = (body.code ?? "").trim();
+  if (!code) return c.json({ error: "缺少 code" }, 400);
+  const name = body.name?.trim() || code.match(/@name\s+(.+)/)?.[1]?.trim() || "脚本源";
+  const bookUrl = body.bookUrl?.trim() || code.match(/base\s*=\s*["']([^"']+)["']/)?.[1] || "";
+  const [row] = await db
+    .insert(sources)
+    .values({ name, bookUrl, group: "脚本", json: "{}", type: "script", code })
+    .returning({ id: sources.id });
+  saveScriptFile(row.id, code);
+  log.info("source", `新建脚本源「${name}」id=${row.id}`);
+  return c.json({ id: row.id, name });
+});
+
+// 更新脚本源代码（rules 源不可直改——编辑规则保存时自动重新生成）
+sourceRoutes.put("/:id/code", async (c) => {
+  const body = await readBody<{ code?: string }>(c);
+  const code = (body.code ?? "").trim();
+  if (!code) return c.json({ error: "缺少 code" }, 400);
+  const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
+  if (!row) return c.json({ error: "书源不存在" }, 404);
+  if (row.type !== "script") return c.json({ error: "规则源不可直接编辑脚本，编辑规则保存后会自动重新生成" }, 400);
+  await db.update(sources).set({ code }).where(eq(sources.id, row.id));
+  saveScriptFile(row.id, code);
+  return c.json({ ok: true });
 });
 
 sourceRoutes.put("/:id", async (c) => {
@@ -80,7 +121,7 @@ sourceRoutes.post("/import", async (c) => {
     if (!url || !name) continue; // ponytail: 跳过非法条目而不是整体失败
     const [exist] = await db.select({ id: sources.id }).from(sources).where(eq(sources.bookUrl, url));
     if (exist) {
-      await db.update(sources).set({ name, group: s.bookSourceGroup ?? "默认", json: JSON.stringify(s) }).where(eq(sources.id, exist.id));
+      await db.update(sources).set({ name, group: s.bookSourceGroup ?? "默认", json: JSON.stringify(s), code: rulesToScript(s), type: "rules" }).where(eq(sources.id, exist.id));
       updated++;
     } else {
       await db.insert(sources).values({
@@ -89,6 +130,8 @@ sourceRoutes.post("/import", async (c) => {
         group: s.bookSourceGroup ?? "默认",
         enabled: s.enabled !== false,
         json: JSON.stringify(s),
+        type: "rules",
+        code: rulesToScript(s),
       });
       added++;
     }
