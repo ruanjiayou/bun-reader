@@ -2,6 +2,10 @@
 
 按日期记录功能变更（设计规范见 [docs/design.md](./docs/design.md)，当前计划见 [docs/plans.md](./docs/plans.md)）。
 
+## 2026-10-26
+
+- **API 网关前缀**：前端所有请求统一加 `/gw/reader` 前缀（`api.ts` 的 `API_BASE`，可用 `VITE_API_BASE` 覆盖，置空串直连同源 `/api`）；vite dev 代理 `/gw/reader` → `http://192.168.1.124`（路径原样保留，网关不剥前缀）；后端补 `/gw/reader/api`、`/gw/reader/auth` 别名路由（与 `/api`、`/auth` 等价，网关直接转发也能命中）
+
 ## 2026-10-25
 
 - **浏览器单实例双模式**：调试/预览有头、真实抓取（目录后台补/全本缓存/正文/检查更新）无头，`runWithBrowserMode` 注入；同 profile 切换（等空闲→重启，cookie 保留），无头 UA 去 HeadlessChrome 特征
