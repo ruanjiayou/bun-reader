@@ -252,8 +252,10 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 
 - `launchPersistentContext("data/browser-profile")`：cookie/localStorage 自动持久化，验证通过一次后续自动复用
 - channel 探测：系统 Chrome → Edge → playwright chromium；`BROWSER_HEADLESS=1` 切无头（默认有头）
-- WAF 判定（防误报）：标题命中 或 「小页面(<4000) + 关键词」；挑战页等待人工输入验证码（30s 提示、180s 超时）
-- `page.content()` 有「导航中」竞态（safeContent 重试兜底）；残留 chrome 持 profile 锁需按 CommandLine 杀进程
+- WAF 判定（防误报）：标题命中（中文验证词 / captcha / waf / human verification）、「小页面(<4000) + 关键词」、或页面内嵌 Turnstile 特征（`challenges.cloudflare.com/turnstile` / `cf-turnstile` / `aegis_captcha_verify`）；挑战页轮询等待通过（30s 提示、180s 超时）
+- **反自动化检测**（Cloudflare Turnstile 等）：启动参数必须带 `args:["--disable-blink-features=AutomationControlled"]` + `ignoreDefaultArgs:["--enable-automation"]`，否则 `navigator.webdriver=true` 被识别、挑战永远不通过（普通浏览器能过、自动化过不了的根因）；Turnstile 自动通过无需人工，图片验证码需窗口手动输入
+- **cookie 不能替代浏览器**：部分 WAF（如 69shuba aegis）同时校验 TLS 指纹，提取 cookie 给服务端 fetch 仍 403 → 这类站点必须全链路走浏览器（fetchText 会自动合并浏览器同域 cookie，可作普通 WAF 站的加速路径，但不保证够用）
+- `BrowserPage.fetch(url, opts)`：页内上下文 fetch（page.evaluate），自动带浏览器 cookie / 真实 TLS 指纹，**支持 POST**（WAF 站搜索表单用）；`page.content()` 有「导航中」竞态（safeContent 重试兜底）；残留 chrome 持 profile 锁需按 CommandLine 杀进程
 
 ---
 
