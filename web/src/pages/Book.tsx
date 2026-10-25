@@ -167,7 +167,41 @@ export default function Book() {
         </div>
       )}
 
-      {/* 缓存条：全本缓存状态 + 操作 */}
+      {book && (
+        <div className="mb-4 rounded-xl bg-neutral-800 p-4">
+          <div className="flex gap-4">
+            {book.cover ? (
+              <img src={book.cover} alt="" className="h-32 w-24 flex-none rounded-lg object-cover" onError={(e) => (e.currentTarget.style.display = "none")} />
+            ) : (
+              <div className="flex h-32 w-24 flex-none items-center justify-center rounded-lg bg-neutral-700 text-3xl">📕</div>
+            )}
+            <div className="min-w-0 flex-1">
+              <h1 className="text-lg font-bold">{book.name}</h1>
+              <div className="mt-0.5 text-sm text-neutral-400">{book.author || "佚名"}</div>
+              {book.intro && <p className="mt-2 line-clamp-3 text-xs text-neutral-500">{book.intro}</p>}
+            </div>
+          </div>
+          {/* 简介下方：最新章节 / 读到章节 各占整行 */}
+          {book.latestChapter && <div className="mt-3 truncate text-xs text-neutral-500">最新章节：{fmtLatest(book.latestChapter)}</div>}
+          <div className="mt-1 truncate text-xs text-neutral-500">
+            {cur !== null ? `读到：第 ${cur + 1} 章 ${chapters.find((c) => c.idx === cur)?.title ?? ""}` : "尚未开始阅读"}
+          </div>
+          {/* 继续阅读 / 移出书架 并排 */}
+          <div className="mt-3 flex gap-2">
+            <button
+              onClick={() => nav(`/book/${bookId}/read/${startIdx}`)}
+              className="flex-1 rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-amber-400"
+            >
+              {cur !== null ? "继续阅读" : "开始阅读"}
+            </button>
+            <button onClick={remove} className="rounded-lg bg-neutral-700 px-4 py-2 text-sm text-red-400 hover:bg-red-950">
+              移出书架
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* 缓存条：卡片与目录之间，缓存操作 + 检查更新 */}
       <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl bg-neutral-800/60 px-3 py-2 text-xs">
         <span className="text-neutral-400">
           缓存：{cache?.cachedCount ?? 0}/{cache?.total ?? chapters.length} 章
@@ -187,6 +221,9 @@ export default function Book() {
             </button>
           )}
           <button onClick={cacheRelease} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-400 hover:bg-red-950 hover:text-red-400">释放缓存</button>
+          <button onClick={refreshToc} disabled={refreshing} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-400 hover:bg-neutral-600 disabled:opacity-50">
+            {refreshing ? "检查更新中…" : "↻ 检查更新"}
+          </button>
         </div>
       </div>
 
@@ -198,43 +235,6 @@ export default function Book() {
               <span className="text-neutral-600">{new Date(l.t).toLocaleTimeString("zh-CN", { hour12: false })}</span> {l.msg}
             </div>
           ))}
-        </div>
-      )}
-
-      {book && (
-        <div className="mb-4 flex gap-4 rounded-xl bg-neutral-800 p-4">
-          {book.cover ? (
-            <img src={book.cover} alt="" className="h-32 w-24 flex-none rounded-lg object-cover" onError={(e) => (e.currentTarget.style.display = "none")} />
-          ) : (
-            <div className="flex h-32 w-24 flex-none items-center justify-center rounded-lg bg-neutral-700 text-3xl">📕</div>
-          )}
-          <div className="min-w-0 flex-1">
-            <h1 className="text-lg font-bold">{book.name}</h1>
-            <div className="mt-0.5 text-sm text-neutral-400">{book.author || "佚名"}</div>
-            {book.latestChapter && <div className="mt-0.5 truncate text-xs text-neutral-500">最新：{fmtLatest(book.latestChapter)}</div>}
-            {book.intro && <p className="mt-2 line-clamp-3 text-xs text-neutral-500">{book.intro}</p>}
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button
-                onClick={() => nav(`/book/${bookId}/read/${startIdx}`)}
-                className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-amber-400"
-              >
-                {cur !== null ? `继续阅读 · ${chapters.find((c) => c.idx === cur)?.title ?? ""}` : "开始阅读"}
-              </button>
-              <button
-                onClick={refreshToc}
-                disabled={refreshing}
-                className="rounded-lg bg-neutral-800 px-3 py-2 text-sm text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
-              >
-                {refreshing ? "检查更新中…" : "↻ 检查更新"}
-              </button>
-              <button
-                onClick={remove}
-                className="rounded-lg bg-neutral-800 px-3 py-2 text-sm text-red-400 hover:bg-red-950"
-              >
-                移出书架
-              </button>
-            </div>
-          </div>
         </div>
       )}
 
