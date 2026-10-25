@@ -3,7 +3,8 @@ import { eq } from "drizzle-orm";
 import { db } from "../db";
 import { sources } from "../schema";
 import { httpText } from "../source/fetcher";
-import { searchSource, getBookInfo, getToc, getContent, type LogLevel } from "../source/engine";
+import { engineFor } from "../source/facade";
+import type { LogLevel } from "../source/engine";
 import { normalizeSource } from "../source/rule";
 import type { AuthEnv } from "../auth";
 
@@ -101,7 +102,7 @@ sourceRoutes.post("/:id/test", async (c) => {
   const { key = "我的" } = await readBody<{ key?: string }>(c);
   const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
   if (!row) return c.json({ error: "书源不存在" }, 404);
-  const src = normalizeSource(JSON.parse(row.json)); // 兼容入库时尚未转换的旧关键字规则
+  const eng = engineFor(row); // 兼容入库时尚未转换的旧关键字规则（normalize 在规则引擎内做）
   const steps: { step: string; ok: boolean; msg: string }[] = [];
   const run = async (step: string, fn: () => Promise<string>) => {
     try {
@@ -119,25 +120,25 @@ sourceRoutes.post("/:id/test", async (c) => {
   let chapterUrl = "";
   const ok =
     (await run("search", async () => {
-      const books = await searchSource(src, key);
+      const books = await eng.search(key);
       if (!books.length) throw new Error("搜索无结果");
       bookUrl = books[0].bookUrl;
       return `${books.length} 条，首条 ${books[0].name}`;
     })) &&
     (await run("book", async () => {
-      const info = await getBookInfo(src, bookUrl);
+      const info = await eng.bookInfo(bookUrl);
       tocUrl = info.tocUrl;
       lastChapterUrl = info.latestChapterUrl || info.latestChapter; // URL 供 {page} 推最大页码
       return info.name || "（未取到书名，继续）";
     })) &&
     (await run("toc", async () => {
-      const toc = await getToc(src, tocUrl, undefined, lastChapterUrl);
+      const toc = await eng.toc(tocUrl, undefined, lastChapterUrl);
       if (!toc.length) throw new Error("目录为空");
       chapterUrl = toc[0].url;
       return `${toc.length} 章`;
     })) &&
     (await run("content", async () => {
-      const content = await getContent(src, chapterUrl);
+      const content = await eng.content(chapterUrl);
       return `${content.length} 字`;
     }));
   return c.json({ ok, steps });
@@ -148,10 +149,10 @@ sourceRoutes.post("/:id/debug-search", async (c) => {
   const { key = "我的" } = await readBody<{ key?: string }>(c);
   const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
   if (!row) return c.json({ error: "书源不存在" }, 404);
-  const src = normalizeSource(JSON.parse(row.json));
+  const eng = engineFor(row);
   const logs: { level: LogLevel; step: string; msg: string }[] = [];
   try {
-    const books = await searchSource(src, key, (level, step, msg) => logs.push({ level, step, msg }));
+    const books = await eng.search(key, (level, step, msg) => logs.push({ level, step, msg }));
     return c.json({ books, logs });
   } catch (e: any) {
     return c.json({ books: [], logs, error: e?.message ?? String(e) });
@@ -163,7 +164,7 @@ sourceRoutes.post("/:id/debug", async (c) => {
   const { key = "我的", bookUrl } = await readBody<{ key?: string; bookUrl?: string }>(c);
   const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
   if (!row) return c.json({ error: "书源不存在" }, 404);
-  const src = normalizeSource(JSON.parse(row.json));
+  const eng = engineFor(row);
   const id = Number(c.req.param("id"));
 
   const stream = new ReadableStream({
@@ -177,23 +178,23 @@ sourceRoutes.post("/:id/debug", async (c) => {
         let lastChUrl = "";
         let bookInfo: { bookUrl: string; name: string; author: string; cover: string; intro: string; latestChapter: string } | null = null;
         if (bookUrl) {
-          const info = await getBookInfo(src, bookUrl, send);
+          const info = await eng.bookInfo(bookUrl, send);
           name = info.name || "（未取到书名）";
           tocUrl = info.tocUrl;
           lastChUrl = info.latestChapterUrl;
           bookInfo = { bookUrl, name: info.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter || info.latestChapterUrl };
         } else {
-          const books = await searchSource(src, key, send);
+          const books = await eng.search(key, send);
           if (!books.length) throw new Error("搜索无结果");
           name = books[0].name;
-          const info = await getBookInfo(src, books[0].bookUrl, send);
+          const info = await eng.bookInfo(books[0].bookUrl, send);
           tocUrl = info.tocUrl;
           lastChUrl = info.latestChapterUrl;
           bookInfo = { bookUrl: books[0].bookUrl, name: info.name || books[0].name, author: info.author || books[0].author, cover: info.cover || books[0].cover, intro: info.intro, latestChapter: info.latestChapter || info.latestChapterUrl || books[0].latestChapter };
         }
-        const toc = await getToc(src, tocUrl, send, lastChUrl || undefined);
+        const toc = await eng.toc(tocUrl, send, lastChUrl || undefined);
         if (!toc.length) throw new Error("目录为空");
-        const content = await getContent(src, toc[0].url, send);
+        const content = await eng.content(toc[0].url, send);
         // 全链路成功后把书籍信息发给前端：调试面板可一键加入书架（无搜索的源靠这个入库）
         if (bookInfo) controller.enqueue(enc.encode(`data: ${JSON.stringify({ level: "ok", step: "bookinfo", msg: "书籍信息（可用于加书架）", info: bookInfo })}\n\n`));
         send("ok", "done", `调试完成：${name} → ${toc.length} 章 → 首章正文 ${content.length} 字`);

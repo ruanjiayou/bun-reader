@@ -4,8 +4,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, rmSync 
 import { and, eq, inArray } from "drizzle-orm";
 import { db, sqlite } from "../db";
 import { books, chapters, chapterCache, progress, sources } from "../schema";
-import { getBookInfo, getToc, getContent, isPlaceholder, searchSource } from "../source/engine";
-import { normalizeSource } from "../source/rule";
+import { isPlaceholder } from "../source/engine";
+import { engineFor, type Engine } from "../source/facade";
 import { log } from "../log";
 import type { AuthEnv } from "../auth";
 
@@ -14,16 +14,16 @@ export const bookRoutes = new Hono<AuthEnv>();
 const contentKey = (bookUrl: string) => createHash("sha1").update(bookUrl).digest("hex");
 const cacheDir = (key: string) => `data/cache/${key}`;
 
-async function loadEngine(sourceId: number | null) {
+async function loadEngine(sourceId: number | null): Promise<Engine> {
   if (!sourceId) throw new Error("书籍未绑定书源");
   const [row] = await db.select().from(sources).where(eq(sources.id, sourceId));
   if (!row) throw new Error("书源已删除");
-  return normalizeSource(JSON.parse(row.json));
+  return engineFor(row);
 }
 
 // 抓正文 → 落盘 → 章节缓存索引（单章与全本缓存共用）
-async function fetchAndSave(eng: any, url: string, key: string, idx: number) {
-  const raw = await getContent(eng, url);
+async function fetchAndSave(eng: Engine, url: string, key: string, idx: number) {
+  const raw = await eng.content(url);
   if (!raw.trim()) throw new Error("正文抓取为空");
   mkdirSync(cacheDir(key), { recursive: true });
   const filePath = `${cacheDir(key)}/${idx}.txt`;
@@ -166,9 +166,9 @@ bookRoutes.post("/:id/cache-release", async (c) => {
 });
 
 // 抓详情+目录并写入章节快照（加书架与刷新共用）；最新章节 URL 供 {page} 模板推最大页码
-async function snapshotToc(eng: any, bookUrl: string) {
-  const info = await getBookInfo(eng, bookUrl);
-  const toc = await getToc(eng, info.tocUrl, undefined, info.latestChapterUrl || undefined);
+async function snapshotToc(eng: Engine, bookUrl: string) {
+  const info = await eng.bookInfo(bookUrl);
+  const toc = await eng.toc(info.tocUrl, undefined, info.latestChapterUrl || undefined);
   if (!toc.length) throw new Error("目录为空");
   return { info, toc };
 }
@@ -315,22 +315,22 @@ bookRoutes.get("/:id/sources", async (c) => {
   const bookId = Number(c.req.param("id"));
   const [book] = await db.select().from(books).where(and(eq(books.id, bookId), eq(books.userId, uid)));
   if (!book) return c.json({ error: "书籍不存在" }, 404);
-  const rows = await db.select({ id: sources.id, json: sources.json }).from(sources).where(eq(sources.enabled, true));
-  const engines = rows.map((r) => ({ id: r.id, src: normalizeSource(JSON.parse(r.json)) }));
+  const rows = await db.select().from(sources).where(eq(sources.enabled, true));
+  const engines = rows.map((r) => ({ id: r.id, eng: engineFor(r) }));
   const results: {
     sourceId: number; sourceName: string; name: string; author: string; bookUrl: string; latestChapter: string; current: boolean;
   }[] = [];
   let cursor = 0; // 4 路并发 worker 共享游标
   const worker = async () => {
     while (cursor < engines.length) {
-      const { id, src } = engines[cursor++];
+      const { id, eng } = engines[cursor++];
       try {
-        const found = await searchSource(src, book.name);
+        const found = await eng.search(book.name);
         const hit = found.find((b) => b.name === book.name) ?? found[0];
         if (hit)
           results.push({
             sourceId: id,
-            sourceName: src.sourceName || `源#${id}`,
+            sourceName: eng.sourceName || `源#${id}`,
             name: hit.name,
             author: hit.author,
             bookUrl: hit.bookUrl,

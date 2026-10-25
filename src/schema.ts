@@ -14,6 +14,9 @@ export const sources = sqliteTable("sources", {
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   group: text("group").notNull().default("默认"),
   json: text("json").notNull(),
+  // script 引擎（M2 v2）：rules=规则表单（保存时生成 js 代码），script=直接编辑 class
+  type: text("type").notNull().default("rules"),
+  code: text("code"), // type=script 时的用户代码；type=rules 时存转换器生成的只读代码
   lastUseAt: integer("last_use_at", { mode: "timestamp" }),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });

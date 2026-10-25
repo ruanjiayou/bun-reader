@@ -26,6 +26,8 @@ CREATE TABLE IF NOT EXISTS sources (
   enabled INTEGER NOT NULL DEFAULT 1,
   "group" TEXT NOT NULL DEFAULT '默认',
   json TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'rules',
+  code TEXT,
   last_use_at INTEGER,
   created_at INTEGER NOT NULL
 );
@@ -83,5 +85,12 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS settings_user_key ON settings(user_id, key);
 `);
+// 脚本引擎（M2 v2）：存量库补列（SQLite 无 ADD COLUMN IF NOT EXISTS，幂等靠 try/catch）
+try {
+  sqlite.exec("ALTER TABLE sources ADD COLUMN type TEXT NOT NULL DEFAULT 'rules'");
+} catch {}
+try {
+  sqlite.exec("ALTER TABLE sources ADD COLUMN code TEXT");
+} catch {}
 
 export const db = drizzle(sqlite, { schema });
