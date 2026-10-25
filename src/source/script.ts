@@ -37,6 +37,20 @@ export interface ScriptForm {
 
 const METHOD_NAMES = ["search", "getDetail", "getChapters", "getContent"] as const;
 
+// headers 容错归一：字符串形态（规则源 header）解析成对象；解析失败或非对象返回 null
+export function normalizeHeaders(h: unknown): Record<string, string> | null {
+  if (!h) return null;
+  if (typeof h === "string") {
+    try {
+      const p = JSON.parse(h);
+      return p && typeof p === "object" && !Array.isArray(p) ? p : null;
+    } catch {
+      return null;
+    }
+  }
+  return typeof h === "object" && !Array.isArray(h) ? (h as Record<string, string>) : null;
+}
+
 // 方法体剥掉整行注释后只剩空壳（async xxx(...) {}）→ 视为未实现，不写入 class
 function hasMethodImpl(name: string, body: string): boolean {
   const stripped = body
@@ -49,10 +63,12 @@ function hasMethodImpl(name: string, body: string): boolean {
 }
 
 // 表单数据合并拼接为 class 源码（与前端各方法模板无关，留空/空壳的方法自动省略）
+// headers 兼容字符串形态（规则源 header 就是字符串，转换/旧数据可能带过来）：先解析成对象再生成，避免二次编码
 export function formToCode(form: ScriptForm): string {
   const lines: string[] = ["export default class Source {"];
   if (form.base?.trim()) lines.push(`  base = ${JSON.stringify(form.base.trim())};`);
-  if (form.headers && Object.keys(form.headers).length) lines.push(`  headers = ${JSON.stringify(form.headers)};`);
+  const headers = normalizeHeaders((form as any).headers);
+  if (headers && Object.keys(headers).length) lines.push(`  headers = ${JSON.stringify(headers)};`);
   if (form.replace?.length) lines.push(`  replace = ${JSON.stringify(form.replace)};`);
   for (const m of METHOD_NAMES) {
     const body = (form.methods?.[m] ?? "").trim();

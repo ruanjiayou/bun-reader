@@ -254,10 +254,19 @@ export default function Sources() {
       if (row.type === "script") {
         // script 源的 json 存的是表单数据（保存时的真相），code 是生成产物（只读）
         const f = JSON.parse(row.json || "{}");
+        // headers 兼容字符串形态（规则源 header 带过来的旧数据）：先解析成对象再展示，避免 textarea 里出现二次编码
+        let h = f.headers;
+        if (typeof h === "string") {
+          try {
+            h = JSON.parse(h);
+          } catch {
+            h = null;
+          }
+        }
         setScriptForm({
           name: f.name ?? row.name ?? "",
           base: f.base ?? "",
-          headersText: f.headers && Object.keys(f.headers).length ? JSON.stringify(f.headers, null, 2) : "",
+          headersText: h && Object.keys(h).length ? JSON.stringify(h, null, 2) : "",
           replaceText: (f.replace ?? []).map((r: any) => `${r.regex}##${r.replacement ?? ""}`).join("\n"),
           enabled: row.enabled !== false,
           methods: {

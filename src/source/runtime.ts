@@ -14,8 +14,22 @@ export { browserOpen, browserText, type BrowserPage } from "./browser";
 
 const als = new AsyncLocalStorage<{ base?: string; headers?: Record<string, string> }>();
 
+// 实例 headers 容错：字符串形态（规则源 header 带过来的旧数据）解析成对象，避免 spread 字符串变成字符索引
+function instHeaders(h: unknown): Record<string, string> {
+  if (typeof h === "string") {
+    try {
+      const p = JSON.parse(h);
+      if (p && typeof p === "object" && !Array.isArray(p)) return p;
+    } catch {
+      /* 保留空对象 */
+    }
+    return {};
+  }
+  return h && typeof h === "object" && !Array.isArray(h) ? (h as Record<string, string>) : {};
+}
+
 export function runWithInst(inst: any, fn: () => Promise<any>): Promise<any> {
-  return als.run({ base: inst?.base, headers: inst?.headers ?? {} }, fn);
+  return als.run({ base: inst?.base, headers: instHeaders(inst?.headers) }, fn);
 }
 
 export async function fetchText(url: string, opts: Omit<FetchOpts, "headers"> & { headers?: Record<string, string> } = {}) {

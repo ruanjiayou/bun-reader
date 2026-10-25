@@ -5,7 +5,8 @@ import { formToCode } from "../src/source/script";
 
 const db = new Database("data/book.db");
 const old = JSON.parse(db.query("select json from sources where id=3").get()!.json as string);
-const headers = old.header ?? {};
+// 规则源 header 是 JSON 字符串，脚本源 headers 需要对象：字符串先解析，否则生成代码里 headers 会变成二次编码的字符串
+const headers = typeof old.header === "string" ? JSON.parse(old.header) : (old.header ?? {});
 
 const form = {
   name: "幽香书房",
