@@ -78,6 +78,17 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
         return;
       }
       let ok = true;
+      // 阅读时可能已把该章抓取落盘（内容接口共用 fetchAndSave）→ 跳过不重复请求
+      const [exists] = await db
+        .select({ filePath: chapterCache.filePath })
+        .from(chapterCache)
+        .where(and(eq(chapterCache.contentKey, key), eq(chapterCache.idx, ch.idx)));
+      if (exists && existsSync(exists.filePath)) {
+        const cur = jobStmt.get.get(key) as any;
+        jobStmt.update.run((cur?.done ?? 0) + 1, cur?.failed ?? 0, "running", Date.now(), key);
+        pushCacheLog(key, "info", `第 ${ch.idx + 1} 章《${ch.title}》阅读时已缓存，跳过`);
+        continue;
+      }
       try {
         await fetchAndSave(eng, ch.url, key, ch.idx);
         failStreak = 0;
@@ -90,8 +101,8 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
       }
       const cur = jobStmt.get.get(key) as any;
       jobStmt.update.run((cur?.done ?? 0) + (ok ? 1 : 0), (cur?.failed ?? 0) + (ok ? 0 : 1), "running", Date.now(), key);
-      // 成功 250ms 限速；失败按 5s/10s/30s/60s 递增（封顶 60s），给源站喘息
-      const delay = ok ? 250 : [5000, 10000, 30000, 60000][Math.min(failStreak - 1, 3)];
+      // 成功 1s 限速；失败按 5s/10s/30s/60s 递增（封顶 60s），给源站喘息
+      const delay = ok ? 1000 : [5000, 10000, 30000, 60000][Math.min(failStreak - 1, 3)];
       await new Promise((r) => setTimeout(r, delay));
     }
     const cur = jobStmt.get.get(key) as any;
