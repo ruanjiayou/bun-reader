@@ -7,7 +7,7 @@ import { isPlaceholder, type BookItem, type ChapterItem, type Log } from "./engi
 // —— 脚本书源引擎 ——
 // 源 = export default class Source，方法 search/getDetail/getChapters/getContent（全可选），
 // 配置为类成员 base/headers/replace。执行 = 落盘 + 动态 import（mtime 失效）+ Promise.race 超时。
-// 契约见 docs/plans/2026-10-25-source-script-engine.md。
+// 契约见 docs/design.md（三、书源脚本引擎）。
 
 const SOURCES_DIR = "data/sources";
 const RUNTIME_URL = pathToFileURL(path.resolve(import.meta.dir, "runtime.ts")).href;
