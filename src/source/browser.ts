@@ -13,6 +13,20 @@ const CAPTCHA_RE = /验证码|人机验证|安全验证|安全挑战|请完成�
 const isCaptchaPage = (html: string) =>
   /<title>[^<]*(验证|captcha|waf)[^<]*<\/title>/i.test(html) || (html.length < 4000 && CAPTCHA_RE.test(html));
 
+// page.content() 在页面跳转进行中会抛 "Unable to retrieve content because the page is navigating
+// and changing the content."（验证码提交后的 redirect 最容易撞上轮询时机）→ 等 load 稳定后重试
+async function safeContent(page: any, tries = 10): Promise<string> {
+  for (let i = 0; ; i++) {
+    try {
+      return await page.content();
+    } catch (e: any) {
+      if (i >= tries || !/navigating|changing the content/i.test(String(e?.message ?? e))) throw e;
+      await page.waitForLoadState("load", { timeout: 15_000 }).catch(() => {});
+      await page.waitForTimeout(300);
+    }
+  }
+}
+
 async function getContext(): Promise<any> {
   if (!ctxP) {
     ctxP = (async () => {
@@ -58,7 +72,7 @@ export async function browserOpen(url: string, opts: { timeoutMs?: number } = {}
   try {
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: opts.timeoutMs ?? 45_000 });
     await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
-    let html = await page.content();
+    let html = await safeContent(page);
     const onChallenge = () => /WAF\/VERIFY/i.test(page.url());
     if (isCaptchaPage(html) || onChallenge()) {
       log.warn("browser", `WAF/验证码挑战（${page.url().slice(0, 90)}），请在弹出的浏览器窗口输入验证码并提交（最长等 180s）…`);
@@ -67,7 +81,7 @@ export async function browserOpen(url: string, opts: { timeoutMs?: number } = {}
       let passed = false;
       while (Date.now() < deadline) {
         await page.waitForTimeout(2000);
-        html = await page.content();
+        html = await safeContent(page);
         // 通过标志：跳回正常页面（URL 离开 WAF/VERIFY 且内容是真实页面）
         if ((!isCaptchaPage(html) && html.length > 5000 && !onChallenge()) || (!onChallenge() && html.length > 5000)) {
           passed = true;
@@ -86,7 +100,7 @@ export async function browserOpen(url: string, opts: { timeoutMs?: number } = {}
     throw e;
   }
   return {
-    html: () => page.content(),
+    html: () => safeContent(page),
     url: () => page.url(),
     click: (sel, timeoutMs = 10_000) => page.click(sel, { timeout: timeoutMs }),
     waitCount: async (sel, prev, timeoutMs = 15_000) => {

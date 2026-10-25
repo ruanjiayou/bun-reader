@@ -194,6 +194,7 @@ export default function Reader() {
   const [srcErr, setSrcErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
   const saveTimer = useRef<ReturnType<typeof setTimeout>>(null);
+  const [scrollFrac, setScrollFrac] = useState(0); // 章内滚动比例 0-1（底部细线进度实时用）
   const preloaded = useRef<Map<number, ContentResp>>(new Map());
   const firstLoad = useRef(true); // 只有首次进入阅读器才恢复上次进度，章节间跳转一律回到开头
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
@@ -224,6 +225,7 @@ export default function Reader() {
     setShowToc(false);
     setShowSettings(false);
     setCh(null);
+    setScrollFrac(0);
     const cached = preloaded.current.get(idx);
     const apply = (r: ContentResp) => {
       if (!alive) return;
@@ -268,13 +270,14 @@ export default function Reader() {
     };
   }, [idx, bookId, tick]);
 
-  // 滚动 → 防抖上报进度（scrollPos = 章内滚动百分比）
+  // 滚动 → 细线进度实时跟随 + 防抖上报进度（scrollPos = 章内滚动百分比）
   const onScroll = () => {
     const el = scrollRef.current;
     if (!el) return;
+    const max = el.scrollHeight - el.clientHeight;
+    setScrollFrac(max > 0 ? el.scrollTop / max : 0);
     clearTimeout(saveTimer.current!);
     saveTimer.current = setTimeout(() => {
-      const max = el.scrollHeight - el.clientHeight;
       const pct = max > 0 ? Math.round((el.scrollTop / max) * 1000) / 10 : 0;
       api(`/api/books/${bookId}/progress`, { method: "PUT", body: JSON.stringify({ chapterIdx: idx, scrollPos: pct }) }).catch(() => {});
     }, 800);
@@ -382,6 +385,8 @@ export default function Reader() {
   }, [toast]);
 
   const bookPct = chapters.length ? `${Math.round(((idx + 1) / chapters.length) * 1000) / 10}%` : "";
+  // 细线总进度 = (当前章 + 章内滚动) / 总章数，滚动时平滑推进
+  const linePct = chapters.length ? Math.min(((idx + scrollFrac) / chapters.length) * 100, 100) : 0;
 
   return (
     <div className="fixed inset-0" style={{ background: theme.bg, color: theme.text }}>
@@ -488,6 +493,11 @@ export default function Reader() {
           <button onClick={() => setShowSettings(true)} className="px-4 py-1.5 text-sm opacity-80 hover:opacity-100">设置</button>
         </div>
       )}
+
+      {/* 底部细线进度：总进度 = (当前章 + 章内滚动) / 总章数，常驻显示（不受菜单显隐影响） */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 z-50 h-0.5" style={{ background: "rgba(128,128,128,.2)" }}>
+        <div className="h-full transition-[width] duration-150" style={{ width: `${linePct}%`, background: "rgba(245,158,11,.85)" }} />
+      </div>
 
       {/* 占位提示 toast */}
       {ch?.isPlaceholder && !showSettings && !showToc && (
