@@ -30,27 +30,27 @@ describe("自适应限速器", () => {
     expect(l.high).toBe(8);
   });
 
-  test("距上次失败满一个窗口无错误 → 频率向 high 收缩（前后和的一半）", () => {
+  test("距上次失败满一个窗口无错误 → 频率向下取整收缩，恒低于失败过的频率", () => {
     const l = fresh();
     for (let i = 0; i < 16; i++) l.onSuccess(SRC);
     l.onFailure(SRC); // cap=8, high=16
     // 模拟整窗无错误：把 lastFailAt 拨回 61s 前
     (l as any).lastFailAt = Date.now() - 61000;
     l.onSuccess(SRC);
-    expect(l.cap).toBe(12); // (8+16)/2
+    expect(l.cap).toBe(12); // floor((8+16)/2)
     (l as any).lastFailAt = Date.now() - 61000;
     l.onSuccess(SRC);
     expect(l.cap).toBe(14);
     (l as any).lastFailAt = Date.now() - 61000;
     l.onSuccess(SRC);
-    expect(l.cap).toBe(15); // ceil((14+16)/2)
+    expect(l.cap).toBe(15); // floor((14+16)/2)
     (l as any).lastFailAt = Date.now() - 61000;
     l.onSuccess(SRC);
-    expect(l.cap).toBe(16); // 收缩到 high 封顶，不超过失败前频率
+    expect(l.cap).toBe(15); // floor((15+16)/2)=15，停住——失败过的 16 永不可再触及
     // 未满整窗时不应回升
-    l.onFailure(SRC); // cap=8
+    l.onFailure(SRC); // cap=7（floor(15/2)）
     l.onSuccess(SRC); // 刚失败 0s，不应收敛
-    expect(l.cap).toBe(8);
+    expect(l.cap).toBe(7);
   });
 
   test("窗口滑动：超出 windowMs 的成功记录被淘汰", async () => {

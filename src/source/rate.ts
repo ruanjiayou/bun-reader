@@ -5,10 +5,11 @@ import { log } from "../log";
 //
 // 规则：
 // - 窗口内只统计「成功」请求数（时间戳数组），失败后的重试等待不计入频率
-// - 起步不限速（cap=0）；一旦失败：频率减半（不限速时以窗口内实测成功数为准），
-//   降频前的频率记入 high 作为收敛上限
-// - 距上次失败超过一个完整窗口仍无错误 → 频率调整为 (当前+high)/2，反复向 high 收缩逼近
-// - cap/high/windowMs/last_fail_at 存 rate_states 表，重启后沿用学到的频率
+// - 起步不限速（cap=0）；一旦失败：频率减半（向下取整，不限速时以窗口内实测成功数为准），
+//   降频前的频率记入 high 作为收敛上限——high 是失败过的频率，永远不可再触及
+// - 距上次失败超过一个完整窗口仍无错误 → 频率 = floor((当前+high)/2)，逐次逼近但恒低于 high
+// - cap/high/windowMs/last_fail_at 存 rate_states 表（仅按书源维度），重启后沿用；
+//   times[] 时间戳数组只在内存，同源多本书的缓存任务共用同一实例
 
 interface RateState {
   cap: number; // 窗口内允许的成功请求数；0 = 不限速（初始态）
@@ -72,30 +73,30 @@ export class RateLimiter {
     }
   }
 
-  // 成功：计入频率；距上次失败已过完整窗口仍无错误 → 向降频前频率收敛
+  // 成功：计入频率；距上次失败已过完整窗口仍无错误 → 向 high 收缩（floor 保证恒低于失败频率）
   onSuccess(id: number) {
     const now = Date.now();
     this.prune(now);
     this.times.push(now);
     if (this.cap > 0 && this.high > this.cap && now - this.lastFailAt >= this.windowMs) {
-      const next = Math.min(this.high, Math.ceil((this.cap + this.high) / 2));
-      if (next !== this.cap) {
+      const next = Math.min(this.high - 1, Math.floor((this.cap + this.high) / 2));
+      if (next !== this.cap && next > 0) {
         this.cap = next;
-        log.info("cache", `整窗无错误，频率回升至 ${this.cap} 次/${this.windowMs / 1000}s`);
+        log.info("cache", `整窗无错误，频率回升至 ${this.cap} 次/${this.windowMs / 1000}s（上限 ${this.high} 不可触及）`);
         this.save(id);
       }
     }
   }
 
-  // 失败：频率减半（不限速时以窗口内实测成功数为基准）
+  // 失败：频率减半向下取整（不限速时以窗口内实测成功数为基准）
   onFailure(id: number) {
     this.lastFailAt = Date.now();
     if (this.cap === 0) {
       this.high = Math.max(2, this.observed());
-      this.cap = Math.max(1, Math.ceil(this.high / 2));
+      this.cap = Math.max(1, Math.floor(this.high / 2));
     } else if (this.cap > 1) {
       this.high = Math.max(this.high, this.cap);
-      this.cap = Math.max(1, Math.ceil(this.cap / 2));
+      this.cap = Math.max(1, Math.floor(this.cap / 2));
     }
     log.info("cache", `请求失败，频率降为 ${this.cap} 次/${this.windowMs / 1000}s（上限 ${this.high}）`);
     this.save(id);
