@@ -36,6 +36,8 @@ export const books = sqliteTable(
     intro: text("intro").notNull().default(""),
     latestChapter: text("latest_chapter").notNull().default(""),
     lastCheckAt: integer("last_check_at", { mode: "timestamp" }),
+    // 书籍内容更新时间：检查更新发现新增章节（或首次建目录）时置为当前时间，书架「最近更新」排序用
+    updatedAt: integer("updated_at", { mode: "timestamp" }),
     createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
   },
   (t) => [uniqueIndex("books_user_book_src").on(t.userId, t.bookUrl, t.sourceId)],

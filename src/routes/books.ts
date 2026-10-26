@@ -224,6 +224,7 @@ async function fillToc(bookId: number, eng: any, bookUrl: string) {
         intro: info.intro || b.intro,
         latestChapter: info.latestChapter || info.latestChapterUrl || b.latestChapter, // 标题优先入库；取不到标题存 URL（前端兜底显示页码）
         lastCheckAt: new Date(),
+        updatedAt: new Date(), // 首次建目录视为书籍更新
       })
       .where(eq(books.id, bookId));
     log.info("shelf", `《${info.name || b.name}》目录就绪：${toc.length} 章`);
@@ -273,6 +274,7 @@ bookRoutes.post("/", async (c) => {
       intro: info?.intro ?? "",
       latestChapter: info?.latestChapter ?? "",
       lastCheckAt: new Date(),
+      updatedAt: new Date(),
     })
     .returning({ id: books.id });
   fillToc(row.id, eng, bookUrl); // 不 await，后台执行
@@ -332,12 +334,22 @@ bookRoutes.put("/:id/refresh", async (c) => {
   const oldCount = (await db.select().from(chapters).where(eq(chapters.bookId, bookId))).length;
   await db.delete(chapters).where(eq(chapters.bookId, bookId));
   await db.insert(chapters).values(toc.map((ch, i) => ({ bookId, idx: i, title: ch.title, url: ch.url })));
+  const added = Math.max(0, toc.length - oldCount);
   await db
     .update(books)
-    .set({ name: info.name || book.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter || info.latestChapterUrl || book.latestChapter, lastCheckAt: new Date() })
+    .set({
+      name: info.name || book.name,
+      author: info.author,
+      cover: info.cover,
+      intro: info.intro,
+      latestChapter: info.latestChapter || info.latestChapterUrl || book.latestChapter,
+      lastCheckAt: new Date(),
+      // 只有真的新增章节才算「书籍更新」，单纯检查不动排序时间
+      ...(added > 0 ? { updatedAt: new Date() } : {}),
+    })
     .where(eq(books.id, bookId));
   log.info("refresh", `《${book.name}》检查更新：${oldCount} → ${toc.length} 章`);
-  return c.json({ chapterCount: toc.length, added: Math.max(0, toc.length - oldCount), oldCount });
+  return c.json({ chapterCount: toc.length, added, oldCount });
 });
 
 // 换源候选：并发搜索全部启用书源，只返回"拥有这本书"的源（书名精确命中优先，当前源标记 current）

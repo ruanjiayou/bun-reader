@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, fmtLatest } from "../api";
 
@@ -121,15 +121,8 @@ const ICONS: Record<string, React.ReactNode> = {
   ),
   settings: (
     <>
-      <line x1="4" y1="21" x2="4" y2="14" />
-      <line x1="4" y1="10" x2="4" y2="3" />
-      <line x1="12" y1="21" x2="12" y2="12" />
-      <line x1="12" y1="8" x2="12" y2="3" />
-      <line x1="20" y1="21" x2="20" y2="16" />
-      <line x1="20" y1="12" x2="20" y2="3" />
-      <line x1="1" y1="14" x2="7" y2="14" />
-      <line x1="9" y1="8" x2="15" y2="8" />
-      <line x1="17" y1="16" x2="23" y2="16" />
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 010 2.83 2 2 0 01-2.83 0l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-2 2 2 2 0 01-2-2v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 01-2.83 0 2 2 0 010-2.83l.06-.06a1.65 1.65 0 00.33-1.82 1.65 1.65 0 00-1.51-1H3a2 2 0 01-2-2 2 2 0 012-2h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 010-2.83 2 2 0 012.83 0l.06.06a1.65 1.65 0 001.82.33H9a1.65 1.65 0 001-1.51V3a2 2 0 012-2 2 2 0 012 2v.09a1.65 1.65 0 001 1.51 1.65 1.65 0 001.82-.33l.06-.06a2 2 0 012.83 0 2 2 0 010 2.83l-.06.06a1.65 1.65 0 00-.33 1.82V9a1.65 1.65 0 001.51 1H21a2 2 0 012 2 2 2 0 01-2 2h-.09a1.65 1.65 0 00-1.51 1z" />
     </>
   ),
   download: (
@@ -199,6 +192,9 @@ export default function Reader() {
   const preloaded = useRef<Map<number, ContentResp>>(new Map());
   const firstLoad = useRef(true); // 只有首次进入阅读器才恢复上次进度，章节间跳转一律回到开头
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const paraRefs = useRef<(HTMLParagraphElement | null)[]>([]); // 段落节点：朗读从当前可视段落开始
+  const ttsStopped = useRef(false); // 用户停止 / 切章打断标志（避免 cancel 触发的 onend 继续往下读）
+  const autoNext = useRef(false); // 本章读完 → 自动续读下一章
 
   // TTS 发音人列表（浏览器异步加载）
   useEffect(() => {
@@ -209,8 +205,17 @@ export default function Reader() {
     return () => window.speechSynthesis.removeEventListener("voiceschanged", load);
   }, []);
 
+  // 只保留中文发音人（zh-CN / zh-TW / zh-HK …）；已保存的旧值不是中文时清掉，避免选中项对不上列表
+  const zhVoices = useMemo(() => voices.filter((v) => /^zh/i.test(v.lang)), [voices]);
+  useEffect(() => {
+    if (!voices.length) return;
+    if (prefs.voiceURI && !zhVoices.some((v) => v.voiceURI === prefs.voiceURI)) setPrefs((p) => ({ ...p, voiceURI: undefined }));
+  }, [voices.length, zhVoices.length]);
+
   useEffect(() => localStorage.setItem("reader-prefs", JSON.stringify(prefs)), [prefs]); // 设置持久化到浏览器
   const theme = resolveTheme(prefs);
+  // 正文段落：渲染与朗读共用同一份切片，索引一一对应（paraRefs[i] ↔ paras[i]）
+  const paras = useMemo(() => (ch ? ch.content.split("\n").filter((p) => p.trim()) : []), [ch]);
 
   // 章节列表（目录弹层 / 上下章 / 百分比进度）
   useEffect(() => {
@@ -272,6 +277,7 @@ export default function Reader() {
         .catch((e) => alive && setError(e.message));
     return () => {
       alive = false;
+      ttsStopped.current = true; // 切章/卸载：打断朗读，且不让 onend 继续读旧章
       window.speechSynthesis?.cancel();
       setSpeaking(false);
     };
@@ -345,7 +351,8 @@ export default function Reader() {
 
   const goChapter = (to: number) => {
     if (to < 0 || (chapters.length && to >= chapters.length)) return setToast(chapters.length ? "没有更多章节" : "");
-    nav(`/book/${bookId}/read/${to}`);
+    // 章节切换用 replace：否则历史里堆满章节，返回键变成「上一章」而不是上一路由
+    nav(`/book/${bookId}/read/${to}`, { replace: true });
   };
 
   const refreshCh = async () => {
@@ -371,29 +378,71 @@ export default function Reader() {
 
   // —— TTS：按段落链式朗读 ——
   const stopTts = () => {
+    ttsStopped.current = true;
     window.speechSynthesis?.cancel();
     setSpeaking(false);
   };
-  const toggleTts = () => {
-    if (!window.speechSynthesis) return setToast("浏览器不支持语音合成");
-    if (speaking) return stopTts();
-    if (!ch) return;
-    const paras = ch.content.split("\n").filter((p) => p.trim());
-    let i = 0;
-    const voice = voices.find((v) => v.voiceURI === prefs.voiceURI);
+
+  // 当前可视位置对应的段落下标（与底部细线同源：以滚动位置为准）
+  const currentParaIndex = () => {
+    const el = scrollRef.current;
+    if (!el) return 0;
+    const viewTop = el.getBoundingClientRect().top + 8;
+    for (let i = 0; i < paras.length; i++) {
+      const p = paraRefs.current[i];
+      if (!p) continue;
+      if (p.getBoundingClientRect().bottom > viewTop) return i; // 第一个「还没被划过去」的段落
+    }
+    return Math.max(0, paras.length - 1);
+  };
+
+  // 从第 start 段开始读；读完本章且有下一章 → 自动跳过去接着读
+  const speakFrom = (start: number) => {
+    const synth = window.speechSynthesis;
+    if (!synth || !paras.length) return;
+    ttsStopped.current = false;
+    const voice = zhVoices.find((v) => v.voiceURI === prefs.voiceURI) ?? null;
+    let i = start;
     const speakNext = () => {
-      if (i >= paras.length) return setSpeaking(false);
+      if (ttsStopped.current) return;
+      if (i >= paras.length) {
+        setSpeaking(false);
+        if (chapters.some((c) => c.idx === idx + 1)) {
+          autoNext.current = true; // 新章正文就绪后从第一段继续
+          nav(`/book/${bookId}/read/${idx + 1}`, { replace: true });
+        } else {
+          setToast("已读完本书最后一章");
+        }
+        return;
+      }
       const u = new SpeechSynthesisUtterance(paras[i++]);
       u.lang = voice?.lang ?? "zh-CN";
       if (voice) u.voice = voice;
       u.rate = prefs.rate ?? 1;
       u.onend = speakNext;
-      u.onerror = () => setSpeaking(false);
-      window.speechSynthesis.speak(u);
+      u.onerror = () => {
+        if (!ttsStopped.current) setSpeaking(false);
+      };
+      synth.speak(u);
     };
     setSpeaking(true);
     speakNext();
   };
+
+  const toggleTts = () => {
+    if (!window.speechSynthesis) return setToast("浏览器不支持语音合成");
+    if (speaking) return stopTts();
+    if (!ch) return;
+    speakFrom(currentParaIndex()); // 从当前阅读位置开始，而不是从头
+  };
+
+  // 自动续读：新章正文就绪后从第一段接着读
+  useEffect(() => {
+    if (!ch || !autoNext.current) return;
+    autoNext.current = false;
+    const t = setTimeout(() => speakFrom(0), 250);
+    return () => clearTimeout(t);
+  }, [ch]);
 
   useEffect(() => {
     if (!toast) return;
@@ -420,13 +469,11 @@ export default function Reader() {
               <h2 className="mb-4 font-bold" style={{ fontSize: prefs.fontSize + 4 }}>
                 {ch.title}
               </h2>
-              {ch.content.split("\n").map((p, i) =>
-                p.trim() ? (
-                  <p key={i} className="mb-3 indent-8">
-                    {p}
-                  </p>
-                ) : null,
-              )}
+              {paras.map((p, i) => (
+                <p key={i} ref={(el) => { paraRefs.current[i] = el; }} className="mb-3 indent-8">
+                  {p}
+                </p>
+              ))}
               <div className="mt-8 text-center text-xs" style={{ color: theme.sub }}>— 本章完 · 下一章继续 —</div>
             </>
           ) : (
@@ -681,7 +728,7 @@ export default function Reader() {
                   style={{ background: "rgba(0,0,0,.35)", color: "inherit" }}
                 >
                   <option value="">系统默认</option>
-                  {voices.map((v) => (
+                  {zhVoices.map((v) => (
                     <option key={v.voiceURI} value={v.voiceURI}>
                       {v.name}（{v.lang}）{v.localService ? "" : " · 在线"}
                     </option>

@@ -43,6 +43,9 @@ export default defineConfig({
       },
     }),
   ],
+  build: {
+    outDir: 'reader'
+  },
   server: {
     host: true, // 监听 0.0.0.0，允许局域网通过 http://<本机IP>:5173/reader/ 访问
     proxy: {

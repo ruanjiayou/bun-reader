@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS books (
   intro TEXT NOT NULL DEFAULT '',
   latest_chapter TEXT NOT NULL DEFAULT '',
   last_check_at INTEGER,
+  updated_at INTEGER,
   created_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS books_user_book_src ON books(user_id, book_url, source_id);
@@ -100,6 +101,11 @@ try {
 } catch {}
 try {
   sqlite.exec("ALTER TABLE sources ADD COLUMN code TEXT");
+} catch {}
+// 书籍内容更新时间（书架「最近更新」排序）：存量库补列并回填一次（用 last_check_at 或 created_at 兜底）
+try {
+  sqlite.exec("ALTER TABLE books ADD COLUMN updated_at INTEGER");
+  sqlite.exec("UPDATE books SET updated_at = COALESCE(last_check_at, created_at) WHERE updated_at IS NULL");
 } catch {}
 
 export const db = drizzle(sqlite, { schema });
