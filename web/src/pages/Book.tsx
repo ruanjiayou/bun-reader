@@ -159,6 +159,13 @@ export default function Book() {
     <div className="mx-auto min-h-dvh max-w-3xl p-4">
       <header className="mb-4 flex items-center gap-2">
         <Link to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
+        <button
+          onClick={refreshToc}
+          disabled={refreshing || !book}
+          className="ml-auto rounded bg-neutral-800 px-2.5 py-1 text-xs text-neutral-400 hover:bg-neutral-700 disabled:opacity-50"
+        >
+          {refreshing ? "检查中…" : "↻ 检查更新"}
+        </button>
       </header>
       {msg && (
         <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-neutral-700 px-4 py-2 text-sm text-neutral-100 shadow-lg">
@@ -177,22 +184,22 @@ export default function Book() {
             )}
             <div className="min-w-0 flex-1">
               <h1 className="text-lg font-bold">{book.name}</h1>
-              {/* 作者 + 检查更新（按钮紧跟作者名） */}
-              <div className="mt-0.5 flex items-center gap-2 text-sm text-neutral-400">
-                <span className="truncate">{book.author || "佚名"}</span>
-                <button
-                  onClick={refreshToc}
-                  disabled={refreshing}
-                  className="flex-none rounded bg-neutral-700/80 px-2 py-0.5 text-[11px] text-neutral-300 hover:bg-neutral-600 disabled:opacity-50"
-                >
-                  {refreshing ? "检查中…" : "↻ 检查更新"}
-                </button>
-              </div>
+              <div className="mt-0.5 truncate text-sm text-neutral-400">{book.author || "佚名"}</div>
               {book.intro && <p className="mt-2 line-clamp-3 text-xs text-neutral-500">{book.intro}</p>}
               {/* 简介下方：最新章节 / 读到章节 各占一行 */}
               {book.latestChapter && <div className="mt-2 truncate text-xs text-neutral-500">最新章节：{fmtLatest(book.latestChapter)}</div>}
-              <div className="mt-1 truncate text-xs text-neutral-500">
-                {cur !== null ? `读到：第 ${cur + 1} 章 ${chapters.find((c) => c.idx === cur)?.title ?? ""}` : "尚未开始阅读"}
+              <div className="mt-1 truncate text-xs text-neutral-400">
+                {cur !== null ? (
+                  <>
+                    <span className="text-neutral-500">读到：</span>
+                    {chapters.find((c) => c.idx === cur)?.title ?? ""}
+                    <span className="text-neutral-600">
+                      （{cur + 1}/{chapters.length}）
+                    </span>
+                  </>
+                ) : (
+                  <span className="text-neutral-500">尚未开始阅读</span>
+                )}
               </div>
               {/* 继续阅读 / 移出书架 并排 */}
               <div className="mt-3 flex gap-2">
@@ -211,8 +218,8 @@ export default function Book() {
         </div>
       )}
 
-      {/* 缓存条：卡片与目录之间（缓存操作；检查更新已移到作者名右侧） */}
-      <div className="mb-4 flex flex-wrap items-center gap-2 rounded-xl bg-neutral-800/60 px-3 py-2 text-xs">
+      {/* 缓存条：卡片与目录之间（缓存操作；检查更新在顶部返回书架一排右端） */}
+      <div className="mb-4 flex flex-wrap items-center justify-end gap-2 rounded-xl bg-neutral-800/60 px-3 py-2 text-xs">
         <span className="text-neutral-400">
           缓存：{cache?.cachedCount ?? 0}/{cache?.total ?? chapters.length} 章
           {cache?.running && cache.job && (
@@ -222,7 +229,7 @@ export default function Book() {
             </span>
           )}
         </span>
-        <div className="ml-auto flex gap-2">
+        <div className="flex gap-2">
           {cache?.running ? (
             <button onClick={cacheStop} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-300 hover:bg-neutral-600">■ 停止缓存</button>
           ) : (
