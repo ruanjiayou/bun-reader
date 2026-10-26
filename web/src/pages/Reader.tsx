@@ -162,6 +162,13 @@ const FloatBtn = ({ icon, title, onClick, active, style }: { icon: string; title
 const CTRL = "rounded border px-3 py-1 text-sm leading-5";
 const ctrlStyle = { background: "rgba(0,0,0,.35)", borderColor: "rgba(255,255,255,.15)" };
 
+// 分句：按中文/西文句末标点切，标点与后置引号跟随前句（朗读与高亮都以句为单位）
+const SENT_RE = /[^。！？!?…]+[。！？!?…]*[”’"'」』）)]*/g;
+const splitSentences = (text: string): string[] => {
+  const out = (text.match(SENT_RE) ?? []).filter((s) => s.trim());
+  return out.length ? out : [text];
+};
+
 // 阅读器：滚动模式；>500px 为 PC 布局（内容固定宽，左右紧贴工具栏），否则手机布局（顶栏+底栏+两侧悬浮钮）
 export default function Reader() {
   const { id, idx: idxParam } = useParams();
@@ -192,6 +199,7 @@ export default function Reader() {
   const preloaded = useRef<Map<number, ContentResp>>(new Map());
   const firstLoad = useRef(true); // 只有首次进入阅读器才恢复上次进度，章节间跳转一律回到开头
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([]);
+  const [spoken, setSpoken] = useState<{ p: number; s: number } | null>(null); // 正在朗读的句子（段落下标 + 句下标）
   const paraRefs = useRef<(HTMLParagraphElement | null)[]>([]); // 段落节点：朗读从当前可视段落开始
   const ttsStopped = useRef(false); // 用户停止 / 切章打断标志（避免 cancel 触发的 onend 继续往下读）
   const autoNext = useRef(false); // 本章读完 → 自动续读下一章
@@ -216,6 +224,8 @@ export default function Reader() {
   const theme = resolveTheme(prefs);
   // 正文段落：渲染与朗读共用同一份切片，索引一一对应（paraRefs[i] ↔ paras[i]）
   const paras = useMemo(() => (ch ? ch.content.split("\n").filter((p) => p.trim()) : []), [ch]);
+  // 每段再切分句（朗读粒度 = 高亮粒度）
+  const paraSents = useMemo(() => paras.map(splitSentences), [paras]);
 
   // 章节列表（目录弹层 / 上下章 / 百分比进度）
   useEffect(() => {
@@ -280,6 +290,7 @@ export default function Reader() {
       ttsStopped.current = true; // 切章/卸载：打断朗读，且不让 onend 继续读旧章
       window.speechSynthesis?.cancel();
       setSpeaking(false);
+      setSpoken(null);
     };
   }, [idx, bookId, tick]);
 
@@ -376,11 +387,12 @@ export default function Reader() {
     }
   };
 
-  // —— TTS：按段落链式朗读 ——
+  // —— TTS：按句链式朗读 ——
   const stopTts = () => {
     ttsStopped.current = true;
     window.speechSynthesis?.cancel();
     setSpeaking(false);
+    setSpoken(null);
   };
 
   // 当前可视位置对应的段落下标（与底部细线同源：以滚动位置为准）
@@ -396,17 +408,22 @@ export default function Reader() {
     return Math.max(0, paras.length - 1);
   };
 
-  // 从第 start 段开始读；读完本章且有下一章 → 自动跳过去接着读
+  // 从第 start 段开始读（句粒度）；读完本章且有下一章 → 自动跳过去接着读
   const speakFrom = (start: number) => {
     const synth = window.speechSynthesis;
     if (!synth || !paras.length) return;
     ttsStopped.current = false;
     const voice = zhVoices.find((v) => v.voiceURI === prefs.voiceURI) ?? null;
-    let i = start;
+    // 展平成句子队列：{p 段落下标, s 句下标, text}
+    const queue: { p: number; s: number; text: string }[] = [];
+    paraSents.forEach((ss, p) => ss.forEach((text, s) => queue.push({ p, s, text })));
+    let i = queue.findIndex((it) => it.p >= start);
+    if (i < 0) i = queue.length;
     const speakNext = () => {
       if (ttsStopped.current) return;
-      if (i >= paras.length) {
+      if (i >= queue.length) {
         setSpeaking(false);
+        setSpoken(null);
         if (chapters.some((c) => c.idx === idx + 1)) {
           autoNext.current = true; // 新章正文就绪后从第一段继续
           nav(`/book/${bookId}/read/${idx + 1}`, { replace: true });
@@ -415,13 +432,18 @@ export default function Reader() {
         }
         return;
       }
-      const u = new SpeechSynthesisUtterance(paras[i++]);
+      const cur = queue[i++];
+      setSpoken({ p: cur.p, s: cur.s }); // 高亮正在朗读的句子
+      const u = new SpeechSynthesisUtterance(cur.text);
       u.lang = voice?.lang ?? "zh-CN";
       if (voice) u.voice = voice;
       u.rate = prefs.rate ?? 1;
       u.onend = speakNext;
       u.onerror = () => {
-        if (!ttsStopped.current) setSpeaking(false);
+        if (!ttsStopped.current) {
+          setSpeaking(false);
+          setSpoken(null);
+        }
       };
       synth.speak(u);
     };
@@ -443,6 +465,19 @@ export default function Reader() {
     const t = setTimeout(() => speakFrom(0), 250);
     return () => clearTimeout(t);
   }, [ch]);
+
+  // 朗读跟读：当前句所在段落滚出视野时才滚动（避免与用户手动滚动打架）
+  useEffect(() => {
+    if (!spoken) return;
+    const el = scrollRef.current;
+    const p = paraRefs.current[spoken.p];
+    if (!el || !p) return;
+    const box = el.getBoundingClientRect();
+    const r = p.getBoundingClientRect();
+    if (r.top < box.top + 48 || r.bottom > box.bottom - 48) {
+      el.scrollTo({ top: el.scrollTop + (r.top - box.top) - box.height * 0.3, behavior: "smooth" });
+    }
+  }, [spoken]);
 
   useEffect(() => {
     if (!toast) return;
@@ -471,7 +506,18 @@ export default function Reader() {
               </h2>
               {paras.map((p, i) => (
                 <p key={i} ref={(el) => { paraRefs.current[i] = el; }} className="mb-3 indent-8">
-                  {p}
+                  {/* 朗读中：整段按句切分，当前句用黄色标出 */}
+                  {spoken?.p === i
+                    ? paraSents[i].map((s, j) => (
+                        <span
+                          key={j}
+                          style={j === spoken.s ? { color: theme.dark ? "#fbbf24" : "#b45309" } : undefined}
+                          className={j === spoken.s ? "rounded bg-amber-400/15" : undefined}
+                        >
+                          {s}
+                        </span>
+                      ))
+                    : p}
                 </p>
               ))}
               <div className="mt-8 text-center text-xs" style={{ color: theme.sub }}>— 本章完 · 下一章继续 —</div>
