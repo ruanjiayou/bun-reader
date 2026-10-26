@@ -49,6 +49,11 @@ searchRoutes.get("/", async (c) => {
   });
 
   return new Response(stream, {
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      "X-Accel-Buffering": "no", // 反代（nginx）默认缓冲会把逐源结果攒到最后一起吐
+    },
   });
 });

@@ -83,7 +83,7 @@ SQLite 表 + 磁盘文件：
 
 ## 5. API 概要
 
-- **书源**：`GET/POST/DELETE /sources`（URL 批量导入 / 粘贴 JSON / 文件上传）、`POST /sources/:id/test`（体检）、`POST /sources/:id/debug`（SSE 调试日志）
+- **书源**：`GET/POST/DELETE /sources`（URL 批量导入 / 粘贴 JSON / 文件上传）、`POST /sources/:id/test`（体检）、`POST /sources/:id/debug`（SSE 调试日志，`{bookUrl}` 调书籍 / `{mode:"search",key}` 调搜索）
 - **搜索**：`GET /search?q=` — 并发扇出全部启用源（每源并发 1、间隔 300ms、总超时 15s），**SSE 流式返回**；前端按书名+作者聚合去重
 - **书架**：`GET /books`、`POST /books`（秒回落库，目录后台异步补）、`DELETE /books/:id`
 - **目录**：`GET /books/:id/category`（`?refresh=1` 强制刷新）
@@ -108,6 +108,25 @@ SQLite 表 + 磁盘文件：
 | `/book/:id` | 书籍详情 | 封面左（垂直居中）、信息右；顶部「← 书架」一排右端为检查更新；缓存条整体右对齐；继续阅读 |
 | `/book/:id/read/:idx` | 阅读器 | 见第四部分 |
 | `/sources` | 书源管理 | 列表启停、导入、表单编辑、调试面板 |
+
+### 调试面板（书源页右侧）
+
+调搜索与调书籍都走**同一条 SSE 流**（`POST /sources/:id/debug`），日志边跑边到，绝不攒到最后一次性返回：
+
+| 事件 | 含义 | 前端处理 |
+|---|---|---|
+| `{level,step,msg}` | 引擎/底层日志行 | 追加到日志区（info/ok/warn/err 四色） |
+| `{step:"books",books}` | 搜索书单 | 渲染结果卡片（封面+书名+作者+最新章，书 URL 可点填入「调书籍」） |
+| `{step:"bookinfo",info}` | 详情解析结果 | **详情一解析完就推**（不等目录正文），渲染书籍卡片：封面 / 书名 / 作者 / 最新章 / 简介；字段取不到时显式标「未取到」并提示对应规则名，避免只看到下游的「佚名」 |
+| `{tick:秒}` | 3s 无事件时的心跳 | 日志区尾部显示「运行中 · Ns」，让人知道没卡死 |
+
+三个保证实时性的手段：
+
+1. 引擎自身的 `log` 回调逐步骤 push；
+2. 底层日志（浏览器启动、人机验证等待、脚本源 `log()`）经 `runWithLogSink`（AsyncLocalStorage）实时并入同一条流——此前只落盘，调试面板看不到，于是"浏览器启动 30s"表现为长时间空白；
+3. `X-Accel-Buffering: no` + `no-transform`：nginx 等反代默认缓冲响应体会把 SSE 攒成一坨。
+
+「以详情解析结果为准」：书籍卡片上的作者/封面来自 `ruleBookInfo`（规则源）或 `getDetail` 返回值（脚本源），字段为空即规则没命中，卡片会用琥珀色标出「未取到」而不是回退成「佚名」——佚名是入库时的兜底展示，不该用来判断规则好坏。
 
 ## 8. 错误处理
 

@@ -9,7 +9,7 @@ import { normalizeSource } from "../source/rule";
 import { rulesToScript } from "../source/convert";
 import { saveScriptFile, formToCode, validateScriptCode, type ScriptForm } from "../source/script";
 import type { AuthEnv } from "../auth";
-import { log } from "../log";
+import { log, runWithLogSink } from "../log";
 
 export const sourceRoutes = new Hono<AuthEnv>();
 
@@ -203,9 +203,13 @@ sourceRoutes.post("/:id/debug-search", async (c) => {
   }
 });
 
-// 调试：SSE 流式推送每步日志。带 bookUrl 时从详情开始（调书籍），否则从搜索开始（调源）
+// 调试：SSE 流式推送每步日志。带 bookUrl 时从详情开始（调书籍），否则从搜索开始（调源）。
+// mode=search → 只跑搜索，末尾推 books 事件（前端「调搜索」也走这条流，跟书籍调试一样逐步可见）。
+// 三件事保证「不会等很久再一次性刷出来」：
+//   ① 引擎的 log 回调逐步 push；② 底层日志（浏览器启动/人机验证/抓取）经 runWithLogSink 实时并入同一条流；
+//   ③ 3s 无事件时推一条 tick 心跳，前端显示「仍在运行 Ns」，也顺带防代理掐空闲连接。
 sourceRoutes.post("/:id/debug", async (c) => {
-  const { key = "我的", bookUrl } = await readBody<{ key?: string; bookUrl?: string }>(c);
+  const { key = "我的", bookUrl, mode } = await readBody<{ key?: string; bookUrl?: string; mode?: "search" | "full" }>(c);
   const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
   if (!row) return c.json({ error: "书源不存在" }, 404);
   const eng = engineFor(row);
@@ -214,43 +218,93 @@ sourceRoutes.post("/:id/debug", async (c) => {
   const stream = new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
-      const send = (level: LogLevel, step: string, msg: string) =>
-        controller.enqueue(enc.encode(`data: ${JSON.stringify({ level, step, msg })}\n\n`));
+      let closed = false;
+      let lastAt = Date.now();
+      const started = Date.now();
+      const push = (obj: unknown) => {
+        if (closed) return;
+        lastAt = Date.now();
+        controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+      };
+      const send = (level: LogLevel, step: string, msg: string) => push({ level, step, msg });
+      const hb = setInterval(() => {
+        if (Date.now() - lastAt < 3000) return;
+        push({ tick: Math.round((Date.now() - started) / 1000) });
+      }, 1000);
       try {
-        let name = "";
-        let tocUrl = "";
-        let lastChUrl = "";
-        let bookInfo: { bookUrl: string; name: string; author: string; cover: string; intro: string; latestChapter: string } | null = null;
-        if (bookUrl) {
-          const info = await eng.bookInfo(bookUrl, send);
-          name = info.name || "（未取到书名）";
-          tocUrl = info.tocUrl;
-          lastChUrl = info.latestChapterUrl;
-          bookInfo = { bookUrl, name: info.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter || info.latestChapterUrl };
-        } else {
-          const books = await eng.search(key, send);
-          if (!books.length) throw new Error("搜索无结果");
-          name = books[0].name;
-          const info = await eng.bookInfo(books[0].bookUrl, send);
-          tocUrl = info.tocUrl;
-          lastChUrl = info.latestChapterUrl;
-          bookInfo = { bookUrl: books[0].bookUrl, name: info.name || books[0].name, author: info.author || books[0].author, cover: info.cover || books[0].cover, intro: info.intro, latestChapter: info.latestChapter || info.latestChapterUrl || books[0].latestChapter };
-        }
-        const toc = await eng.toc(tocUrl, send, lastChUrl || undefined);
-        if (!toc.length) throw new Error("目录为空");
-        const content = await eng.content(toc[0].url, send);
-        // 全链路成功后把书籍信息发给前端：调试面板可一键加入书架（无搜索的源靠这个入库）
-        if (bookInfo) controller.enqueue(enc.encode(`data: ${JSON.stringify({ level: "ok", step: "bookinfo", msg: "书籍信息（可用于加书架）", info: bookInfo })}\n\n`));
-        send("ok", "done", `调试完成：${name} → ${toc.length} 章 → 首章正文 ${content.length} 字`);
+        // 请求级日志汇集：browser/runtime/engine 里的 log.info/warn 全部实时转成前端日志行
+        await runWithLogSink(
+          (level, tag, msg) => send(level === "error" ? "err" : level === "warn" ? "warn" : "info", tag, msg),
+          async () => {
+            if (mode === "search") {
+              const books = await eng.search(key, send);
+              push({ level: books.length ? "ok" : "warn", step: "books", msg: `搜索到 ${books.length} 条`, books });
+              send(books.length ? "ok" : "warn", "done", books.length ? `搜索完成：${books.length} 条` : "搜索无结果");
+              return;
+            }
+            let name = "";
+            let tocUrl = "";
+            let lastChUrl = "";
+            if (bookUrl) {
+              const info = await eng.bookInfo(bookUrl, send);
+              name = info.name || "（未取到书名）";
+              tocUrl = info.tocUrl;
+              lastChUrl = info.latestChapterUrl;
+              // 详情一解析完就把书籍信息推给前端：封面/作者立刻可见，不必等目录正文跑完
+              push({
+                level: "ok",
+                step: "bookinfo",
+                msg: "书籍信息（可用于加书架）",
+                info: { bookUrl, name: info.name, author: info.author, cover: info.cover, intro: info.intro, latestChapter: info.latestChapter || info.latestChapterUrl },
+              });
+            } else {
+              const books = await eng.search(key, send);
+              if (!books.length) throw new Error("搜索无结果");
+              name = books[0].name;
+              const info = await eng.bookInfo(books[0].bookUrl, send);
+              tocUrl = info.tocUrl;
+              lastChUrl = info.latestChapterUrl;
+              push({
+                level: "ok",
+                step: "bookinfo",
+                msg: "书籍信息（可用于加书架）",
+                info: {
+                  bookUrl: books[0].bookUrl,
+                  name: info.name || books[0].name,
+                  author: info.author || books[0].author,
+                  cover: info.cover || books[0].cover,
+                  intro: info.intro || books[0].intro,
+                  latestChapter: info.latestChapter || info.latestChapterUrl || books[0].latestChapter,
+                },
+              });
+            }
+            const toc = await eng.toc(tocUrl, send, lastChUrl || undefined);
+            if (!toc.length) throw new Error("目录为空");
+            const content = await eng.content(toc[0].url, send);
+            send("ok", "done", `调试完成：${name} → ${toc.length} 章 → 首章正文 ${content.length} 字`);
+          },
+        );
       } catch (e: any) {
         send("err", "done", e?.message ?? String(e));
       } finally {
+        clearInterval(hb);
         await db.update(sources).set({ lastUseAt: new Date() }).where(eq(sources.id, id));
-        controller.close();
+        closed = true;
+        try {
+          controller.close();
+        } catch {
+          /* 前端已断开 */
+        }
       }
     },
   });
   return new Response(stream, {
-    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", Connection: "keep-alive" },
+    headers: {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive",
+      // nginx 等反代默认会缓冲响应体，SSE 必须显式关闭缓冲，否则日志会攒到结束才一起吐出来
+      "X-Accel-Buffering": "no",
+    },
   });
 });

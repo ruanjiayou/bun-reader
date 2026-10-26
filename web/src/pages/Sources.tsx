@@ -16,6 +16,15 @@ interface DebugEvt {
   msg: string;
   info?: DebugBookInfo;
 }
+// SSE 上跑的不只有日志行：books（搜索书单）、tick（心跳秒数）、info（书籍信息）
+interface StreamEvt {
+  level?: DebugEvt["level"];
+  step?: string;
+  msg?: string;
+  info?: DebugBookInfo;
+  books?: SearchBook[];
+  tick?: number;
+}
 interface DebugBookInfo {
   bookUrl: string;
   name: string;
@@ -180,6 +189,7 @@ export default function Sources() {
   const [searchResults, setSearchResults] = useState<SearchBook[]>([]);
   const [logs, setLogs] = useState<DebugEvt[]>([]);
   const [debugging, setDebugging] = useState(false);
+  const [tickSec, setTickSec] = useState(0); // SSE 心跳：仍在运行多少秒（长时间静默时给反馈）
   const [dirty, setDirty] = useState(false); // 表单/JSON 有未保存改动 → 保存按钮高亮
   const [dbgBook, setDbgBook] = useState<DebugBookInfo | null>(null); // 调试全链路成功后的书籍信息，可加书架
   const [addingBook, setAddingBook] = useState(false);
@@ -408,22 +418,61 @@ export default function Sources() {
   };
 
   // —— 调试：调已保存的源（不自动保存）——
+  // 统一走 SSE：调试链路可能几十秒（浏览器启动 + 人机验证），日志必须边跑边到，不能攒到最后一次性返回
+  const streamDebug = async (body: Record<string, unknown>, onEvt: (e: StreamEvt) => void) => {
+    const res = await fetch(`${API_BASE}/api/sources/${editId}/debug`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok || !res.body) {
+      const txt = await res.text().catch(() => "");
+      throw new Error(`调试接口 ${res.status}${txt ? ` · ${txt.slice(0, 120)}` : ""}`);
+    }
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split("\n\n");
+      buf = parts.pop()!;
+      for (const p of parts) {
+        const line = p.trim();
+        if (!line.startsWith("data: ")) continue;
+        try {
+          onEvt(JSON.parse(line.slice(6)) as StreamEvt);
+        } catch {
+          /* 半截 JSON（chunk 边界）忽略，下轮补全 */
+        }
+      }
+    }
+  };
+
   const runDebugSearch = async () => {
     if (editId === null) return setMsg("先保存源再调试");
     setDebugging(true);
     setSearchResults([]);
     setLogs([]);
     setDbgBook(null);
+    setTickSec(0);
+    let got: SearchBook[] = [];
+    let err = "";
     try {
-      const r = await api<{ books: SearchBook[]; logs: DebugEvt[]; error?: string }>(
-        `/api/sources/${editId}/debug-search`,
-        { method: "POST", body: JSON.stringify({ key: debugKey }) },
-      );
-      setSearchResults(r.books);
-      setLogs(r.logs);
-      if (r.error) setLogs((l) => [...l, { level: "err", step: "done", msg: r.error! }]);
-      setMsg(r.books.length ? `搜索到 ${r.books.length} 条` : r.error ?? "搜索无结果");
+      await streamDebug({ mode: "search", key: debugKey }, (evt) => {
+        if (evt.tick) return setTickSec(evt.tick);
+        if (evt.books) {
+          got = evt.books;
+          return setSearchResults(evt.books);
+        }
+        const line = { level: evt.level ?? "info", step: evt.step ?? "?", msg: evt.msg ?? "" };
+        setLogs((l) => [...l, line]);
+        if (line.level === "err" && line.step === "done") err = line.msg;
+      });
+      setMsg(got.length ? `搜索到 ${got.length} 条` : err || "搜索无结果");
     } catch (e: any) {
+      setLogs((l) => [...l, { level: "err", step: "client", msg: e.message }]);
       setMsg(e.message);
     } finally {
       setDebugging(false);
@@ -434,31 +483,14 @@ export default function Sources() {
     if (!debugBookUrl.trim()) return setMsg("输入书籍详情页 URL");
     setLogs([]);
     setDbgBook(null);
+    setTickSec(0);
     setDebugging(true);
     try {
-      const res = await fetch(`${API_BASE}/api/sources/${editId}/debug`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ bookUrl: debugBookUrl.trim() }),
+      await streamDebug({ bookUrl: debugBookUrl.trim() }, (evt) => {
+        if (evt.tick) return setTickSec(evt.tick);
+        if (evt.step === "bookinfo" && evt.info) return setDbgBook(evt.info);
+        setLogs((l) => [...l, { level: evt.level ?? "info", step: evt.step ?? "?", msg: evt.msg ?? "" }]);
       });
-      const reader = res.body!.getReader();
-      const dec = new TextDecoder();
-      let buf = "";
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += dec.decode(value, { stream: true });
-        const parts = buf.split("\n\n");
-        buf = parts.pop()!;
-        for (const p of parts) {
-          const line = p.trim();
-          if (line.startsWith("data: ")) {
-            const evt = JSON.parse(line.slice(6)) as DebugEvt;
-            if (evt.step === "bookinfo" && evt.info) setDbgBook(evt.info);
-            else setLogs((l) => [...l, evt]);
-          }
-        }
-      }
     } catch (e: any) {
       setLogs((l) => [...l, { level: "err", step: "client", msg: e.message }]);
     } finally {
@@ -764,8 +796,8 @@ export default function Sources() {
                 )}
               </div>
               {/* 调搜索：结果列表 */}
-              {dbgMode === "search" && (
-                <div className="flex-1 overflow-y-auto rounded-lg bg-neutral-900 p-2">
+              {dbgMode === "search" && searchResults.length > 0 && (
+                <div className="max-h-[45%] shrink-0 overflow-y-auto rounded-lg bg-neutral-900 p-2">
                   {searchResults.map((b, i) => (
                     <div key={i} className="mb-2 rounded-lg bg-neutral-800 p-2 text-xs">
                       <div className="flex items-center gap-2">
@@ -785,6 +817,7 @@ export default function Sources() {
                           setDbgMode("book");
                           setRightTab("debug");
                           setLogs([]);
+                          setDbgBook(null);
                           setMsg(`已填入调书籍：${b.name}`);
                         }}
                         className="mt-1 max-w-full truncate rounded bg-neutral-700 px-1.5 py-0.5 text-left font-mono text-[11px] text-sky-400 hover:bg-neutral-600 hover:text-sky-300"
@@ -794,35 +827,68 @@ export default function Sources() {
                       </button>
                     </div>
                   ))}
-                  {!searchResults.length && <div className="p-2 text-neutral-600">输入关键词点运行，结果里的书籍 URL 可点击，直接填入「调书籍」继续测试</div>}
-                  {logs.map((l, i) => (
-                    <div key={`lg${i}`} className={levelColor[l.level]}>
-                      <span className="text-neutral-600">[{l.step}]</span> {l.msg}
-                    </div>
-                  ))}
                 </div>
               )}
-              {/* 调书籍：SSE 日志 */}
-              {dbgMode === "book" && (
-                <>
-                  <div ref={logBox} className="h-96 flex-1 overflow-y-auto rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5 md:h-auto">
-                    {logs.map((l, i) => (
-                      <div key={i} className={levelColor[l.level]}>
-                        <span className="text-neutral-600">[{l.step}]</span> {l.msg}
-                      </div>
-                    ))}
-                    {!logs.length && <div className="text-neutral-600">粘贴书籍详情页 URL 点运行：详情 → 目录 → 首章正文</div>}
-                  </div>
-                  {dbgBook && !debugging && (
-                    <button
-                      onClick={addBookFromDebug}
-                      disabled={addingBook}
-                      className="w-full rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-neutral-900 hover:bg-amber-400 disabled:opacity-50"
-                    >
-                      {addingBook ? "加入中…" : `＋ 加入书架《${dbgBook.name}》`}
-                    </button>
+              {/* 调书籍：详情解析结果（封面/作者/最新章），详情一解析完就出现，不用等目录正文 */}
+              {dbgMode === "book" && dbgBook && (
+                <div className="flex shrink-0 gap-2 rounded-lg bg-neutral-900 p-2">
+                  {dbgBook.cover ? (
+                    <img
+                      src={dbgBook.cover}
+                      alt=""
+                      className="h-[84px] w-[60px] flex-none rounded bg-neutral-800 object-cover"
+                      onError={(e) => {
+                        e.currentTarget.style.visibility = "hidden";
+                      }}
+                    />
+                  ) : (
+                    <div className="flex h-[84px] w-[60px] flex-none items-center justify-center rounded bg-neutral-800 text-[10px] text-neutral-600">无封面</div>
                   )}
-                </>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-medium text-neutral-100">{dbgBook.name || "（未取到书名）"}</div>
+                    <div className="truncate text-xs">
+                      <span className="text-neutral-500">作者 </span>
+                      {dbgBook.author ? <span className="text-neutral-300">{dbgBook.author}</span> : <span className="text-amber-400">未取到（规则 ruleBookInfo.author / 脚本 getDetail 的 author）</span>}
+                    </div>
+                    <div className="truncate text-xs">
+                      <span className="text-neutral-500">最新 </span>
+                      <span className={dbgBook.latestChapter ? "text-neutral-300" : "text-neutral-600"}>{dbgBook.latestChapter || "未取到"}</span>
+                    </div>
+                    {dbgBook.intro && <div className="mt-0.5 line-clamp-2 text-[11px] leading-4 text-neutral-500">{dbgBook.intro}</div>}
+                    <div className="truncate font-mono text-[10px] text-neutral-600" title={dbgBook.bookUrl}>
+                      {dbgBook.bookUrl}
+                    </div>
+                  </div>
+                </div>
+              )}
+              {/* 日志：两种模式共用，SSE 逐步追加 */}
+              <div ref={logBox} className="min-h-24 flex-1 overflow-y-auto rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5">
+                {logs.map((l, i) => (
+                  <div key={i} className={levelColor[l.level]}>
+                    <span className="text-neutral-600">[{l.step}]</span> {l.msg}
+                  </div>
+                ))}
+                {debugging && (
+                  <div className="flex items-center gap-1.5 text-amber-400">
+                    <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
+                    运行中{tickSec ? ` · ${tickSec}s` : ""}
+                    <span className="text-neutral-600">（长耗时步骤：浏览器启动 / 人机验证 / 目录翻页）</span>
+                  </div>
+                )}
+                {!logs.length && !debugging && (
+                  <div className="text-neutral-600">
+                    {dbgMode === "book" ? "粘贴书籍详情页 URL 点运行：详情 → 目录 → 首章正文" : "输入关键词点运行：先看搜索书单，再点书籍 URL 深入测详情/目录/正文"}
+                  </div>
+                )}
+              </div>
+              {dbgMode === "book" && dbgBook && !debugging && (
+                <button
+                  onClick={addBookFromDebug}
+                  disabled={addingBook}
+                  className="w-full shrink-0 rounded-lg bg-amber-500 px-3 py-1.5 text-sm font-medium text-neutral-900 hover:bg-amber-400 disabled:opacity-50"
+                >
+                  {addingBook ? "加入中…" : `＋ 加入书架《${dbgBook.name || dbgBook.bookUrl}》`}
+                </button>
               )}
             </div>
           )}
