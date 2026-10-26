@@ -131,7 +131,7 @@ SQLite 表 + 磁盘文件：
   - 深层取值：`.find('a').attr('href')`
 - `:eq(N)` 语义：整个结果集的第 N 个（≡ `.eq(N)`，`.eq(n)` 方法保留）
 - 链式调用清单：取值 `text/html/all/ownText/textNodes/textBlocks/attr('x')`；导航 `find('sel')/children/eq(n)/first/last/parent/next/prev`
-- **`.textBlocks()`**：正文段落提取专用——取最内层块级元素文本（嵌套 p 去重）、`<br>` 视为换行、容器裸文本（广告行）跳过、按文档序 `\n` 连接。正文规则**不要用 `.text()`**（全部拼一行无换行）
+- **`.textBlocks()`**：正文段落提取专用——取最内层块级元素文本（嵌套 p 去重）、`<br>` 视为换行、容器裸文本（广告行）跳过、按文档序 `\n` 连接；容器内**没有块级子元素**（整段正文只用 `<br/>` 分行 + `&nbsp;` 缩进的手机站，如肉书屋）时回退为容器自身文本。正文规则**不要用 `.text()`**（全部拼一行无换行）
 - 保留：`||` 回退、`##正则##替换##变换`、`{{bookUrl}}/{{baseUrl}}` 模板、JsonPath（$ 开头）、目录 `{page}` 模板
 
 ## 兼容迁移（normalizeSource，导入与运行前幂等转换）

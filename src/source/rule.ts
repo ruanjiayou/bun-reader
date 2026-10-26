@@ -244,19 +244,24 @@ const BLOCK_SEL = "p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,div,td,th,section,artic
 
 // 段落级正文提取：取最内层块级元素的文本（内部还嵌套块的容器跳过，避免嵌套 p 重复），<br> 视为换行，按文档序 \n 连接
 // 对比 .text()（全部拼一行无换行）和 .textNodes()（只取直接文本节点）：正文场景两者都不对，这个才是想要的
+// 容器内没有块级子元素（整段正文只用 <br> 分行，如肉书屋/部分手机站）时回退为容器自身文本
 function textBlocks($: CheerioAPI, el: AnyNode): string {
   const out: string[] = [];
+  const push = (n: AnyNode) => {
+    const c = $(n).clone();
+    c.find("br").replaceWith("\n");
+    for (const line of c.text().split("\n")) {
+      const t = line.replace(/[ \t\u00a0\u3000]+/g, " ").trim(); // \u00a0 = &nbsp;，手机站正文首行全靠它缩进
+      if (t) out.push(t);
+    }
+  };
   $(el)
     .find(BLOCK_SEL)
     .each((_, n) => {
       if ($(n).find(BLOCK_SEL).length) return; // 容器块：子块会各自产出
-      const c = $(n).clone();
-      c.find("br").replaceWith("\n");
-      for (const line of c.text().split("\n")) {
-        const t = line.replace(/[ \t\u3000]+/g, " ").trim();
-        if (t) out.push(t);
-      }
+      push(n);
     });
+  if (!out.length) push(el); // 无块级子元素：回退到容器自身的 <br> 分行文本
   return out.join("\n");
 }
 

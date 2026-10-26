@@ -333,6 +333,11 @@ describe("v2 链式调用语法求值", () => {
     // <br> 视为换行；容器 div 里的裸文本（广告行）不进结果
     const br = applyRule(htmlNodes(`<div id="c">广告文字<p>一行一<br>一行二</p><p>一行三</p></div>`), "'#c'.textBlocks()");
     expect(br.map(nodeText).join("\n")).toBe("一行一\n一行二\n一行三");
+    // 容器内没有任何块级子元素（整段正文只用 <br> 分行 + &nbsp; 缩进，如肉书屋/手机站）：回退容器自身文本
+    const flat = applyRule(htmlNodes(`<div class="content">&nbsp;&nbsp;第一句<br/>&nbsp;&nbsp;第二句<br>第三句</div>`), "'.content'.textBlocks()");
+    expect(flat.map(nodeText).join("\n")).toBe("第一句\n第二句\n第三句");
+    // 纯文本容器（连 <br> 都没有）：仍返回一行，不能变空
+    expect(applyRule(htmlNodes(`<div id="c">只有一句话</div>`), "'#c'.textBlocks()").map(nodeText).join("\n")).toBe("只有一句话");
   });
 });
 

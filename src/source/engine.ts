@@ -368,7 +368,7 @@ async function fetchChapter(src: BookSource, url: string, opts: FetchOpts, log?:
         log?.("warn", "content", `第 ${page} 页正文规则未命中，返回已抓取的 ${page - 1} 页`);
         break;
       }
-      throw new Error("正文规则未命中");
+      throw new Error(`正文规则未命中（content 规则：${rule.content || "未配置"}；若正文只用 <br> 分行，用 .textBlocks()）`);
     }
     parts.push(applyReplace(content, rule.replaceRegex));
 
