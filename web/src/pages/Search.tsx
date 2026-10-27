@@ -110,18 +110,30 @@ export default function Search() {
   return (
     <div className="mx-auto min-h-dvh max-w-3xl p-4">
       <header className="mb-4 flex items-center gap-2">
-        <input
-          autoFocus
-          className="flex-1 rounded-lg bg-neutral-800 px-3 py-2 text-sm"
-          placeholder="书名 / 作者"
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && run()}
-        />
-        <button onClick={run} disabled={running || !q.trim()} className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 disabled:opacity-50">
+        {/* 返回在左侧；输入框 16px（text-base）——iOS 聚焦字号 <16px 的输入框会强制放大页面 */}
+        <Link to="/" className="flex-none text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
+        <div className="relative min-w-0 flex-1">
+          <input
+            autoFocus
+            className="w-full rounded-lg bg-neutral-800 px-3 py-2 pr-9 text-base"
+            placeholder="书名 / 作者"
+            value={q}
+            onChange={(e) => setQ(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && run()}
+          />
+          {q && (
+            <button
+              onClick={() => setQ("")}
+              title="清空"
+              className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full bg-neutral-700 text-xs text-neutral-300 hover:bg-neutral-600"
+            >
+              ×
+            </button>
+          )}
+        </div>
+        <button onClick={run} disabled={running || !q.trim()} className="flex-none rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 disabled:opacity-50">
           {running ? "搜索中…" : "搜索"}
         </button>
-        <Link to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
       </header>
       {prog && (
         <div className="mb-3 text-xs text-neutral-500">

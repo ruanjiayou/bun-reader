@@ -50,10 +50,12 @@
 └───────────────────────────────────────────┘
 ```
 
-## 3. 认证
+## 3. 认证与账号
 
 - 用户名 + 密码（bcrypt），JWT 放 httpOnly Cookie，中间件统一校验
 - API：`POST /auth/register`、`POST /auth/login`、`POST /auth/logout`、`GET /auth/me`
+- 账号资料（设置页）：`PUT /auth/profile`（nickname ≤20 字；avatar 为 dataURL，≤300KB，仅 png/jpeg/webp）、`PUT /auth/password`（验旧密码，新密码 ≥6 位，成功后保持会话）
+- 头像存储：**前端 canvas 压缩成 128×128 JPEG dataURL 直接入库**（users.avatar），不起文件服务；无头像时前端用昵称/用户名首字画圆
 - 不做邮箱验证、找回密码
 
 ## 4. 数据模型
@@ -62,7 +64,7 @@ SQLite 表 + 磁盘文件：
 
 | 表 | 字段 | 说明 |
 |---|---|---|
-| `users` | id, username, password_hash, created_at | 多用户 |
+| `users` | id, username, password_hash, nickname, avatar, created_at | 多用户；nickname/avatar 为可选资料（avatar=128px dataURL） |
 | `sources` | id, name, enabled, "group", json, type, code, last_use_at | **全局共享**；json 存源定义（rules=规则原文 / script=表单数据），code 存生成脚本 |
 | `rate_states` | source_id, cap, high, window_ms, last_fail_at | 缓存自适应限速频率（按书源持久化） |
 | `books` | id, user_id, book_url, source_id, name, author, cover, intro, latest_chapter, last_check_at | 书架；唯一约束 (user_id, book_url, source_id) |
@@ -103,10 +105,11 @@ SQLite 表 + 磁盘文件：
 
 | 路由 | 页面 | 要点 |
 |---|---|---|
-| `/` | 书架 | 手机 3 列网格 / 桌面列表；排序 tab（默认「最近阅读」，可切「最近更新」） |
-| `/search` | 搜索 | SSE 实时追加结果卡片，聚合去重 |
-| `/book/:id` | 书籍详情 | 封面左（垂直居中）、信息右；顶部「← 书架」一排右端为检查更新；缓存条整体右对齐；继续阅读 |
+| `/` | 书架 | 手机 3 列网格 / 桌面列表；排序 tab（默认「最近阅读」，可切「最近更新」）。**右上角账号区**：未登录=登录按钮；已登录=头像圆钮（无头像显示首字）→ 下拉（昵称 / 设置 / 退出登录）。**移出书架 = 右键或长按 500ms**（移动端没有右键），长按触发后吞掉同一次 click 不进详情。列表有**加载中状态**（转圈 + 「书架加载中…」），请求未回不显示「空书架」 |
+| `/search` | 搜索 | SSE 实时追加结果卡片，聚合去重。布局：`← 书架` 在左，输入框中间（**16px 字号防 iOS 聚焦缩放**，框内有 × 清空），搜索按钮在右。登录/设置页输入框同为 16px |
+| `/book/:id` | 书籍详情 | 封面左（垂直居中）、信息右（结构不变）；**操作按钮一排在卡片下方**：开始阅读/继续阅读（主按钮）、移出书架、检查更新；**缓存信息 + 缓存全本/停止/释放 在页面右上角**（与 ← 书架同一行）；目录**分页每页 100 章**（正/倒序先排序再切片，首次载入定位到「上次读到」所在页，切排序回第 1 页），目录有加载中状态 |
 | `/book/:id/read/:idx` | 阅读器 | 见第四部分 |
+| `/settings` | 账号设置 | 头像（点击圆形选图，本地压缩预览，随「保存资料」提交）、昵称、修改密码（旧密码 + 新密码×2）；保存后通知 App 刷新 `/auth/me`，书架头像立即生效 |
 | `/sources` | 书源管理 | 列表启停、导入、表单编辑、调试面板 |
 
 ### 调试面板（书源页右侧）
@@ -363,9 +366,33 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 
 - 工具栏默认隐藏，**点击正文切换**显隐（chrome state）；弹层打开时不受影响。
 - 顶栏第一个 icon「返回」= `nav(-1)` 返回上一个路由，不是上一章。
-- 目录弹层：当前章 amber 高亮 + 「已缓存」绿点标记；换源面板列出拥有此书的源，当前源禁用。
+- 目录弹层：当前章 amber 高亮 + 「已缓存」绿点标记，**打开即把当前章滚到列表中央**（见 §9）；换源面板列出拥有此书的源，当前源禁用。
 - 占位内容 toast 与操作 toast 均悬浮顶部居中，不推挤内容。
 - 书架排序（顶部 tab）：
   - **最近阅读**（默认）：按 `progress.updated_at` 降序，未读过的排后面按加入时间；
   - **最近更新**：按 `books.updated_at` 降序（首次建目录、检查更新发现新增章节时置为当前时间；单纯检查不动）。
 - 主题/朗读/TTS 相关状态全部本地，允许离线（PWA）。
+
+## 9. 目录弹层定位与操作动效
+
+### 目录列表定位（当前章居中）
+
+- 入口：手机顶栏 / PC 左栏「目录」。打开弹层时**把当前章那一行滚到列表竖直中央**——目录常有上千章，落点若停在第 1 章，想找当前章得手动翻很久。
+- 算法：取滚动容器 `tocRef` 与当前行 `curChRef`，`容器.scrollTop += 行.top − 容器.top − (容器.height − 行.height)/2`。
+  - **不用 `scrollIntoView`**：它会把 body/正文一起滚，阅读位置被连带改掉。
+  - 用 rect 差值而非 `offsetTop`：行不依赖 offsetParent 链（弹层内有多层定位容器）。
+  - 首章/末章受滚动边界限制，贴顶/贴底即止，不做视觉补偿。
+- 定位时机：依赖 `[showToc, chapters.length, idx]`——覆盖「先开弹层、目录后到」的异步顺序；切章后再开同样重新居中。用 `requestAnimationFrame` 等一帧，保证行高已排版。
+- 当前章视觉：amber 文字 + `amber/10` 淡底 + 中等字重（只有文字变色时，居中后不易一眼锁定）；「已缓存」绿点、「· 当前」后缀保留。
+
+### 强制刷新旋转动画
+
+- 「刷新本章」（`?refresh=1` 绕过缓存重抓正文）请求期间图标 `animate-spin` 匀速旋转，按钮同时 `disabled` 防重复点击；返回后（成功或报错 toast）立即停转。
+- 旋转施加在包图标的 `<span>` 上，**不是按钮本身**：按钮位置、底色描边和 hover 逻辑不跟着转。
+- 移动端右侧两组按钮与 PC 右栏共用同一个 `FloatBtn` 的 `spinning` 属性，两端行为一致。
+
+### 弹层关闭按钮（点透修复）
+
+- **症状**：移动端点目录弹层的「×」，弹层卸载后同一次点按的合成 click 落到弹层下方的章节行上，直接跳章（iOS 点透）。
+- **修法（`SheetClose` 组件，目录/换源/设置三个弹层共用）**：`touchend` 阶段 `preventDefault()` 吞掉合成 click 并直接关闭；`touchstart` 记录起点，手位移 >10px 视为滚动收尾不当作点按；桌面仍走 `onClick`。
+- 通用教训：**移动端在 click 里同步卸载浮层，同一次点按的 click 可能落到卸载后露出的下层元素**——凡「关闭浮层」类按钮都要走这个模式，不要裸用 onClick。

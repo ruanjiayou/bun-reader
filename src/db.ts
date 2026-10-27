@@ -17,6 +17,8 @@ CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   username TEXT NOT NULL UNIQUE,
   password_hash TEXT NOT NULL,
+  nickname TEXT,
+  avatar TEXT,
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS sources (
@@ -106,6 +108,13 @@ try {
 try {
   sqlite.exec("ALTER TABLE books ADD COLUMN updated_at INTEGER");
   sqlite.exec("UPDATE books SET updated_at = COALESCE(last_check_at, created_at) WHERE updated_at IS NULL");
+} catch {}
+// 用户资料（昵称/头像 dataURL）：存量库补列
+try {
+  sqlite.exec("ALTER TABLE users ADD COLUMN nickname TEXT");
+} catch {}
+try {
+  sqlite.exec("ALTER TABLE users ADD COLUMN avatar TEXT");
 } catch {}
 
 export const db = drizzle(sqlite, { schema });

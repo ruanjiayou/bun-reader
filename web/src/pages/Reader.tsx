@@ -147,16 +147,50 @@ const NavItem = ({ icon, label, onClick }: { icon: string; label: string; onClic
   </button>
 );
 // 纯图标悬浮钮（title 提示；可传入底色描边样式，暗色主题下也看得清）
-const FloatBtn = ({ icon, title, onClick, active, style }: { icon: string; title: string; onClick: () => void; active?: boolean; style?: React.CSSProperties }) => (
+// spinning：耗时操作进行中，图标原地匀速旋转（如刷新本章），并禁用重复点击
+const FloatBtn = ({ icon, title, onClick, active, spinning, style }: { icon: string; title: string; onClick: () => void; active?: boolean; spinning?: boolean; style?: React.CSSProperties }) => (
   <button
     onClick={onClick}
     title={title}
     style={style}
+    disabled={spinning}
     className={`flex h-10 w-10 items-center justify-center rounded-full transition-opacity hover:opacity-100 ${active ? "text-amber-500 opacity-100" : "opacity-75"}`}
   >
-    <Icon name={icon} size={19} />
+    <span className={`block ${spinning ? "animate-spin" : ""}`}>
+      <Icon name={icon} size={19} />
+    </span>
   </button>
 );
+
+// 弹层关闭按钮（目录/换源/设置共用）：移动端「点透」修复——点击卸载弹层后，同一次点按的
+// 合成 click 会落到弹层下方的元素上（目录场景 = 正下方那行章节 → 直接跳章）。
+// touchend 阶段 preventDefault 吞掉合成 click；手位移 >10px 视为滚动收尾，不当作点按。
+const SheetClose = ({ onClose }: { onClose: () => void }) => {
+  const start = useRef<{ x: number; y: number } | null>(null);
+  return (
+    <button
+      onTouchStart={(e) => {
+        const t = e.touches[0];
+        start.current = { x: t.clientX, y: t.clientY };
+      }}
+      onTouchEnd={(e) => {
+        const t = e.changedTouches[0];
+        const s = start.current;
+        start.current = null;
+        if (!s || Math.abs(t.clientX - s.x) > 10 || Math.abs(t.clientY - s.y) > 10) return;
+        e.preventDefault();
+        onClose();
+      }}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClose();
+      }}
+      className="ml-auto px-2 text-lg opacity-60 hover:opacity-100"
+    >
+      ×
+    </button>
+  );
+};
 
 // 设置面板控制按钮：半透明黑底+浅描边，暗色主题下也不和文字混在一起
 const CTRL = "rounded border px-3 py-1 text-sm leading-5";
@@ -194,6 +228,9 @@ export default function Reader() {
   const [switching, setSwitching] = useState(false);
   const [srcErr, setSrcErr] = useState("");
   const scrollRef = useRef<HTMLDivElement>(null);
+  const tocRef = useRef<HTMLDivElement>(null); // 目录弹层滚动容器（当前章居中定位用）
+  const curChRef = useRef<HTMLButtonElement>(null); // 目录里「当前章」那一行
+  const [refreshing, setRefreshing] = useState(false); // 强制刷新本章中：按钮图标旋转
   const [scrollFrac, setScrollFrac] = useState(0); // 章内滚动比例 0-1（底部细线进度实时用）
   const lastSent = useRef<{ idx: number; pct: number }>({ idx: -1, pct: -1 }); // 上次已上报的进度（去重用）
   const preloaded = useRef<Map<number, ContentResp>>(new Map());
@@ -233,6 +270,21 @@ export default function Reader() {
       .then((r) => setChapters(r.chapters))
       .catch(() => {});
   }, [bookId]);
+
+  // 目录弹层打开时：把「当前章」一行滚到列表竖直中央——目录动辄上千章，落点若停在第 1 章，
+  // 想找当前章得手动往下翻很久。依赖 chapters.length，覆盖「先开弹层、目录后到」的异步顺序。
+  useEffect(() => {
+    if (!showToc || !chapters.length) return;
+    const raf = requestAnimationFrame(() => {
+      const box = tocRef.current;
+      const el = curChRef.current;
+      if (!box || !el) return;
+      const b = box.getBoundingClientRect();
+      const r = el.getBoundingClientRect();
+      box.scrollTop += r.top - b.top - (b.height - r.height) / 2; // 行中心 ↔ 容器中心
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [showToc, chapters.length, idx]);
 
   // 加载正文（优先用预加载缓存），并恢复上次滚动位置（scrollPos = 章内滚动百分比 0-100）
   useEffect(() => {
@@ -366,7 +418,10 @@ export default function Reader() {
     nav(`/book/${bookId}/read/${to}`, { replace: true });
   };
 
+  // 强制刷新本章：绕过缓存重抓正文（?refresh=1）；请求期间按钮图标旋转，防重复点击
   const refreshCh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
     try {
       const r = await api<ContentResp>(`/api/books/${bookId}/content/${idx}?refresh=1`);
       preloaded.current.delete(idx);
@@ -375,6 +430,8 @@ export default function Reader() {
       setToast(r.isPlaceholder ? "已刷新，但仍疑似占位内容" : "已刷新");
     } catch (e: any) {
       setToast(e.message);
+    } finally {
+      setRefreshing(false);
     }
   };
 
@@ -568,7 +625,7 @@ export default function Reader() {
       {chrome && (
         <div className="absolute bottom-3 right-1 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-end min-[501px]:gap-3 min-[900px]:right-auto min-[900px]:left-[calc(50%+320px)] min-[900px]:translate-x-[12px]">
           <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} style={floatBtnStyle} />
-          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} style={floatBtnStyle} />
+          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} spinning={refreshing} style={floatBtnStyle} />
           <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} style={floatBtnStyle} />
           <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} style={floatBtnStyle} />
         </div>
@@ -584,7 +641,7 @@ export default function Reader() {
       {/* 手机右侧悬浮：刷新 / 朗读 / 设置（设置入口在右侧按钮组，底栏不放） */}
       {chrome && (
         <div className="absolute bottom-20 right-1 z-40 flex flex-col gap-3 min-[501px]:hidden">
-          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} style={floatBtnStyle} />
+          <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} spinning={refreshing} style={floatBtnStyle} />
           <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} style={floatBtnStyle} />
           <FloatBtn icon="settings" title="设置" onClick={() => setShowSettings(true)} style={floatBtnStyle} />
         </div>
@@ -621,24 +678,25 @@ export default function Reader() {
       )}
       {toast && <div className="absolute left-1/2 top-14 z-50 -translate-x-1/2 rounded-lg bg-neutral-700 px-3 py-1.5 text-xs text-neutral-100">{toast}</div>}
 
-      {/* 目录弹层 */}
+      {/* 目录弹层：打开即把当前章滚到列表中央（tocRef 是滚动容器，curChRef 是当前章那一行） */}
       {showToc && (
-        <div className="absolute inset-0 z-40 overflow-y-auto bg-black/60" onClick={() => setShowToc(false)}>
+        <div ref={tocRef} className="absolute inset-0 z-40 overflow-y-auto bg-black/60" onClick={() => setShowToc(false)}>
           <div className="mx-auto min-h-full min-[501px]:w-[640px] max-w-full p-4" style={{ background: theme.bg, color: theme.text }} onClick={(e) => e.stopPropagation()}>
             <div className="sticky top-0 mb-2 flex items-center bg-inherit pb-2 pt-1">
               <h3 className="text-sm font-bold">目录</h3>
               <span className="ml-2 text-xs opacity-50">共 {chapters.length} 章</span>
-              <button onClick={() => setShowToc(false)} className="ml-auto px-2 text-lg opacity-60 hover:opacity-100">×</button>
+              <SheetClose onClose={() => setShowToc(false)} />
             </div>
             <div className="divide-y" style={{ borderColor: "rgba(128,128,128,.2)" }}>
               {chapters.map((c) => (
                 <button
                   key={c.idx}
+                  ref={c.idx === idx ? curChRef : undefined}
                   onClick={() => {
                     setShowToc(false);
                     goChapter(c.idx);
                   }}
-                  className={`block w-full truncate py-2.5 text-left text-sm hover:opacity-100 ${c.idx === idx ? "text-amber-400" : "opacity-80"}`}
+                  className={`block w-full truncate rounded px-2 py-2.5 text-left text-sm hover:opacity-100 ${c.idx === idx ? "bg-amber-400/10 font-medium text-amber-400" : "opacity-80"}`}
                 >
                   {c.title}
                   {c.cached && <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 align-middle" title="已缓存" />}
@@ -658,7 +716,7 @@ export default function Reader() {
             <div className="sticky top-0 mb-2 flex items-center gap-2 bg-inherit pb-2 pt-1">
               <h3 className="text-sm font-bold">换源</h3>
               <span className="truncate text-xs opacity-50">《{bookName || "…"}》</span>
-              <button onClick={() => setShowSources(false)} className="ml-auto px-2 text-lg opacity-60 hover:opacity-100">×</button>
+              <SheetClose onClose={() => setShowSources(false)} />
             </div>
             {(srcSearching || switching) && <div className="py-1 text-center text-xs opacity-60">{srcSearching ? "正在所有书源中搜索这本书…" : "正在换源…"}</div>}
             {srcErr && <div className="mb-2 rounded-lg bg-red-500/15 px-3 py-2 text-xs text-red-400">{srcErr}</div>}
@@ -693,7 +751,7 @@ export default function Reader() {
           <div className="absolute inset-x-0 bottom-0 rounded-t-2xl p-4 pb-8" style={{ background: theme.bg, color: theme.text, borderTop: "1px solid rgba(128,128,128,.35)" }} onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-center">
               <h3 className="text-sm font-bold">设置</h3>
-              <button onClick={() => setShowSettings(false)} className="ml-auto px-2 text-lg opacity-60 hover:opacity-100">×</button>
+              <SheetClose onClose={() => setShowSettings(false)} />
             </div>
             <div className="space-y-3 text-sm">
               <div className="flex items-center gap-3">

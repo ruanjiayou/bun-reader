@@ -1,6 +1,8 @@
 node_modules/
 web/node_modules/
+web/reader/
 dist/
 web/dist/
 data/
 *.log
+.workbuddy/

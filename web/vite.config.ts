@@ -50,7 +50,7 @@ export default defineConfig({
     host: true, // 监听 0.0.0.0，允许局域网通过 http://<本机IP>:5173/reader/ 访问
     proxy: {
       // API 走网关前缀 /gw/reader，dev 原样转发到 192.168.1.124（网关不剥前缀）
-      "/gw/reader": { target: "http://192.168.1.124", changeOrigin: true },
+      "/gw/reader": { target: "https://jiayou.work", changeOrigin: true },
       // 兜底：.env 里 VITE_API_BASE 置空串时直连本地后端
       "/api": "http://localhost:8094",
       "/auth": "http://localhost:8094",

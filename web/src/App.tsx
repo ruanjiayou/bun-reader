@@ -8,12 +8,20 @@ import Search from "./pages/Search";
 import Preview from "./pages/Preview";
 import Book from "./pages/Book";
 import Reader from "./pages/Reader";
+import Settings from "./pages/Settings";
+
+export interface Me {
+  uid: number;
+  username: string;
+  nickname?: string | null;
+  avatar?: string | null;
+}
 
 export function useAuth() {
-  const [me, setMe] = useState<{ uid: number; username: string } | null>(null);
+  const [me, setMe] = useState<Me | null>(null);
   const [loading, setLoading] = useState(true);
   const refresh = () =>
-    api<{ uid: number; username: string }>("/auth/me")
+    api<Me>("/auth/me")
       .then(setMe)
       .catch(() => setMe(null))
       .finally(() => setLoading(false));
@@ -39,7 +47,8 @@ export default function App() {
   return (
     <Routes>
       <Route path="/auth" element={me ? <Navigate to="/" replace /> : <Auth onOk={refresh} />} />
-      <Route path="/" element={<Guard me={me} loading={loading}><Shelf username={me?.username} onLogout={logout} /></Guard>} />
+      <Route path="/" element={<Guard me={me} loading={loading}><Shelf me={me} onLogout={logout} /></Guard>} />
+      <Route path="/settings" element={<Guard me={me} loading={loading}><Settings me={me!} onSaved={refresh} /></Guard>} />
       <Route path="/search" element={<Guard me={me} loading={loading}><Search /></Guard>} />
       <Route path="/preview" element={<Guard me={me} loading={loading}><Preview /></Guard>} />
       <Route path="/book/:id" element={<Guard me={me} loading={loading}><Book /></Guard>} />

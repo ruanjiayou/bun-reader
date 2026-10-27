@@ -4,6 +4,9 @@ export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   username: text("username").notNull().unique(),
   passwordHash: text("password_hash").notNull(),
+  // 展示昵称（缺省回退 username）；avatar 存 128px 压缩后的 dataURL（前端 canvas 压缩，省文件服务）
+  nickname: text("nickname"),
+  avatar: text("avatar"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });
 
