@@ -2,7 +2,23 @@
 
 按日期记录功能变更（设计规范见 [docs/design.md](./docs/design.md)，当前计划见 [docs/plans.md](./docs/plans.md)）。
 
+## 2026-10-28
+
+- **阅读器导航去重**：顶栏与 PC 左栏移除「首页」入口——首页路由 `/` 即书架，两个入口指向同一页面功能重叠；现为「返回 + 书架/书源/目录」
+- **目录弹层点透彻底修复**：采用**结构层根治**——目录/换源弹层改为头部（标题+关闭钮）与列表上下排列、列表内部滚动（`flex h-full flex-col`，列表区 `flex-1 overflow-y-auto`），「×」下面是面板容器而不是章节行，点透无从发生；当前章居中定位不变（`tocRef` 指向列表滚动容器）。`SheetClose`（touchend preventDefault）与时间戳护栏（`tapGuard` 500ms，兜底「关闭后合成 click 重定位到弹层外元素」的极端场景）保留作双保险
+- **朗读（TTS）增强**：
+  - **选中即起点**：正文中选中文本后点「朗读」，从选中所在句开始读（Selection 偏移映射到段落/句下标）；无选中则维持原「从当前可视位置开始」
+  - **语速/发音人改动下一句生效**：每句创建 Utterance 时从 `prefsRef`/`voicesRef` 实时读取偏好（原来在开始朗读时闭包捕获，改设置不生效），调整后当前句读完即换新值，无需停止重启
+  - **发音人过滤 Eloquence 系列**（iOS 内置机械音）；系统里新下载的中文发音人（增强版/Siri 声音等）随 `voiceschanged` 自动出现在列表，直接可用
+  - **同名发音人去歧义**：「婷婷」与「婷婷优化版」等两条语音 `name` 相同（只有 `voiceURI` 不同）时不去重，改为从 URI 提取标签区分（enhanced→优化版 / premium→高级版 / siri→Siri / compact→标准版，兜底取 URI 末段）；另按 voiceURI 整体去重防重复条目
+- 设计文档同步：§3 导航工具栏（去首页）、§6 朗读（选中起点/实时偏好/发音人过滤）、§9 弹层关闭（时间戳护栏两层防线）
+
+- **设置功能改版**：设置弹层**遮罩去掉背景色**（透明点击层，面板保留主题背景，不再整屏压暗）；主题**移除「纯黑」并下线整个自定义主题**（色相圆盘/透明度一并移除，历史遗留取值自动落到暗色）
+- **朗读卡死自愈**：修「点朗读一直没声音、刷新无效、重启浏览器才恢复」的 Web Speech 引擎假死——①打断统一先 `resume()` 再 `cancel()`（paused 队列直接 cancel 无效，假死最常见成因）；②持有当前 Utterance 引用防 GC（无声且 onend 不触发的 Chrome 旧 bug）；③起播看门狗：3s 无 onstart 自动 cancel 重试本句一次，仍失败提示重启浏览器；④onend 丢失时按文本长度估时自动放行下一句，朗读链不中断
+
 ## 2026-10-27
+
+- **PWA 发版不生效修复（Cloudflare CDN + NAS nginx）**：根因是 /reader 静态文件由 NAS nginx 直接服务且从不发 Cache-Control，Cloudflare 默认按扩展名缓存 js——sw.js 被边缘缓存旧版后，浏览器每次导航都拿不到新 SW，更新检测永不触发，index.html 被 SW precache（NavigationRoute）一直供旧页。修复：nginx 按 `/reader/assets/*`（内容 hash，一年 immutable）与 sw.js/index.html/manifest/workbox（no-cache）分层发缓存头（配置见 design.md §9）；后端 `cacheStatic`/`noStore` 兜底（/api、/auth 及网关别名 no-store）。**发版后需在 CF 清一次缓存（至少 /reader/sw.js），此后不会再犯**
 
 - **账号体系扩展**：users 表加 nickname/avatar 列（存量库自动补列）；新增 `PUT /auth/profile`（昵称/头像，头像为前端 canvas 压缩的 128px dataURL，≤300KB）与 `PUT /auth/password`（验旧密码改新）；`/auth/me` 返回昵称与头像
 - **书架页**：右上角账号区——未登录显示「登录」按钮，登录后显示头像圆钮，下拉含昵称/设置/退出登录；移出书架支持**长按**（移动端无右键），长按后吞 click 不误进详情；书架列表加加载中状态

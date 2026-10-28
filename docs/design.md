@@ -137,6 +137,40 @@ SQLite 表 + 磁盘文件：
 - 正文失败：阅读器内联重试卡片，不白屏
 - 后台任务：逐章 try/catch + 重试退避，日志落 `data/logs/日期.log`
 
+## 9. 部署与缓存（Cloudflare CDN → NAS nginx → Bun）
+
+- 链路：jiayou.work（Cloudflare CDN）多应用共用域名按路径转发（/reader、/hentai、/manager…）→ NAS nginx（**/reader 静态文件由 nginx 直接服务**，API 反代到 Bun:8094）。
+- **缓存头必须在 nginx 里配**（静态文件不过 Bun）；后端 `cacheStatic`/`noStore`（src/index.ts）对反代接口与兜底场景生效。
+- 分层策略（三层缓存：Cloudflare 边缘 / 浏览器 / SW precache）：
+  - `/reader/assets/*`（文件名含内容 hash）：`public, max-age=31536000, immutable`——内容变了文件名必变，可长期缓存；
+  - `index.html` / `sw.js` / `manifest.webmanifest` / `registerSW.js` / `workbox-*.js` / `icon.svg`：**`no-cache`**——每次导航回源校验。**SW 更新检测依赖每次拿到最新 sw.js**，若 sw.js 被边缘/浏览器缓存旧版，PWA 永远停在旧版本（症状：build 后刷新多少次都不更新，index.html 一直是 SW precache 里的旧页）；
+  - `/api/*`、`/auth/*`（含 /gw/reader 别名）：`no-store`。
+- nginx 参考配置（用 `root` 指到 `web/`，URI /reader/x 直接映射 web/reader/x；**别用 alias + 嵌套正则 location**，正则 location 不继承 alias）：
+
+```nginx
+location /reader/ {
+    root /path/to/bun-reader/web;          # /reader/xx → web/reader/xx
+    index index.html;
+    try_files $uri $uri/ /reader/index.html;
+
+    # 带内容 hash 的产物：长缓存
+    location ~ ^/reader/assets/ {
+        add_header Cache-Control "public, max-age=31536000, immutable" always;
+    }
+    # SW 与入口文档：任何缓存层都不许钉死旧版
+    location ~ ^/reader/(sw\.js|registerSW\.js|workbox-.*\.js|manifest\.webmanifest|icon\.svg)$ {
+        add_header Cache-Control "no-cache" always;
+    }
+    location = /reader/index.html {
+        add_header Cache-Control "no-cache" always;
+    }
+}
+```
+
+- **Cloudflare 默认按扩展名缓存 js/css（sw.js 命中 .js）**：origin 有 no-cache 后 CF 尊重并不再缓存边缘副本；但已缓存的旧 sw.js 必须在 CF **清一次缓存**（至少清 `https://jiayou.work/reader/sw.js`）才会消失。验证：`curl -sI https://jiayou.work/reader/sw.js | grep -i cache-control` 应返回 no-cache。
+- PWA 更新链路：sw.js 生成配置含 `skipWaiting + clientsClaim`；前端 `registerSW({ immediate: true })` 在新 SW 激活（isUpdate）时自动 `location.reload()`。正常发版流程：第一次刷新仍是旧版（同时后台检测并安装新 SW），安装激活后自动 reload 进新版。
+- API 反代保持 `proxy_buffering off`（SSE 调试流实时性，配合后端 `X-Accel-Buffering: no`），并加 `proxy_read_timeout 600s`（目录翻页长请求）。
+
 ---
 
 # 二、书源规则语法 v2（链式调用）
@@ -313,14 +347,14 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 
 ### 手机（≤500px）
 
-- **顶栏**（点正文唤出）：左返回 icon + 右文字按钮（首页/书架/书源/目录）。
+- **顶栏**（点正文唤出）：左返回 icon + 右文字按钮（书架/书源/目录）。**不设「首页」入口**——首页路由 `/` 就是书架，两个入口指向同一页面属于功能重叠。
 - **底栏**：`上一章 · 章节进度 · 下一章` 三项居中，**不放设置**。
 - **左侧浮动组**：书籍详情、缓存下载。
 - **右侧浮动组**：刷新本章、朗读、**设置**——设置入口统一在右侧按钮组。
 
 ### PC（>500px）
 
-- **左栏**：首页/书架/书源/目录（icon+文字纵向排列）。
+- **左栏**：书架/书源/目录（icon+文字纵向排列；同顶栏，不设「首页」）。
 - **右栏**（靠底）：书籍详情、刷新、朗读、设置（纯 icon 圆钮）。
 - **底栏**：`上一章 · 章节进度 · 下一章` 居中悬浮。
 
@@ -340,22 +374,31 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 
 ## 5. 主题
 
-- 6 预设：暗色 / 羊皮纸 / 纯黑 / 星空蓝 / 护眼绿 / 柔和灰；自定义 = 颜色选择器 + 透明度滑条（20–100%）。
-- 文字色按「颜色亮度 × 透明度」混合后的亮度自动选亮/暗，全部内联样式注入。
+- 5 预设：暗色 / 羊皮纸 / 星空蓝 / 护眼绿 / 柔和灰。**自定义主题已下线**（含色相圆盘/透明度，历史包袱大于价值）；历史遗留的 `custom`/纯黑取值在 `resolveTheme` 统一落到暗色。
+- 文字色跟随预设（暗色系亮字、亮色系暗字），全部内联样式注入。
 - 设置面板控件统一：半透明黑底 + 浅描边，暗色主题下按钮不与文字混色。
+- **设置弹层的遮罩不加背景色**（透明点击层，只负责点外部关闭），**面板保留主题背景**（实底 + 顶部描边）；自定义颜色第二层同规则。目录/换源弹层仍保留 `bg-black/60` 遮罩（全屏列表需要压暗背后正文）。
 - 所有设置（字号/行距/主题/语速/发音人）实时持久化 localStorage（`reader-prefs`）。
 - 设置入口 icon 为**齿轮**（Feather settings），右侧浮动按钮组。
 
 ## 6. 朗读（TTS）
 
 - **从当前阅读位置开始**：以滚动位置为准，取「第一个底边还在视口内的段落」作为起始段（与底部细线进度同源），不是每次从本章开头。
+- **选中即起点**：正文里有选中文本时点「朗读」，从选中所在句开始读（用 `Selection` 的 range 起点偏移映射到「段落 → 句」下标，与渲染切片同源）；无选中则回到上面的可视位置逻辑。
 - **按句链式朗读**：段落先切分句（`。！？!?…` 为界，句末引号/右括号跟随前句），逐句合成，语速 0.5–1.5。
+- **语速/发音人改动下一句生效**：每句创建 `SpeechSynthesisUtterance` 时从 `prefsRef`/`voicesRef` 实时读取偏好，而不是开始朗读时闭包捕获——设置面板调整后当前句读完，下一句立刻用新值（朗读中不用停止重启）。
 - **正在朗读的句子高亮为黄色**：当前句文字色 amber（深色主题 `#fbbf24` / 亮色主题 `#b45309`）+ `amber-400/15` 淡底；段落按句渲染成 `<span>`，仅朗读中的那段拆分，其余段落保持纯文本（不增加 DOM 开销）。
 - **跟读滚动**：当前句所在段落滚出视口才 `scrollTo`（提前量 48px、定位到视口 30% 处），用户手动滚动不被强行拽回。
 - **读完自动续读下一章**：本章最后一句结束 → `replace` 导航到下一章 → 新章正文就绪后从第一段继续朗读；已是最后一章则提示「已读完本书最后一章」。
 - 停止/读完/切章时清除高亮（`spoken = null`）。
 - 切章 / 换源 / 卸载页面会打断朗读（`ttsStopped` 标志避免 cancel 触发的 onend 继续读旧章）。
-- 发音人列表**只列中文**（`lang` 以 `zh` 开头），已保存的非中文发音人自动清除。
+- **引擎假死自愈**（症状：点朗读一直没声音，刷新页面无效，重启浏览器才恢复——Web Speech 引擎进入坏状态）：
+  - **先 `resume()` 再 `cancel()`**：对 paused 状态的队列直接 cancel 无效，是假死最常见成因；所有打断/复位走统一的 `resetTts()`；
+  - **持有当前 Utterance 引用**（`curUtter`）：Chrome 曾有 utterance 被提前 GC 导致无声且 onend 永不触发的 bug；
+  - **起播看门狗**：`speak()` 后 3s 内 `onstart` 没来判定假死，cancel 后自动重试本句一次；重试仍无声提示「请完全退出浏览器后重试」；
+  - **读句兜底**：onstart 后按「文本长度 × 600ms ÷ 语速」（下限 4s）设超时，onend 偶发丢失时自动放行下一句，朗读链不中断。
+- 发音人列表**只列中文**（`lang` 以 `zh` 开头）且**排除 Eloquence 系列**（iOS 内置机械音，`voiceURI` 含 eloquence 一律过滤），已保存的被过滤发音人自动清除；用户在系统设置里新下载的中文发音人（增强版/Siri 声音等）会随 `voiceschanged` 事件自动进入列表，无需改代码。
+- **同名发音人去歧义**：系统里「婷婷」和「婷婷优化版」是两条不同音质的语音，但 `name` 可能完全一样（只有 `voiceURI` 不同）——**不不去重**（去掉就用不上优化版了），改为同名出现 ≥2 次时从 `voiceURI` 提取标签区分：`enhanced`→优化版、`premium`→高级版、`siri`→Siri、`compact`/`ttsbundle`→标准版，兜底取 URI 最后一段；另按 `voiceURI` 整体去重防系统返回重复条目。
 
 ## 7. 章节导航与历史
 
@@ -394,5 +437,7 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 ### 弹层关闭按钮（点透修复）
 
 - **症状**：移动端点目录弹层的「×」，弹层卸载后同一次点按的合成 click 落到弹层下方的章节行上，直接跳章（iOS 点透）。
-- **修法（`SheetClose` 组件，目录/换源/设置三个弹层共用）**：`touchend` 阶段 `preventDefault()` 吞掉合成 click 并直接关闭；`touchstart` 记录起点，手位移 >10px 视为滚动收尾不当作点按；桌面仍走 `onClick`。
-- 通用教训：**移动端在 click 里同步卸载浮层，同一次点按的 click 可能落到卸载后露出的下层元素**——凡「关闭浮层」类按钮都要走这个模式，不要裸用 onClick。
+- **结构层根治（首选方案）**：目录/换源弹层**头部（标题+关闭钮）与列表上下排列，不再用 sticky 覆盖**——面板 `flex h-full flex-col`，头部 `flex-none`，列表区 `flex-1 overflow-y-auto` 自己内部滚动（`tocRef` 即列表滚动容器，当前章居中算法不变）。这样「×」下面是面板容器（`stopPropagation`），即使发生点透也只落在不可点的容器上，**从结构上让「盖住」不存在**。
+- **`SheetClose` 组件（目录/换源/设置三弹层共用）**：`touchend` 阶段 `preventDefault()` 吞掉合成 click 并直接关闭；`touchstart` 记录起点，手位移 >10px 视为滚动收尾不当作点按；桌面仍走 `onClick`。
+- **时间戳护栏（保险丝，`tapGuard`）**：`closeSheet(setter)` 统一关闭入口记录 `tapGuard = Date.now() + 500`；下层易误触的 onClick（目录章节行、换源条目、正文切工具栏）开头检查即忽略。结构修复后护栏只兜极端场景（关闭后合成 click 重定位到弹层外的元素，如误切工具栏），代价一行，**保留不删**。
+- 通用教训：**移动端「可点列表 + 覆盖其上的悬浮关闭钮」是点透温床**——优先用上下排列消除覆盖；确需覆盖时再上 SheetClose + tapGuard 双保险。

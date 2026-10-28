@@ -9,13 +9,11 @@ interface ContentResp {
   isPlaceholder: boolean;
   cached: boolean;
 }
-type ThemeId = "dark" | "paper" | "black" | "star" | "green" | "gray" | "custom";
+type ThemeId = "dark" | "paper" | "star" | "green" | "gray";
 interface Prefs {
   fontSize: number;
   lineHeight: number;
   theme: ThemeId;
-  customColor?: string; // 自定义主题色（hex）
-  customAlpha?: number; // 自定义透明度 0.2-1
   rate?: number; // TTS 语速 0.5-1.5
   voiceURI?: string; // TTS 发音人
 }
@@ -29,32 +27,14 @@ interface ThemeSpec {
 const PRESETS: Record<Exclude<ThemeId, "custom">, { name: string; spec: ThemeSpec }> = {
   dark: { name: "暗色", spec: { bg: "#171717", text: "#e5e5e5", sub: "rgba(229,229,229,.45)", dark: true } },
   paper: { name: "羊皮纸", spec: { bg: "#f5efdc", text: "#3b3021", sub: "rgba(59,48,33,.55)", dark: false } },
-  black: { name: "纯黑", spec: { bg: "#000000", text: "#a3a3a3", sub: "rgba(163,163,163,.45)", dark: true } },
   star: { name: "星空蓝", spec: { bg: "#141f33", text: "#c7d3e8", sub: "rgba(199,211,232,.5)", dark: true } },
   green: { name: "护眼绿", spec: { bg: "#cfe6cf", text: "#2b3a2c", sub: "rgba(43,58,44,.55)", dark: false } },
   gray: { name: "柔和灰", spec: { bg: "#e4e4e1", text: "#3a3a3a", sub: "rgba(58,58,58,.55)", dark: false } },
 };
 
-const hex2rgb = (hex: string) => {
-  const m = hex.replace("#", "");
-  const n = m.length === 3 ? m.split("").map((c) => c + c).join("") : m;
-  const v = parseInt(n.slice(0, 6), 16);
-  return { r: (v >> 16) & 255, g: (v >> 8) & 255, b: v & 255 };
-};
-
-// 自定义主题：按「颜色亮度 × 透明度」与黑底混合后的亮度决定文字用亮色还是暗色
+// 主题：5 个预设；历史遗留的 custom/纯黑等已下线取值统一落到暗色
 const resolveTheme = (p: Prefs): ThemeSpec => {
-  if (p.theme !== "custom" || !p.customColor) return PRESETS[p.theme]?.spec ?? PRESETS.dark.spec;
-  const { r, g, b } = hex2rgb(p.customColor);
-  const a = Math.min(Math.max(p.customAlpha ?? 1, 0.2), 1);
-  const lum = ((0.299 * r + 0.587 * g + 0.114 * b) / 255) * a;
-  const dark = lum < 0.5;
-  return {
-    bg: `rgba(${r},${g},${b},${a})`,
-    text: dark ? "#e5e5e5" : "#333333",
-    sub: dark ? "rgba(229,229,229,.5)" : "rgba(51,51,51,.55)",
-    dark,
-  };
+  return PRESETS[p.theme]?.spec ?? PRESETS.dark.spec;
 };
 
 const loadPrefs = (): Prefs => {
@@ -70,12 +50,6 @@ const loadPrefs = (): Prefs => {
 // —— 线性图标（Feather 风格，currentColor 跟随文字色）——
 const ICONS: Record<string, React.ReactNode> = {
   back: <polyline points="15 18 9 12 15 6" />,
-  home: (
-    <>
-      <path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z" />
-      <polyline points="9 22 9 12 15 12 15 22" />
-    </>
-  ),
   shelf: (
     <>
       <path d="M4 19.5A2.5 2.5 0 016.5 17H20" />
@@ -203,6 +177,21 @@ const splitSentences = (text: string): string[] => {
   return out.length ? out : [text];
 };
 
+// 可选发音人：只要中文；排除 iOS 内置 Eloquence 系列（机械音明显，体验差）。
+// 用户在系统里另外下载的中文发音人（增强版/Siri 声音等）会随 voiceschanged 自动进入列表。
+const isZhVoice = (v: SpeechSynthesisVoice) => /^zh/i.test(v.lang) && !/eloquence/i.test(v.voiceURI);
+
+// 同名发音人的区分标签：系统里「婷婷」和「婷婷优化版」是两条不同音质的语音，但 name 可能相同，
+// 只有 voiceURI 不同（优化/高级版 URI 里带 enhanced/premium 等标识）——从 URI 提取标签给用户看
+const voiceTag = (v: SpeechSynthesisVoice): string => {
+  const uri = v.voiceURI.toLowerCase();
+  if (uri.includes("enhanced")) return "优化版";
+  if (uri.includes("premium")) return "高级版";
+  if (uri.includes("siri")) return "Siri";
+  if (uri.includes("compact") || uri.includes("ttsbundle")) return "标准版";
+  return uri.split(/[.:]/).filter(Boolean).pop() ?? v.voiceURI; // 兜底：URI 最后一段
+};
+
 // 阅读器：滚动模式；>500px 为 PC 布局（内容固定宽，左右紧贴工具栏），否则手机布局（顶栏+底栏+两侧悬浮钮）
 export default function Reader() {
   const { id, idx: idxParam } = useParams();
@@ -240,6 +229,18 @@ export default function Reader() {
   const paraRefs = useRef<(HTMLParagraphElement | null)[]>([]); // 段落节点：朗读从当前可视段落开始
   const ttsStopped = useRef(false); // 用户停止 / 切章打断标志（避免 cancel 触发的 onend 继续往下读）
   const autoNext = useRef(false); // 本章读完 → 自动续读下一章
+  // TTS 引擎卡死自愈（症状：点朗读一直没声音，刷新页面都救不回来，只有重启浏览器才行）
+  const curUtter = useRef<SpeechSynthesisUtterance | null>(null); // 持有当前 Utterance 防 GC（Chrome 旧 bug：被提前回收会无声且 onend 不触发）
+  const wdt = useRef<ReturnType<typeof setTimeout> | null>(null); // 起播/读句看门狗
+  const wdtRetried = useRef(false); // 引擎假死只自动重试一次，仍不行就提示重启浏览器
+  const tapGuard = useRef(0); // 弹层关闭后 500ms 内：吞掉同一次点按穿透到下层元素的合成 click（见 closeSheet）
+  // 弹层关闭统一入口：记录护栏时间戳。关闭导致弹层卸载后，部分浏览器会把这次点按的
+  // 合成 click 重新定位到此刻位于同一坐标的下层元素（目录场景 = 正下方章节行 → 误跳章），
+  // preventDefault 在这些场景拦不住，用时间戳在目标侧兜底忽略。
+  const closeSheet = (setter: (v: boolean) => void) => () => {
+    tapGuard.current = Date.now() + 500;
+    setter(false);
+  };
 
   // TTS 发音人列表（浏览器异步加载）
   useEffect(() => {
@@ -250,8 +251,28 @@ export default function Reader() {
     return () => window.speechSynthesis.removeEventListener("voiceschanged", load);
   }, []);
 
-  // 只保留中文发音人（zh-CN / zh-TW / zh-HK …）；已保存的旧值不是中文时清掉，避免选中项对不上列表
-  const zhVoices = useMemo(() => voices.filter((v) => /^zh/i.test(v.lang)), [voices]);
+  // 只保留中文发音人（排除 Eloquence）；按 voiceURI 去重防系统返回完全相同的条目；
+  // 已保存的旧值不在列表时清掉，避免选中项对不上
+  const zhVoices = useMemo(() => {
+    const seen = new Set<string>();
+    return voices.filter((v) => isZhVoice(v) && !seen.has(v.voiceURI) && seen.add(v.voiceURI));
+  }, [voices]);
+  // 出现 ≥2 次的名字需要用 URI 标签区分（如「婷婷」与「婷婷优化版」）
+  const dupVoiceNames = useMemo(() => {
+    const count = new Map<string, number>();
+    zhVoices.forEach((v) => count.set(v.name, (count.get(v.name) ?? 0) + 1));
+    return new Set([...count].filter(([, n]) => n > 1).map(([name]) => name));
+  }, [zhVoices]);
+
+  // 朗读中每造一个 Utterance 都从这里实时读偏好——设置面板改语速/发音人，下一句立即生效
+  const prefsRef = useRef(prefs);
+  useEffect(() => {
+    prefsRef.current = prefs;
+  }, [prefs]);
+  const voicesRef = useRef<SpeechSynthesisVoice[]>([]);
+  useEffect(() => {
+    voicesRef.current = voices;
+  }, [voices]);
   useEffect(() => {
     if (!voices.length) return;
     if (prefs.voiceURI && !zhVoices.some((v) => v.voiceURI === prefs.voiceURI)) setPrefs((p) => ({ ...p, voiceURI: undefined }));
@@ -340,7 +361,7 @@ export default function Reader() {
     return () => {
       alive = false;
       ttsStopped.current = true; // 切章/卸载：打断朗读，且不让 onend 继续读旧章
-      window.speechSynthesis?.cancel();
+      resetTts(); // resume+cancel 复位，防引擎假死
       setSpeaking(false);
       setSpoken(null);
     };
@@ -445,9 +466,27 @@ export default function Reader() {
   };
 
   // —— TTS：按句链式朗读 ——
+  const clearWatchdog = () => {
+    if (wdt.current) {
+      clearTimeout(wdt.current);
+      wdt.current = null;
+    }
+  };
+  // 引擎复位：先 resume 再 cancel——对 paused 状态的队列直接 cancel 无效，这是「卡住没声音」的常见成因
+  const resetTts = () => {
+    clearWatchdog();
+    curUtter.current = null;
+    const synth = window.speechSynthesis;
+    if (!synth) return;
+    try {
+      synth.resume();
+      synth.cancel();
+    } catch {}
+  };
+
   const stopTts = () => {
     ttsStopped.current = true;
-    window.speechSynthesis?.cancel();
+    resetTts();
     setSpeaking(false);
     setSpoken(null);
   };
@@ -465,19 +504,20 @@ export default function Reader() {
     return Math.max(0, paras.length - 1);
   };
 
-  // 从第 start 段开始读（句粒度）；读完本章且有下一章 → 自动跳过去接着读
-  const speakFrom = (start: number) => {
+  // 从第 startP 段第 startS 句开始读（句粒度）；读完本章且有下一章 → 自动跳过去接着读。
+  // 语速/发音人在每句创建 Utterance 时从 prefsRef/voicesRef 实时取，设置改动下一句生效。
+  const speakFrom = (startP: number, startS = 0) => {
     const synth = window.speechSynthesis;
     if (!synth || !paras.length) return;
     ttsStopped.current = false;
-    const voice = zhVoices.find((v) => v.voiceURI === prefs.voiceURI) ?? null;
     // 展平成句子队列：{p 段落下标, s 句下标, text}
     const queue: { p: number; s: number; text: string }[] = [];
     paraSents.forEach((ss, p) => ss.forEach((text, s) => queue.push({ p, s, text })));
-    let i = queue.findIndex((it) => it.p >= start);
+    let i = queue.findIndex((it) => it.p > startP || (it.p === startP && it.s >= startS));
     if (i < 0) i = queue.length;
     const speakNext = () => {
       if (ttsStopped.current) return;
+      clearWatchdog();
       if (i >= queue.length) {
         setSpeaking(false);
         setSpoken(null);
@@ -491,28 +531,91 @@ export default function Reader() {
       }
       const cur = queue[i++];
       setSpoken({ p: cur.p, s: cur.s }); // 高亮正在朗读的句子
+      const voice = voicesRef.current.filter(isZhVoice).find((v) => v.voiceURI === prefsRef.current.voiceURI) ?? null;
       const u = new SpeechSynthesisUtterance(cur.text);
+      curUtter.current = u; // 持引用防 GC：utterance 被提前回收会无声且 onend 永不触发
       u.lang = voice?.lang ?? "zh-CN";
       if (voice) u.voice = voice;
-      u.rate = prefs.rate ?? 1;
-      u.onend = speakNext;
+      u.rate = prefsRef.current.rate ?? 1;
+      u.onstart = () => {
+        clearWatchdog();
+        wdtRetried.current = false; // 引擎已恢复，后续仍可自愈重试
+        // 起播后兜底：onend 偶发不触发（Chrome/Safari 老毛病），按文本长度估时，超时自动放行下一句
+        wdt.current = setTimeout(() => {
+          if (ttsStopped.current) return;
+          resetTts();
+          speakNext();
+        }, Math.max(4000, cur.text.length * 600) / (prefsRef.current.rate ?? 1));
+      };
+      u.onend = () => {
+        if (ttsStopped.current) return;
+        clearWatchdog();
+        speakNext();
+      };
       u.onerror = () => {
         if (!ttsStopped.current) {
           setSpeaking(false);
           setSpoken(null);
         }
       };
+      synth.resume(); // 解除 paused 卡死；正常状态下无副作用
       synth.speak(u);
+      // 起播看门狗：3s 内 onstart 没来 = 引擎假死（点了朗读一直没声音），cancel 后重试本句一次
+      wdt.current = setTimeout(() => {
+        if (ttsStopped.current) return;
+        if (wdtRetried.current) {
+          // 重试仍无声：引擎彻底假死，只能提示用户重启浏览器
+          setSpeaking(false);
+          setSpoken(null);
+          setToast("语音引擎无响应，请完全退出浏览器后重试");
+          return;
+        }
+        wdtRetried.current = true;
+        resetTts();
+        i--; // 回退当前句重试
+        speakNext();
+      }, 3000);
     };
     setSpeaking(true);
     speakNext();
+  };
+
+  // 正文里当前选中的文字位置（段落下标 + 句下标）：选中即起点，「从这句开始朗读」
+  const selectionStart = (): { p: number; s: number } | null => {
+    const sel = window.getSelection();
+    if (!sel || sel.isCollapsed || !sel.rangeCount) return null;
+    const anchor = sel.anchorNode;
+    if (!anchor) return null;
+    const host = anchor.nodeType === 3 ? anchor.parentElement : (anchor as HTMLElement);
+    let p = -1;
+    for (let i = 0; i < paraRefs.current.length; i++) {
+      if (paraRefs.current[i]?.contains(host ?? null)) {
+        p = i;
+        break;
+      }
+    }
+    if (p < 0 || !paraRefs.current[p]) return null;
+    // 选中起点在段落全文中的偏移 → 落在哪一句
+    const range = sel.getRangeAt(0);
+    const pre = document.createRange();
+    pre.selectNodeContents(paraRefs.current[p]!);
+    pre.setEnd(range.startContainer, range.startOffset);
+    const off = pre.toString().length;
+    const ss = paraSents[p];
+    let acc = 0;
+    for (let s = 0; s < ss.length; s++) {
+      acc += ss[s].length;
+      if (off < acc) return { p, s };
+    }
+    return { p, s: ss.length - 1 };
   };
 
   const toggleTts = () => {
     if (!window.speechSynthesis) return setToast("浏览器不支持语音合成");
     if (speaking) return stopTts();
     if (!ch) return;
-    speakFrom(currentParaIndex()); // 从当前阅读位置开始，而不是从头
+    const from = selectionStart(); // 有选中文本 → 从选中句开始；否则从当前可视位置开始
+    speakFrom(from?.p ?? currentParaIndex(), from?.s ?? 0);
   };
 
   // 自动续读：新章正文就绪后从第一段接着读
@@ -554,7 +657,7 @@ export default function Reader() {
   return (
     <div className="fixed inset-0" style={{ background: theme.bg, color: theme.text }}>
       {/* 正文铺满全屏（不随工具栏显隐移动，避免阅读中内容跳动）；点击切换工具栏；PC 固定 640px */}
-      <div ref={scrollRef} onScroll={onScroll} onClick={() => setChrome((v) => !v)} className="no-scrollbar absolute inset-0 overflow-y-auto">
+      <div ref={scrollRef} onScroll={onScroll} onClick={() => { if (Date.now() < tapGuard.current) return; setChrome((v) => !v); }} className="no-scrollbar absolute inset-0 overflow-y-auto">
         <div className="mx-auto px-4 pt-16 pb-24 max-[500px]:px-5 min-[501px]:w-[640px] min-[501px]:pt-6 min-[501px]:pb-16" style={{ fontSize: prefs.fontSize, lineHeight: prefs.lineHeight }}>
           {ch ? (
             <>
@@ -598,13 +701,12 @@ export default function Reader() {
 
       {/* 以下全部悬浮定位（absolute），显隐不影响正文布局 */}
 
-      {/* 手机顶栏：默认隐藏，点击正文切换；左 icon 右文字；返回=上一个路由 */}
+      {/* 手机顶栏：默认隐藏，点击正文切换；左 icon 右文字；返回=上一个路由（首页即书架，不设「首页」入口） */}
       {chrome && (
         <div className="absolute inset-x-0 top-0 z-30 flex items-center gap-0.5 border-b px-1 py-1.5 backdrop-blur-sm min-[501px]:hidden" style={{ background: theme.bg, borderColor: "rgba(128,128,128,.25)" }}>
           <button onClick={() => nav(-1)} className="flex h-9 w-9 flex-none items-center justify-center opacity-75 hover:opacity-100" title="返回上一页">
             <Icon name="back" size={18} />
           </button>
-          <NavItem icon="home" label="首页" onClick={() => nav("/")} />
           <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
           <NavItem icon="globe" label="书源" onClick={openSources} />
           <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
@@ -614,7 +716,6 @@ export default function Reader() {
       {/* PC 左栏：≥900px 时紧贴正文左缘（留 12px 间隙），窄视口退回贴窗口边 */}
       {chrome && (
         <div className="absolute left-1 top-3 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2 min-[900px]:left-[calc(50%-320px)] min-[900px]:-translate-x-[calc(100%+12px)]">
-          <NavItem icon="home" label="首页" onClick={() => nav("/")} />
           <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
           <NavItem icon="globe" label="书源" onClick={openSources} />
           <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
@@ -678,80 +779,89 @@ export default function Reader() {
       )}
       {toast && <div className="absolute left-1/2 top-14 z-50 -translate-x-1/2 rounded-lg bg-neutral-700 px-3 py-1.5 text-xs text-neutral-100">{toast}</div>}
 
-      {/* 目录弹层：打开即把当前章滚到列表中央（tocRef 是滚动容器，curChRef 是当前章那一行） */}
+      {/* 目录弹层：头部（标题+关闭）与列表上下排列、列表内部滚动——「×」下面是面板容器而不是章节行，
+          从结构上根除点透；打开即把当前章滚到列表中央（tocRef 现在是列表自己的滚动容器） */}
       {showToc && (
-        <div ref={tocRef} className="absolute inset-0 z-40 overflow-y-auto bg-black/60" onClick={() => setShowToc(false)}>
-          <div className="mx-auto min-h-full min-[501px]:w-[640px] max-w-full p-4" style={{ background: theme.bg, color: theme.text }} onClick={(e) => e.stopPropagation()}>
-            <div className="sticky top-0 mb-2 flex items-center bg-inherit pb-2 pt-1">
+        <div className="absolute inset-0 z-40 bg-black/60" onClick={closeSheet(setShowToc)}>
+          <div className="mx-auto flex h-full min-[501px]:w-[640px] max-w-full flex-col p-4" style={{ background: theme.bg, color: theme.text }} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-2 flex flex-none items-center pb-2 pt-1">
               <h3 className="text-sm font-bold">目录</h3>
               <span className="ml-2 text-xs opacity-50">共 {chapters.length} 章</span>
-              <SheetClose onClose={() => setShowToc(false)} />
+              <SheetClose onClose={closeSheet(setShowToc)} />
             </div>
-            <div className="divide-y" style={{ borderColor: "rgba(128,128,128,.2)" }}>
-              {chapters.map((c) => (
-                <button
-                  key={c.idx}
-                  ref={c.idx === idx ? curChRef : undefined}
-                  onClick={() => {
-                    setShowToc(false);
-                    goChapter(c.idx);
-                  }}
-                  className={`block w-full truncate rounded px-2 py-2.5 text-left text-sm hover:opacity-100 ${c.idx === idx ? "bg-amber-400/10 font-medium text-amber-400" : "opacity-80"}`}
-                >
-                  {c.title}
-                  {c.cached && <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 align-middle" title="已缓存" />}
-                  {c.idx === idx && <span className="ml-2 text-xs opacity-50">· 当前</span>}
-                </button>
-              ))}
-              {!chapters.length && <div className="py-6 text-center text-sm opacity-50">目录加载中…</div>}
+            <div ref={tocRef} className="flex-1 overflow-y-auto" >
+              <div className="divide-y" style={{ borderColor: "rgba(128,128,128,.2)" }}>
+                {chapters.map((c) => (
+                  <button
+                    key={c.idx}
+                    ref={c.idx === idx ? curChRef : undefined}
+                    onClick={() => {
+                      if (Date.now() < tapGuard.current) return; // 保险丝：弹层刚关闭的合成 click 穿透，忽略
+                      setShowToc(false);
+                      goChapter(c.idx);
+                    }}
+                    className={`block w-full truncate rounded px-2 py-2.5 text-left text-sm hover:opacity-100 ${c.idx === idx ? "bg-amber-400/10 font-medium text-amber-400" : "opacity-80"}`}
+                  >
+                    {c.title}
+                    {c.cached && <span className="ml-1.5 inline-block h-1.5 w-1.5 rounded-full bg-emerald-500 align-middle" title="已缓存" />}
+                    {c.idx === idx && <span className="ml-2 text-xs opacity-50">· 当前</span>}
+                  </button>
+                ))}
+                {!chapters.length && <div className="py-6 text-center text-sm opacity-50">目录加载中…</div>}
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* 换源面板：后端并发搜全部启用源，只列拥有这本书的源，点击即换 */}
+      {/* 换源面板：后端并发搜全部启用源，只列拥有这本书的源，点击即换；头部与列表上下排列（同目录弹层，根除点透） */}
       {showSources && (
-        <div className="absolute inset-0 z-40 overflow-y-auto bg-black/60" onClick={() => !switching && setShowSources(false)}>
-          <div className="mx-auto min-h-full min-[501px]:w-[640px] max-w-full p-4" style={{ background: theme.bg, color: theme.text }} onClick={(e) => e.stopPropagation()}>
-            <div className="sticky top-0 mb-2 flex items-center gap-2 bg-inherit pb-2 pt-1">
+        <div className="absolute inset-0 z-40 bg-black/60" onClick={() => !switching && closeSheet(setShowSources)()}>
+          <div className="mx-auto flex h-full min-[501px]:w-[640px] max-w-full flex-col p-4" style={{ background: theme.bg, color: theme.text }} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-2 flex flex-none items-center gap-2 pb-2 pt-1">
               <h3 className="text-sm font-bold">换源</h3>
               <span className="truncate text-xs opacity-50">《{bookName || "…"}》</span>
-              <SheetClose onClose={() => setShowSources(false)} />
+              <SheetClose onClose={closeSheet(setShowSources)} />
             </div>
-            {(srcSearching || switching) && <div className="py-1 text-center text-xs opacity-60">{srcSearching ? "正在所有书源中搜索这本书…" : "正在换源…"}</div>}
-            {srcErr && <div className="mb-2 rounded-lg bg-red-500/15 px-3 py-2 text-xs text-red-400">{srcErr}</div>}
-            <div className="divide-y" style={{ borderColor: "rgba(128,128,128,.2)" }}>
-              {srcList.map((h) => (
-                <button
-                  key={h.sourceId}
-                  onClick={() => switchSource(h)}
-                  disabled={switching || h.current}
-                  className="block w-full py-2.5 text-left text-sm hover:opacity-100 disabled:opacity-50"
-                >
-                  <div className="flex items-center gap-2">
-                    <span className="font-medium opacity-90">{h.sourceName}</span>
-                    {h.current && <span className="rounded bg-amber-500 px-1.5 text-[10px] font-medium text-neutral-900">当前</span>}
-                    {h.name === bookName ? <span className="text-xs text-amber-400">《{h.name}》</span> : <span className="text-xs opacity-60">《{h.name}》</span>}
-                  </div>
-                  <div className="mt-0.5 truncate text-xs opacity-50">
-                    {h.author || "佚名"}
-                    {h.latestChapter ? ` · 最新：${fmtLatest(h.latestChapter)}` : ""}
-                  </div>
-                </button>
-              ))}
-              {!srcList.length && !srcSearching && !srcErr && <div className="py-6 text-center text-sm opacity-50">没有其他源收录这本书</div>}
+            {(srcSearching || switching) && <div className="flex-none py-1 text-center text-xs opacity-60">{srcSearching ? "正在所有书源中搜索这本书…" : "正在换源…"}</div>}
+            {srcErr && <div className="mb-2 flex-none rounded-lg bg-red-500/15 px-3 py-2 text-xs text-red-400">{srcErr}</div>}
+            <div className="flex-1 overflow-y-auto">
+              <div className="divide-y" style={{ borderColor: "rgba(128,128,128,.2)" }}>
+                {srcList.map((h) => (
+                  <button
+                    key={h.sourceId}
+                    onClick={() => {
+                      if (Date.now() < tapGuard.current) return; // 保险丝：弹层刚关闭的合成 click 穿透，忽略
+                      switchSource(h);
+                    }}
+                    disabled={switching || h.current}
+                    className="block w-full py-2.5 text-left text-sm hover:opacity-100 disabled:opacity-50"
+                  >
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium opacity-90">{h.sourceName}</span>
+                      {h.current && <span className="rounded bg-amber-500 px-1.5 text-[10px] font-medium text-neutral-900">当前</span>}
+                      {h.name === bookName ? <span className="text-xs text-amber-400">《{h.name}》</span> : <span className="text-xs opacity-60">《{h.name}》</span>}
+                    </div>
+                    <div className="mt-0.5 truncate text-xs opacity-50">
+                      {h.author || "佚名"}
+                      {h.latestChapter ? ` · 最新：${fmtLatest(h.latestChapter)}` : ""}
+                    </div>
+                  </button>
+                ))}
+                {!srcList.length && !srcSearching && !srcErr && <div className="py-6 text-center text-sm opacity-50">没有其他源收录这本书</div>}
+              </div>
             </div>
           </div>
         </div>
       )}
 
-      {/* 设置弹层：字号/行距/主题/语速/发音人，全部实时持久化到 localStorage */}
+      {/* 设置弹层：字号/行距/主题/语速/发音人，全部实时持久化到 localStorage；遮罩不加背景色，面板保留主题背景 */}
       {showSettings && (
-        <div className="absolute inset-0 z-40 bg-black/50" onClick={() => setShowSettings(false)}>
+        <div className="absolute inset-0 z-40" onClick={closeSheet(setShowSettings)}>
           <div className="absolute inset-x-0 bottom-0 rounded-t-2xl p-4 pb-8" style={{ background: theme.bg, color: theme.text, borderTop: "1px solid rgba(128,128,128,.35)" }} onClick={(e) => e.stopPropagation()}>
             <div className="mb-3 flex items-center">
               <h3 className="text-sm font-bold">设置</h3>
-              <SheetClose onClose={() => setShowSettings(false)} />
+              <SheetClose onClose={closeSheet(setShowSettings)} />
             </div>
             <div className="space-y-3 text-sm">
               <div className="flex items-center gap-3">
@@ -779,37 +889,8 @@ export default function Reader() {
                       {PRESETS[t].name}
                     </button>
                   ))}
-                  <button
-                    onClick={() => setPrefs((p) => ({ ...p, theme: "custom" }))}
-                    className={`rounded-lg px-2.5 py-1 text-xs ${prefs.theme === "custom" ? "bg-amber-500/90 text-neutral-900 ring-2 ring-amber-400" : "text-neutral-300"}`}
-                    style={prefs.theme === "custom" ? undefined : { background: "rgba(0,0,0,.35)" }}
-                  >
-                    自定义
-                  </button>
                 </div>
               </div>
-              {prefs.theme === "custom" && (
-                <div className="flex items-center gap-3">
-                  <span className="w-14 flex-none opacity-60">颜色</span>
-                  <input
-                    type="color"
-                    value={prefs.customColor ?? "#1a2b4c"}
-                    onChange={(e) => setPrefs((p) => ({ ...p, customColor: e.target.value }))}
-                    className="h-8 w-12 flex-none cursor-pointer rounded border p-0.5"
-                    style={{ background: "rgba(0,0,0,.35)", borderColor: "rgba(255,255,255,.15)" }}
-                  />
-                  <input
-                    type="range"
-                    min={0.2}
-                    max={1}
-                    step={0.05}
-                    value={prefs.customAlpha ?? 1}
-                    onChange={(e) => setPrefs((p) => ({ ...p, customAlpha: Number(e.target.value) }))}
-                    className="min-w-0 flex-1 accent-amber-500"
-                  />
-                  <span className="w-16 flex-none text-right text-xs opacity-70">{Math.round((prefs.customAlpha ?? 1) * 100)}%</span>
-                </div>
-              )}
               <div className="flex items-center gap-3">
                 <span className="w-14 opacity-60">语速</span>
                 <input
@@ -834,7 +915,8 @@ export default function Reader() {
                   <option value="">系统默认</option>
                   {zhVoices.map((v) => (
                     <option key={v.voiceURI} value={v.voiceURI}>
-                      {v.name}（{v.lang}）{v.localService ? "" : " · 在线"}
+                      {v.name}
+                      {dupVoiceNames.has(v.name) ? `（${voiceTag(v)}）` : ""}（{v.lang}）{v.localService ? "" : " · 在线"}
                     </option>
                   ))}
                 </select>
