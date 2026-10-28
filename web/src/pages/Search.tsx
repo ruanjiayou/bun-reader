@@ -20,7 +20,7 @@ interface Group {
   from: { sourceId: number; sourceName: string; bookUrl: string }[];
 }
 interface SSEvt {
-  type: "start" | "books" | "progress" | "end";
+  type: "start" | "books" | "progress" | "source-error" | "end";
   total?: number;
   q?: string;
   sourceId?: number;
@@ -28,6 +28,7 @@ interface SSEvt {
   books?: SBook[];
   done?: number;
   failed?: number;
+  error?: string;
 }
 
 const norm = (s: string) => s.replace(/[\s（(].*$/, "").trim();
@@ -36,6 +37,7 @@ export default function Search() {
   const [q, setQ] = useState("");
   const [groups, setGroups] = useState<Group[]>([]);
   const [prog, setProg] = useState<{ done: number; total: number; failed: number } | null>(null);
+  const [sourceErrors, setSourceErrors] = useState<{ sourceName: string; error: string }[]>([]);
   const [running, setRunning] = useState(false);
   const [msg, setMsg] = useState("");
   const [adding, setAdding] = useState<string | null>(null); // 正在加书架的 key
@@ -49,10 +51,17 @@ export default function Search() {
     abortRef.current = ac;
     setRunning(true);
     setGroups([]);
+    setProg(null);
+    setSourceErrors([]);
     setMsg("");
     try {
       const res = await fetch(`${API_BASE}/api/search?q=${encodeURIComponent(q.trim())}`, { signal: ac.signal });
-      const reader = res.body!.getReader();
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error ?? `搜索请求失败 ${res.status}`);
+      }
+      if (!res.body) throw new Error("搜索响应不支持流式读取");
+      const reader = res.body.getReader();
       const dec = new TextDecoder();
       let buf = "";
       for (;;) {
@@ -66,6 +75,8 @@ export default function Search() {
           if (!line.startsWith("data: ")) continue;
           const e: SSEvt = JSON.parse(line.slice(6));
           if (e.type === "progress" && e.done != null) setProg({ done: e.done, total: e.total!, failed: e.failed! });
+          if (e.type === "source-error")
+            setSourceErrors((errors) => [...errors, { sourceName: e.sourceName ?? `书源#${e.sourceId}`, error: e.error ?? "未知错误" }]);
           if (e.type === "books" && e.books?.length) {
             setGroups((g) => {
               const next = [...g];
@@ -140,6 +151,19 @@ export default function Search() {
           已完成 {prog.done}/{prog.total} 个源{prog.failed ? ` · ${prog.failed} 个失败` : ""}
           {running && <span className="ml-1 animate-pulse">…</span>}
         </div>
+      )}
+      {!!sourceErrors.length && (
+        <details className="mb-3 rounded-lg bg-neutral-800 px-3 py-2 text-sm text-neutral-400">
+          <summary className="cursor-pointer">失败书源详情（{sourceErrors.length}）</summary>
+          <ul className="mt-2 space-y-1">
+            {sourceErrors.map((failure, i) => (
+              <li key={`${failure.sourceName}-${i}`}>
+                <span className="text-neutral-300">{failure.sourceName}：</span>
+                {failure.error}
+              </li>
+            ))}
+          </ul>
+        </details>
       )}
       {msg && <div className="mb-3 rounded-lg bg-neutral-800 px-3 py-2 text-sm text-amber-400">{msg}</div>}
 

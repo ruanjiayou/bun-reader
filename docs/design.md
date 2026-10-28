@@ -67,14 +67,18 @@ SQLite 表 + 磁盘文件：
 | `users` | id, username, password_hash, nickname, avatar, created_at | 多用户；nickname/avatar 为可选资料（avatar=128px dataURL） |
 | `sources` | id, name, enabled, "group", json, type, code, last_use_at | **全局共享**；json 存源定义（rules=规则原文 / script=表单数据），code 存生成脚本 |
 | `rate_states` | source_id, cap, high, window_ms, last_fail_at | 缓存自适应限速频率（按书源持久化） |
-| `books` | id, user_id, book_url, source_id, name, author, cover, intro, latest_chapter, last_check_at | 书架；唯一约束 (user_id, book_url, source_id) |
+| `books` | id, user_id, book_url, source_id, name, author, cover, intro, latest_chapter, last_check_at, updated_at | 书架；唯一约束 (user_id, book_url, source_id)；updated_at = 最近「发现新章节」时间（书架「最近更新」排序） |
 | `chapters` | id, book_id, idx, title, url | 目录快照，加书架时抓取，按需刷新 |
 | `chapter_cache` | content_key(sha1(book_url)), idx, file_path, size, is_placeholder, fetched_at | 正文索引；文件在 `data/cache/` |
 | `cache_jobs` | content_key, total, done, failed, status, updated_at | 全本缓存后台任务进度（多用户共享） |
 | `progress` | book_id, chapter_idx, scroll_pos, updated_at | 随 book 按用户隔离 |
 | `settings` | user_id, key, value | 阅读偏好 |
 
-**正文落盘**：`data/cache/{sha1(book_url)}/{idx}.txt`。库只存元数据；同一本书不同用户天然共享缓存；清理即删目录。
+**建表与加列**：`db.ts` 启动时 `CREATE TABLE IF NOT EXISTS` 幂等建表，**表结构以 CREATE 语句为唯一事实来源**——加列直接改 CREATE；存量库由开发者手动执行一次 `ALTER TABLE`，不再保留启动期迁移代码（SQLite 无 `ADD COLUMN IF NOT EXISTS`，靠 try/catch 的迁移块已删除）。
+
+**正文落盘**：`data/cache/{sha1(book_url)}/{idx}.txt`。库只存元数据；同一本书不同用户天然共享缓存；清理即删目录。服务端以异步文件 I/O 读写正文，避免大文件操作阻塞请求处理。
+
+**缓存任务恢复**：全本缓存任务只在当前服务进程内运行。服务启动时，残留的 `running` 状态会改为 `stopped`，避免 UI 显示一个实际已中断的任务仍在运行。
 
 **疑似占位章节判定**（双重规则，命中任一即标记）：
 
@@ -86,7 +90,7 @@ SQLite 表 + 磁盘文件：
 ## 5. API 概要
 
 - **书源**：`GET/POST/DELETE /sources`（URL 批量导入 / 粘贴 JSON / 文件上传）、`POST /sources/:id/test`（体检）、`POST /sources/:id/debug`（SSE 调试日志，`{bookUrl}` 调书籍 / `{mode:"search",key}` 调搜索）
-- **搜索**：`GET /search?q=` — 并发扇出全部启用源（每源并发 1、间隔 300ms、总超时 15s），**SSE 流式返回**；前端按书名+作者聚合去重
+- **搜索**：`GET /search?q=` — 并发扇出全部启用源（每源并发 1、间隔 300ms、总超时 15s），**SSE 流式返回**；前端按书名+作者聚合去重，并可查看逐源失败原因
 - **书架**：`GET /books`、`POST /books`（秒回落库，目录后台异步补）、`DELETE /books/:id`
 - **目录**：`GET /books/:id/category`（`?refresh=1` 强制刷新）
 - **正文**：`GET /books/:id/content/:idx`（`?refresh=1` 绕过缓存重抓）
@@ -106,7 +110,7 @@ SQLite 表 + 磁盘文件：
 | 路由 | 页面 | 要点 |
 |---|---|---|
 | `/` | 书架 | 手机 3 列网格 / 桌面列表；排序 tab（默认「最近阅读」，可切「最近更新」）。**右上角账号区**：未登录=登录按钮；已登录=头像圆钮（无头像显示首字）→ 下拉（昵称 / 设置 / 退出登录）。**移出书架 = 右键或长按 500ms**（移动端没有右键），长按触发后吞掉同一次 click 不进详情。列表有**加载中状态**（转圈 + 「书架加载中…」），请求未回不显示「空书架」 |
-| `/search` | 搜索 | SSE 实时追加结果卡片，聚合去重。布局：`← 书架` 在左，输入框中间（**16px 字号防 iOS 聚焦缩放**，框内有 × 清空），搜索按钮在右。登录/设置页输入框同为 16px |
+| `/search` | 搜索 | SSE 实时追加结果卡片，聚合去重；搜索进度随新一轮搜索重置，失败书源及错误原因可展开查看。布局：`← 书架` 在左，输入框中间（**16px 字号防 iOS 聚焦缩放**，框内有 × 清空），搜索按钮在右。登录/设置页输入框同为 16px |
 | `/book/:id` | 书籍详情 | 封面左（垂直居中）、信息右（结构不变）；**操作按钮一排在卡片下方**：开始阅读/继续阅读（主按钮）、移出书架、检查更新；**缓存信息 + 缓存全本/停止/释放 在页面右上角**（与 ← 书架同一行）；目录**分页每页 100 章**（正/倒序先排序再切片，首次载入定位到「上次读到」所在页，切排序回第 1 页），目录有加载中状态 |
 | `/book/:id/read/:idx` | 阅读器 | 见第四部分 |
 | `/settings` | 账号设置 | 头像（点击圆形选图，本地压缩预览，随「保存资料」提交）、昵称、修改密码（旧密码 + 新密码×2）；保存后通知 App 刷新 `/auth/me`，书架头像立即生效 |

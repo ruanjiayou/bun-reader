@@ -6,7 +6,7 @@ import { searchSource } from "../source/engine";
 import { normalizeSource } from "../source/rule";
 import type { AuthEnv } from "../auth";
 
-// 聚合搜索：SSE 扇出到所有启用书源，逐源推送结果；并发 4、单源 15s 超时、失败静默计数
+// 聚合搜索：SSE 扇出到所有启用书源，逐源推送结果；并发 4、单源 15s 超时
 export const searchRoutes = new Hono<AuthEnv>();
 
 searchRoutes.get("/", async (c) => {
@@ -34,8 +34,14 @@ searchRoutes.get("/", async (c) => {
               new Promise<never>((_, rej) => setTimeout(() => rej(new Error("超时")), 15000)),
             ]);
             if ((found as any[]).length) send({ type: "books", sourceId: s.id, sourceName: s.name, books: found });
-          } catch {
+          } catch (e) {
             failed++;
+            send({
+              type: "source-error",
+              sourceId: s.id,
+              sourceName: s.name,
+              error: e instanceof Error ? e.message : String(e),
+            });
           }
           done++;
           send({ type: "progress", done, total, failed });

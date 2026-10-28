@@ -11,7 +11,7 @@ sqlite.exec("PRAGMA journal_mode = WAL;");
 sqlite.exec("PRAGMA foreign_keys = ON;");
 
 // ponytail: drizzle-kit 在 Windows 下 push 需要原生驱动，改为启动时幂等建表；
-// 加列时在此处补 ALTER ... IF NOT EXISTS 语义（SQLite 无 ADD COLUMN IF NOT EXISTS，用 try/catch）
+// 表结构为唯一事实来源——加列直接改下面的 CREATE TABLE（存量库手动执行过 ALTER，不再保留启动期迁移）。
 sqlite.exec(`
 CREATE TABLE IF NOT EXISTS users (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -97,24 +97,7 @@ CREATE TABLE IF NOT EXISTS settings (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS settings_user_key ON settings(user_id, key);
 `);
-// 脚本引擎（M2 v2）：存量库补列（SQLite 无 ADD COLUMN IF NOT EXISTS，幂等靠 try/catch）
-try {
-  sqlite.exec("ALTER TABLE sources ADD COLUMN type TEXT NOT NULL DEFAULT 'rules'");
-} catch {}
-try {
-  sqlite.exec("ALTER TABLE sources ADD COLUMN code TEXT");
-} catch {}
-// 书籍内容更新时间（书架「最近更新」排序）：存量库补列并回填一次（用 last_check_at 或 created_at 兜底）
-try {
-  sqlite.exec("ALTER TABLE books ADD COLUMN updated_at INTEGER");
-  sqlite.exec("UPDATE books SET updated_at = COALESCE(last_check_at, created_at) WHERE updated_at IS NULL");
-} catch {}
-// 用户资料（昵称/头像 dataURL）：存量库补列
-try {
-  sqlite.exec("ALTER TABLE users ADD COLUMN nickname TEXT");
-} catch {}
-try {
-  sqlite.exec("ALTER TABLE users ADD COLUMN avatar TEXT");
-} catch {}
+// 后台任务仅存在于当前进程内；服务重启后将残留的 running 状态标记为已停止。
+sqlite.query("UPDATE cache_jobs SET status = 'stopped', updated_at = ? WHERE status = 'running'").run(Date.now());
 
 export const db = drizzle(sqlite, { schema });

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync, rmSync } from "node:fs";
-import { and, eq, inArray } from "drizzle-orm";
+import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { and, count, eq, inArray } from "drizzle-orm";
 import { db, sqlite } from "../db";
 import { books, chapters, chapterCache, progress, sources } from "../schema";
 import { isPlaceholder } from "../source/engine";
@@ -16,6 +16,16 @@ export const bookRoutes = new Hono<AuthEnv>();
 const contentKey = (bookUrl: string) => createHash("sha1").update(bookUrl).digest("hex");
 const cacheDir = (key: string) => `data/cache/${key}`;
 
+async function fileExists(filePath: string): Promise<boolean> {
+  try {
+    await access(filePath);
+    return true;
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw e;
+  }
+}
+
 async function loadEngine(sourceId: number | null): Promise<Engine> {
   if (!sourceId) throw new Error("书籍未绑定书源");
   const [row] = await db.select().from(sources).where(eq(sources.id, sourceId));
@@ -27,9 +37,9 @@ async function loadEngine(sourceId: number | null): Promise<Engine> {
 async function fetchAndSave(eng: Engine, url: string, key: string, idx: number) {
   const raw = await eng.content(url);
   if (!raw.trim()) throw new Error("正文抓取为空");
-  mkdirSync(cacheDir(key), { recursive: true });
+  await mkdir(cacheDir(key), { recursive: true });
   const filePath = `${cacheDir(key)}/${idx}.txt`;
-  writeFileSync(filePath, raw);
+  await writeFile(filePath, raw);
   const ph = isPlaceholder(raw);
   await db
     .insert(chapterCache)
@@ -78,7 +88,7 @@ async function runCacheJob(eng: any, key: string, list: { idx: number; url: stri
         .select({ filePath: chapterCache.filePath })
         .from(chapterCache)
         .where(and(eq(chapterCache.contentKey, key), eq(chapterCache.idx, ch.idx)));
-      if (exists && existsSync(exists.filePath)) {
+      if (exists && (await fileExists(exists.filePath))) {
         const cur = jobStmt.get.get(key) as any;
         jobStmt.update.run((cur?.done ?? 0) + 1, cur?.failed ?? 0, "running", Date.now(), key);
         cacheLog("info", `第 ${ch.idx + 1} 章《${ch.title}》阅读时已缓存，跳过`);
@@ -181,17 +191,10 @@ bookRoutes.post("/:id/cache-release", async (c) => {
   const key = contentKey(book.bookUrl);
   const stopper = runningJobs.get(key);
   if (stopper) stopper.stop = true;
-  const rows = await db.select({ idx: chapterCache.idx, filePath: chapterCache.filePath }).from(chapterCache).where(eq(chapterCache.contentKey, key));
+  const rows = await db.select({ idx: chapterCache.idx }).from(chapterCache).where(eq(chapterCache.contentKey, key));
   await db.delete(chapterCache).where(eq(chapterCache.contentKey, key));
   sqlite.query("DELETE FROM cache_jobs WHERE content_key = ?").run(key);
-  for (const r of rows) {
-    try {
-      unlinkSync(r.filePath);
-    } catch {}
-  }
-  try {
-    rmSync(cacheDir(key), { recursive: true, force: true });
-  } catch {}
+  await rm(cacheDir(key), { recursive: true, force: true });
   return c.json({ released: rows.length });
 });
 
@@ -308,12 +311,13 @@ bookRoutes.get("/", async (c) => {
   const ids = rows.map((r) => r.id);
   const progs = await db.select().from(progress).where(inArray(progress.bookId, ids));
   const progMap = new Map(progs.map((p) => [p.bookId, p]));
-  const counts = await db
-    .select({ bookId: chapters.bookId, n: chapters.id })
-    .from(chapters)
-    .where(inArray(chapters.bookId, ids));
   const countMap = new Map<number, number>();
-  for (const r of counts) countMap.set(r.bookId, (countMap.get(r.bookId) ?? 0) + 1);
+  const counts = await db
+    .select({ bookId: chapters.bookId, count: count() })
+    .from(chapters)
+    .where(inArray(chapters.bookId, ids))
+    .groupBy(chapters.bookId);
+  for (const r of counts) countMap.set(r.bookId, r.count);
   return c.json(
     rows.map((b) => ({
       ...b,
@@ -475,9 +479,13 @@ bookRoutes.get("/:id/content/:idx", async (c) => {
   const [cached] = refresh
     ? []
     : await db.select().from(chapterCache).where(and(eq(chapterCache.contentKey, key), eq(chapterCache.idx, idx)));
-  if (cached && existsSync(cached.filePath)) {
-    const content = readFileSync(cached.filePath, "utf-8");
-    return c.json({ idx, title: ch.title, content, isPlaceholder: cached.isPlaceholder, cached: true });
+  if (cached) {
+    try {
+      const content = await readFile(cached.filePath, "utf-8");
+      return c.json({ idx, title: ch.title, content, isPlaceholder: cached.isPlaceholder, cached: true });
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
+    }
   }
 
   // 抓取走同源限速器（与全本缓存任务共享同一预算：阅读请求计入频率，窗口满时排队等待）

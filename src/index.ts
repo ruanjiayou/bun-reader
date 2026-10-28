@@ -40,7 +40,7 @@ app.route("/gw/reader/auth", auth);
 app.route("/gw/reader/api", api);
 
 // SPA：挂在 /reader 前缀下，未命中路径回退 index.html（缓存头见 cacheStatic）
-const webDist = "web/dist";
+const webDist = "web/reader";
 app.get("/reader", (c) => c.redirect("/reader/")); // 无尾斜杠也进应用（须注册在 /reader/* 通配之前，否则被截胡返回空响应）
 app.use("/reader/*", serveStatic({ root: webDist, rewriteRequestPath: (p) => p.slice("/reader".length) || "/", onFound: cacheStatic }));
 app.get("/reader/*", serveStatic({ root: webDist, path: "index.html", onFound: cacheStatic }));
