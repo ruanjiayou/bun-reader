@@ -3,7 +3,7 @@ import { serveStatic } from "hono/bun";
 import { auth, requireAuth, type AuthEnv } from "./auth";
 import { log, requestLogger } from "./log";
 import { sourceRoutes } from "./routes/sources";
-import { bookRoutes } from "./routes/books";
+import { bookRoutes, startBookUpdateScheduler } from "./routes/books";
 import { searchRoutes } from "./routes/search";
 
 const app = new Hono<AuthEnv>();
@@ -48,6 +48,8 @@ app.get("/", (c) => c.redirect("/reader/"));
 
 const port = Number(process.env.PORT ?? 8094);
 log.info("boot", `bun-reader listening on http://localhost:${port}`);
+// 书籍更新巡检（默认每 6h；UPDATE_INTERVAL_MS=0 关闭；用户上传封面不被覆盖）
+startBookUpdateScheduler();
 // idleTimeout 默认 10s：目录多页翻页/全本缓存等长请求会被掐（warn: Bun.serve() timed out + Reader released），
 // 调到上限 255s（Bun 允许的最大值）
 Bun.serve({ port, idleTimeout: 255, fetch: app.fetch });

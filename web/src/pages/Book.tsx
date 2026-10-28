@@ -40,7 +40,59 @@ export default function Book() {
   const [refreshing, setRefreshing] = useState(false);
   const [cache, setCache] = useState<CacheStatus | null>(null);
   const [caching, setCaching] = useState(false);
+  const [editing, setEditing] = useState(false); // 编辑书籍元数据弹层
+  const [editForm, setEditForm] = useState<{ name: string; author: string; intro: string; latestChapter: string; cover: string }>({
+    name: "", author: "", intro: "", latestChapter: "", cover: "",
+  });
+  const [coverPreview, setCoverPreview] = useState("");
+  const [saving, setSaving] = useState(false);
   const pageInit = useRef(0); // 每本书首次拿到目录时，定位到「上次读到」所在页
+
+  // 把所选图片压缩成 dataURL（最长边 360px 的 JPEG）作为封面上传；限 2MB
+  const onCoverFile = (file?: File) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const img = new Image();
+      img.onload = () => {
+        const max = 360;
+        const scale = Math.min(1, max / Math.max(img.width, img.height));
+        const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
+        const cv = document.createElement("canvas");
+        cv.width = w; cv.height = h;
+        cv.getContext("2d")!.drawImage(img, 0, 0, w, h);
+        const data = cv.toDataURL("image/jpeg", 0.82);
+        if (data.length > 2_000_000) { setMsg("封面图片过大，请选更小的图"); return; }
+        setEditForm((f) => ({ ...f, cover: data }));
+        setCoverPreview(data);
+      };
+      img.src = reader.result as string;
+    };
+    reader.readAsDataURL(file);
+  };
+
+  const openEdit = () => {
+    if (!book) return;
+    setEditForm({ name: book.name, author: book.author, intro: book.intro, latestChapter: book.latestChapter, cover: book.cover });
+    setCoverPreview(book.cover);
+    setEditing(true);
+  };
+  const saveEdit = async () => {
+    setSaving(true);
+    try {
+      const r = await api<{ changed: number }>(`/api/books/${bookId}`, {
+        method: "PATCH",
+        body: JSON.stringify(editForm),
+      });
+      setEditing(false);
+      setMsg(r.changed > 0 ? "已保存修改" : "无改动");
+      await load();
+    } catch (e: any) {
+      setMsg(e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
 
   // 操作提示 4s 自动消失
   useEffect(() => {
@@ -253,6 +305,71 @@ export default function Book() {
           >
             {refreshing ? "检查中…" : "检查更新"}
           </button>
+          <button onClick={openEdit} className="rounded-lg bg-neutral-700 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-600">编辑</button>
+        </div>
+      )}
+
+      {/* 编辑书籍元数据：封面支持 URL 输入 + 上传图片；其余字段可选填 */}
+      {book && editing && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60" onClick={() => setEditing(false)}>
+          <div className="w-full max-w-lg rounded-t-2xl p-4 pb-8" style={{ background: "#262626", color: "#e5e5e5" }} onClick={(e) => e.stopPropagation()}>
+            <div className="mb-3 flex items-center">
+              <h3 className="text-sm font-bold">编辑书籍信息</h3>
+              <button onClick={() => setEditing(false)} className="ml-auto px-2 text-lg opacity-60 hover:opacity-100">×</button>
+            </div>
+            <div className="space-y-3">
+              <div>
+                <label className="mb-1 block text-xs opacity-60">书名</label>
+                <input value={editForm.name} onChange={(e) => setEditForm((f) => ({ ...f, name: e.target.value }))} className="w-full rounded-lg bg-neutral-700 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-500" />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs opacity-60">作者</label>
+                <input value={editForm.author} onChange={(e) => setEditForm((f) => ({ ...f, author: e.target.value }))} className="w-full rounded-lg bg-neutral-700 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-500" />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs opacity-60">简介</label>
+                <textarea value={editForm.intro} onChange={(e) => setEditForm((f) => ({ ...f, intro: e.target.value }))} rows={3} className="w-full resize-none rounded-lg bg-neutral-700 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-500" />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs opacity-60">最新章节</label>
+                <input value={editForm.latestChapter} onChange={(e) => setEditForm((f) => ({ ...f, latestChapter: e.target.value }))} className="w-full rounded-lg bg-neutral-700 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-500" />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs opacity-60">封面</label>
+                <div className="flex gap-3">
+                  {coverPreview ? (
+                    <img src={coverPreview} alt="" className="h-24 w-18 flex-none rounded-lg object-cover" />
+                  ) : (
+                    <div className="flex h-24 w-18 flex-none items-center justify-center rounded-lg bg-neutral-700 text-2xl">📕</div>
+                  )}
+                  <div className="flex min-w-0 flex-1 flex-col gap-2">
+                    <input
+                      value={editForm.cover.startsWith("data:") ? "" : editForm.cover}
+                      placeholder="粘贴封面 URL"
+                      onChange={(e) => { setEditForm((f) => ({ ...f, cover: e.target.value })); setCoverPreview(e.target.value); }}
+                      className="w-full rounded-lg bg-neutral-700 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-500"
+                    />
+                    <label className="cursor-pointer self-start rounded-lg bg-neutral-600 px-3 py-1.5 text-xs hover:bg-neutral-500">
+                      上传图片
+                      <input type="file" accept="image/*" className="hidden" onChange={(e) => onCoverFile(e.target.files?.[0])} />
+                    </label>
+                    {(editForm.cover || coverPreview) && (
+                      <button onClick={() => { setEditForm((f) => ({ ...f, cover: "" })); setCoverPreview(""); }} className="self-start text-xs text-red-400 hover:underline">
+                        清除封面
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <p className="mt-1 text-[11px] opacity-40">上传图片会自动压缩；以 data: 开头的封面不会被自动巡检覆盖。</p>
+              </div>
+            </div>
+            <div className="mt-4 flex gap-2">
+              <button onClick={saveEdit} disabled={saving} className="flex-1 rounded-lg bg-amber-500 py-2 text-sm font-medium text-neutral-900 hover:bg-amber-400 disabled:opacity-50">
+                {saving ? "保存中…" : "保存"}
+              </button>
+              <button onClick={() => setEditing(false)} className="rounded-lg bg-neutral-700 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-600">取消</button>
+            </div>
+          </div>
         </div>
       )}
 

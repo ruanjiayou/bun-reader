@@ -396,6 +396,13 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 - **读完自动续读下一章**：本章最后一句结束 → `replace` 导航到下一章 → 新章正文就绪后从第一段继续朗读；已是最后一章则提示「已读完本书最后一章」。
 - 停止/读完/切章时清除高亮（`spoken = null`）。
 - 切章 / 换源 / 卸载页面会打断朗读（`ttsStopped` 标志避免 cancel 触发的 onend 继续读旧章）。
+
+## 11. 定时巡检与书籍编辑
+
+- **定时巡检（后端）**：服务启动后启用后台定时器，每 `UPDATE_INTERVAL_MS`（默认 6×3600×1000，**0 关闭**）遍历全部书籍，逐本重抓目录比对章节数；仅「新增章节」才置 `updatedAt`（影响书架「最近更新」排序），纯检查不动排序时间。复用检查更新的抓取逻辑，按书源限速器限流、两本之间留 800ms 间隔，避免无头浏览器抢占。日志落 `data/logs`，不阻塞请求。
+- **用户上传封面受保护**：巡检以源站封面覆盖 `cover`，但若当前 `cover` 以 `data:` 开头（本地上传）则**保留不动**——用户自定义封面不会被源站更新冲掉。
+- **编辑书籍元数据**：`PATCH /api/books/:id`，仅更新传入字段（name/author/intro/latestChapter/cover）。封面校验：以 `data:` 开头须是 `data:image/`（上限 2MB，前端已压缩）；否则须为 http(s) URL；空串即清除。其余字段按长度截断（name≤200/author≤100/intro≤4000/latestChapter≤300）。
+- **前端编辑弹层**：书籍详情页新增「编辑」按钮 → 底部弹层（无背景遮罩色、面板实底），书名/作者/简介/最新章节为文本框；**封面 = URL 输入框 + 上传图片**二选一，上传时 canvas 压缩至最长边 360px 的 JPEG(0.82) 转 dataURL 预览，可「清除封面」。保存走 PATCH，成功 toast + 重新加载详情。
 - **引擎假死自愈**（症状：点朗读一直没声音，刷新页面无效，重启浏览器才恢复——Web Speech 引擎进入坏状态）：
   - **先 `resume()` 再 `cancel()`**：对 paused 状态的队列直接 cancel 无效，是假死最常见成因；所有打断/复位走统一的 `resetTts()`；
   - **持有当前 Utterance 引用**（`curUtter`）：Chrome 曾有 utterance 被提前 GC 导致无声且 onend 永不触发的 bug；

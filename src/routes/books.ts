@@ -423,6 +423,110 @@ bookRoutes.delete("/:id", async (c) => {
   return c.json({ ok: true });
 });
 
+// 编辑书籍元数据：仅更新传入的字段；封面可为远程 URL 或 dataURL（前端压缩后的上传图）
+// 约定：以 data: 开头的 cover 视为用户本地上传，巡检任务不会用源站封面覆盖它
+const COVER_MAX = 2_000_000; // dataURL 长度上限（约 1.5MB 图），防止库被超大封面撑爆
+bookRoutes.patch("/:id", async (c) => {
+  const uid = c.get("uid");
+  const bookId = Number(c.req.param("id"));
+  const [book] = await db.select().from(books).where(and(eq(books.id, bookId), eq(books.userId, uid)));
+  if (!book) return c.json({ error: "书籍不存在" }, 404);
+  const body = await c.req
+    .json<{ name?: string; author?: string; intro?: string; latestChapter?: string; cover?: string }>()
+    .catch(() => ({}) as any);
+  const patch: Partial<typeof book> = {};
+  if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim().slice(0, 200);
+  if (typeof body.author === "string") patch.author = body.author.slice(0, 100);
+  if (typeof body.intro === "string") patch.intro = body.intro.slice(0, 4000);
+  if (typeof body.latestChapter === "string") patch.latestChapter = body.latestChapter.slice(0, 300);
+  if (typeof body.cover === "string") {
+    const cv = body.cover.trim();
+    if (cv.startsWith("data:")) {
+      if (!/^data:image\//.test(cv)) return c.json({ error: "封面必须是图片" }, 400);
+      if (cv.length > COVER_MAX) return c.json({ error: "封面图片过大，请压缩后重试" }, 400);
+    } else if (cv && !/^(https?:)?\/\//i.test(cv)) {
+      return c.json({ error: "封面 URL 不合法" }, 400);
+    }
+    patch.cover = cv;
+  }
+  if (!Object.keys(patch).length) return c.json({ ok: true, changed: 0 });
+  await db.update(books).set(patch).where(eq(books.id, bookId));
+  log.info("edit", `《${book.name}》编辑元数据：${Object.keys(patch).join(", ")}`);
+  return c.json({ ok: true, changed: Object.keys(patch).length });
+});
+
+// ---------- 定时巡检：周期性检查全部书籍是否有新章节 ----------
+// 复用「检查更新」逻辑逐本重抓目录比对章节数；仅新增章节时才置 updatedAt（影响书架「最近更新」排序）。
+// 用户本地上传的封面（cover 以 data: 开头）不会被源站封面覆盖。
+let schedulerTimer: ReturnType<typeof setInterval> | null = null;
+let schedulerRunning = false;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+export function startBookUpdateScheduler() {
+  const interval = Number(process.env.UPDATE_INTERVAL_MS ?? 6 * 3600_000);
+  if (interval <= 0) return; // 显式置 0 关闭巡检
+  if (schedulerTimer) return;
+  schedulerTimer = setInterval(runScheduledUpdate, interval);
+  // 启动后先跑一次（错峰：等 30s 让服务其他初始化完成）
+  setTimeout(runScheduledUpdate, 30_000);
+  log.info("scheduler", `书籍更新巡检已启用，间隔 ${Math.round(interval / 60000)} 分钟`);
+}
+
+async function runScheduledUpdate() {
+  if (schedulerRunning) return;
+  schedulerRunning = true;
+  const startedAt = Date.now();
+  log.info("scheduler", "开始巡检全部书籍更新…");
+  try {
+    const all = await db.select().from(books);
+    let checked = 0;
+    let updated = 0;
+    let failed = 0;
+    for (const b of all) {
+      if (!b.sourceId) continue;
+      checked++;
+      try {
+        const eng = await loadEngine(b.sourceId);
+        const limiter = limiterFor(b.sourceId);
+        if (limiter) await limiter.acquire(b.sourceId);
+        const { info, toc } = await runWithBrowserMode("headless", () => snapshotToc(eng, b.bookUrl));
+        if (limiter) limiter.onSuccess(b.sourceId);
+        const oldCount = (await db.select({ idx: chapters.idx }).from(chapters).where(eq(chapters.bookId, b.id))).length;
+        const added = Math.max(0, toc.length - oldCount);
+        await db.delete(chapters).where(eq(chapters.bookId, b.id));
+        await db.insert(chapters).values(toc.map((ch, i) => ({ bookId: b.id, idx: i, title: ch.title, url: ch.url })));
+        // 用户上传的封面（data:）不动；其余以源站封面覆盖
+        const cover = b.cover.startsWith("data:") ? b.cover : info.cover || b.cover;
+        await db
+          .update(books)
+          .set({
+            name: info.name || b.name,
+            author: info.author || b.author,
+            intro: info.intro || b.intro,
+            cover,
+            latestChapter: info.latestChapter || info.latestChapterUrl || b.latestChapter,
+            lastCheckAt: new Date(),
+            ...(added > 0 ? { updatedAt: new Date() } : {}),
+          })
+          .where(eq(books.id, b.id));
+        if (added > 0) {
+          updated++;
+          log.info("scheduler", `《${b.name}》新增 ${added} 章（${oldCount} → ${toc.length}）`);
+        }
+      } catch (e: any) {
+        failed++;
+        log.warn("scheduler", `《${b.name}》巡检失败：${e?.message ?? e}`);
+      }
+      await sleep(800); // 两本书之间留间隔，避免无头浏览器抢占
+    }
+    log.info("scheduler", `巡检完成：检查 ${checked} 本，新增更新 ${updated} 本，失败 ${failed} 本（耗时 ${Math.round((Date.now() - startedAt) / 1000)}s）`);
+  } catch (e: any) {
+    log.error("scheduler", `巡检异常：${e?.message ?? e}`);
+  } finally {
+    schedulerRunning = false;
+  }
+}
+
 // 书籍详情 + 进度
 bookRoutes.get("/:id", async (c) => {
   const uid = c.get("uid");
