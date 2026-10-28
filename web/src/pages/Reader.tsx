@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, fmtLatest } from "../api";
+import { holdAudioSession, releaseAudioSession } from "../tts-audio";
 
 interface ContentResp {
   idx: number;
@@ -487,6 +488,7 @@ export default function Reader() {
   const stopTts = () => {
     ttsStopped.current = true;
     resetTts();
+    releaseAudioSession(); // 停读就归还音频会话
     setSpeaking(false);
     setSpoken(null);
   };
@@ -509,6 +511,7 @@ export default function Reader() {
   const speakFrom = (startP: number, startS = 0) => {
     const synth = window.speechSynthesis;
     if (!synth || !paras.length) return;
+    holdAudioSession(); // iOS：朗读期间把音频会话抬到 playback，静音开关打开也能外放
     ttsStopped.current = false;
     // 展平成句子队列：{p 段落下标, s 句下标, text}
     const queue: { p: number; s: number; text: string }[] = [];
@@ -523,8 +526,10 @@ export default function Reader() {
         setSpoken(null);
         if (chapters.some((c) => c.idx === idx + 1)) {
           autoNext.current = true; // 新章正文就绪后从第一段继续
+          // 会话先留着：续读发生在异步回调里，重新抢会话可能拿不到用户手势
           nav(`/book/${bookId}/read/${idx + 1}`, { replace: true });
         } else {
+          releaseAudioSession();
           setToast("已读完本书最后一章");
         }
         return;
@@ -554,6 +559,7 @@ export default function Reader() {
       };
       u.onerror = () => {
         if (!ttsStopped.current) {
+          releaseAudioSession();
           setSpeaking(false);
           setSpoken(null);
         }
@@ -565,6 +571,7 @@ export default function Reader() {
         if (ttsStopped.current) return;
         if (wdtRetried.current) {
           // 重试仍无声：引擎彻底假死，只能提示用户重启浏览器
+          releaseAudioSession();
           setSpeaking(false);
           setSpoken(null);
           setToast("语音引擎无响应，请完全退出浏览器后重试");
@@ -625,6 +632,9 @@ export default function Reader() {
     const t = setTimeout(() => speakFrom(0), 250);
     return () => clearTimeout(t);
   }, [ch]);
+
+  // 离开阅读器：归还音频会话（章节切换不清，因为自动续读还要接着用）
+  useEffect(() => () => releaseAudioSession(), []);
 
   // 朗读跟读：当前句所在段落滚出视野时才滚动（避免与用户手动滚动打架）
   useEffect(() => {

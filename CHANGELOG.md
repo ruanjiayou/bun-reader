@@ -2,6 +2,10 @@
 
 按日期记录功能变更（设计规范见 [docs/design.md](./docs/design.md)，当前计划见 [docs/plans.md](./docs/plans.md)）。
 
+## 2026-10-28（续 2）
+
+- **修复 iOS 升级后朗读只耳机有声**：iOS 上 Web Speech 走环境音（ambient）会话，侧边静音开关打开就无外放、耳机仍正常。新增 `web/src/tts-audio.ts`：朗读期间 `navigator.audioSession.type = "playback"`（iOS 17+）+ 循环播放 1s 静音 WAV 兜底抬会话；停止/读完/报错/离开阅读器时归还，章节自动续读期间保持不清理。仅 iOS 生效
+
 ## 2026-10-28（续）
 
 - **新增定时巡检任务（后端）**：服务启动后启用后台定时器，默认每 6 小时（`UPDATE_INTERVAL_MS`，置 0 关闭）遍历全部书籍逐本重抓目录比对章节数；仅新增章节才置 `updatedAt`（影响书架「最近更新」排序）。复用检查更新逻辑，按书源限速器限流、两本间隔 800ms；用户本地上传封面（data: 开头）不被源站封面覆盖

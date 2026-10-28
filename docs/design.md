@@ -408,6 +408,7 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
   - **持有当前 Utterance 引用**（`curUtter`）：Chrome 曾有 utterance 被提前 GC 导致无声且 onend 永不触发的 bug；
   - **起播看门狗**：`speak()` 后 3s 内 `onstart` 没来判定假死，cancel 后自动重试本句一次；重试仍无声提示「请完全退出浏览器后重试」；
   - **读句兜底**：onstart 后按「文本长度 × 600ms ÷ 语速」（下限 4s）设超时，onend 偶发丢失时自动放行下一句，朗读链不中断。
+- **iOS 静音开关无外放（会话类别适配）**：iOS 上 Web Speech 合成的音频归属**环境音（ambient）**类别的音频会话，侧边静音开关一拨到静音，外放直接哑掉；耳机不走这条路由，所以「戴耳机有声、外放没声」。修法是在朗读期间把会话抬到 **playback** 类别（与 `<audio>`/`<video>` 同级，静音开关管不到），双手段叠加：① `navigator.audioSession.type = "playback"`（Safari 16.4+ / iOS 17+ 的 Web Audio Session 接口，首选）；② 挂一条 1 秒静音 WAV 音轨循环播放（`volume` 保持 1，WebKit 可能把 `volume=0` 判为「没在播」而不抬会话），给没有该接口的旧系统兜底。`holdAudioSession()` 在点朗读的手势栈里调用（iOS 不放行无手势的首播），`stopTts`/读完最后一章/引擎报错/离开阅读器时 `releaseAudioSession()` 归还会话；**章节自动续读期间不清会话**（续读发生在异步回调里，重新抢会话可能拿不到用户手势）。仅 iOS 启用，桌面端不创建多余音频元素。实现见 `web/src/tts-audio.ts`。
 - 发音人列表**只列中文**（`lang` 以 `zh` 开头）且**排除 Eloquence 系列**（iOS 内置机械音，`voiceURI` 含 eloquence 一律过滤），已保存的被过滤发音人自动清除；用户在系统设置里新下载的中文发音人（增强版/Siri 声音等）会随 `voiceschanged` 事件自动进入列表，无需改代码。
 - **同名发音人去歧义**：系统里「婷婷」和「婷婷优化版」是两条不同音质的语音，但 `name` 可能完全一样（只有 `voiceURI` 不同）——**不不去重**（去掉就用不上优化版了），改为同名出现 ≥2 次时从 `voiceURI` 提取标签区分：`enhanced`→优化版、`premium`→高级版、`siri`→Siri、`compact`/`ttsbundle`→标准版，兜底取 URI 最后一段；另按 `voiceURI` 整体去重防系统返回重复条目。
 
