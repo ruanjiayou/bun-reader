@@ -1,7 +1,7 @@
 import { Hono } from "hono";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { db } from "../db";
-import { sources } from "../schema";
+import { books, sources } from "../schema";
 import { httpText } from "../source/fetcher";
 import { engineFor } from "../source/facade";
 import type { LogLevel } from "../source/engine";
@@ -16,6 +16,7 @@ export const sourceRoutes = new Hono<AuthEnv>();
 const readBody = async <T>(c: any): Promise<T> => c.req.json().catch(() => ({}));
 
 // 扁平列表（不含完整 json，避免几百个源时响应爆炸）
+// bookCount = 这个源下已有几本书（含各用户各存一份的副本，去重按 bookUrl 数）
 sourceRoutes.get("/", async (c) => {
   const rows = await db
     .select({
@@ -28,7 +29,12 @@ sourceRoutes.get("/", async (c) => {
       lastUseAt: sources.lastUseAt,
     })
     .from(sources);
-  return c.json(rows);
+  const counts = await db
+    .select({ sourceId: books.sourceId, n: sql<number>`count(distinct ${books.bookUrl})` })
+    .from(books)
+    .groupBy(books.sourceId);
+  const countMap = new Map(counts.map((r) => [r.sourceId, Number(r.n)]));
+  return c.json(rows.map((r) => ({ ...r, bookCount: countMap.get(r.id) ?? 0 })));
 });
 
 // 导出：全部书源的原始 JSON 数组（与 Legado 导出格式一致）

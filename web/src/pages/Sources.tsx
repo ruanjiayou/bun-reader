@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { api, API_BASE } from "../api";
+import { useConfirm } from "../Confirm";
 
 interface SourceRow {
   id: number;
@@ -176,13 +177,11 @@ const emptyScriptForm = () => ({
 
 export default function Sources() {
   const [rows, setRows] = useState<SourceRow[]>([]);
-  const [filter, setFilter] = useState("");
   const [editId, setEditId] = useState<number | null>(null); // null = 新建未保存
   const [form, setForm] = useState<any>(emptyForm());
   const [jsonText, setJsonText] = useState("");
   const [rightTab, setRightTab] = useState<"json" | "debug" | "js">("json");
   const [msg, setMsg] = useState("");
-  const [importUrl, setImportUrl] = useState("");
   const [debugKey, setDebugKey] = useState("我的");
   const [dbgMode, setDbgMode] = useState<"search" | "book">("search");
   const [debugBookUrl, setDebugBookUrl] = useState("");
@@ -197,7 +196,9 @@ export default function Sources() {
   const [scriptForm, setScriptForm] = useState(emptyScriptForm()); // 脚本源表单（保存时合并生成 class 脚本）
   const [scriptCode, setScriptCode] = useState(""); // 右侧「生成的 JS」只读预览（rules/script 都是生成产物）
   const nav = useNavigate();
+  const { id: routeId } = useParams(); // /sources/new = 新建；/sources/:id = 编辑/调试
   const logBox = useRef<HTMLDivElement>(null);
+  const [ask, confirmUi] = useConfirm();
 
   const load = () => api<SourceRow[]>("/api/sources").then(setRows).catch((e) => setMsg(e.message));
   useEffect(() => {
@@ -212,10 +213,6 @@ export default function Sources() {
     const t = setTimeout(() => setMsg(""), 4000);
     return () => clearTimeout(t);
   }, [msg]);
-  const shown = rows.filter(
-    (r) => !filter || r.name.includes(filter) || r.group.includes(filter) || r.bookUrl.includes(filter),
-  );
-
   // —— 编辑 ——
   const setField = (path: string, v: string) => {
     setDirty(true);
@@ -258,7 +255,7 @@ export default function Sources() {
       return;
     }
     try {
-      const row = await api<{ id: number; json: string; type: string; enabled: boolean }>(`/api/sources/${id}`);
+      const row = await api<{ id: number; name?: string; json: string; type: string; enabled: boolean }>(`/api/sources/${id}`);
       setEditId(id);
       setSrcType(row.type === "script" ? "script" : "rules");
       if (row.type === "script") {
@@ -304,6 +301,41 @@ export default function Sources() {
       setMsg(e.message);
     }
   };
+  // 返回书源列表：有未保存改动先问一句，避免手滑丢掉正在编辑的规则
+  const backToList = async () => {
+    if (dirty) {
+      const ok = await ask({
+        title: "放弃未保存的改动？",
+        desc: "当前表单/JSON 的修改还没保存，返回列表会丢失。",
+        okText: "放弃",
+      });
+      if (!ok) return;
+    }
+    nav("/sources");
+  };
+
+  // 清空成新建：先把表单复位，URL 也跟到 /sources/new（否则停在 /sources/12 上却是个空表单）
+  const startNewBlank = () => {
+    selectSource(null);
+    if (routeId !== "new") nav("/sources/new", { replace: true });
+  };
+
+  // 路由 → 编辑上下文：/sources/new 新建，/sources/:id 载入该源；?tab=debug 直接从调试页进来
+  useEffect(() => {
+    const debugTab = new URLSearchParams(window.location.search).get("tab") === "debug";
+    const rid = !routeId || routeId === "new" ? null : Number(routeId);
+    if (rid === null || Number.isNaN(rid)) selectSource(null);
+    else selectSource(rid);
+    if (debugTab) setRightTab("debug");
+  }, [routeId]);
+
+  // 新建保存后把 URL 换成 /sources/:id：replaceState 不进历史（返回仍回书源列表），刷新后能直达这条源。
+  // 只替换路径尾段而非用绝对路径，保留部署前缀（如 /reader/sources/12）
+  const syncUrl = (id: number) => {
+    const path = window.location.pathname.replace(/\/sources(\/[^/]+)?$/, `/sources/${id}`);
+    window.history.replaceState(window.history.state, "", `${path}${window.location.search}`);
+  };
+
   // JSON → 表单（失焦时静默同步），非法 JSON 不覆盖表单并给出提示，避免后续表单失焦把 JSON 改动悄悄冲掉
   const syncJsonToForm = (): boolean => {
     try {
@@ -348,6 +380,7 @@ export default function Sources() {
         if (editId === null) {
           const r = await api<{ id: number }>("/api/sources/script", { method: "POST", body: JSON.stringify(body) });
           setEditId(r.id);
+          syncUrl(r.id);
           await load();
           const { code } = await api<{ code: string }>(`/api/sources/${r.id}/code`);
           setScriptCode(code);
@@ -368,7 +401,10 @@ export default function Sources() {
       await load();
       const url = JSON.parse(text).bookSourceUrl;
       const row = rows.find((r) => r.bookUrl === url) ?? (await api<SourceRow[]>("/api/sources")).find((r) => r.bookUrl === url);
-      if (row) setEditId(row.id);
+      if (row) {
+        setEditId(row.id);
+        syncUrl(row.id); // 新建 → URL 变 /sources/:id（已有源则原样）
+      }
       setMsg("已保存");
       setDirty(false);
       return row?.id ?? null;
@@ -380,10 +416,14 @@ export default function Sources() {
   const del = async () => {
     if (editId === null) return setMsg("当前是未保存的新源");
     const name = srcType === "script" ? scriptForm.name : form.bookSourceName;
-    if (!confirm(`删除书源「${name}」？`)) return;
+    const ok = await ask({
+      title: `删除书源「${name}」？`,
+      desc: srcType === "script" ? "生成的脚本文件会一并删除，无法撤销。" : "规则配置会被删除，无法撤销。",
+      okText: "删除",
+    });
+    if (!ok) return;
     await api(`/api/sources/${editId}`, { method: "DELETE" });
-    await selectSource(null);
-    load();
+    nav("/sources", { replace: true }); // 回到书源列表
   };
   const toggleEnabled = async () => {
     if (editId === null) return setMsg("先保存后再启停");
@@ -393,30 +433,6 @@ export default function Sources() {
     else setForm((f: any) => ({ ...f, enabled: !f.enabled }));
     load();
   };
-  const doImportUrl = async () => {
-    setMsg("");
-    try {
-      const r = await api<{ added: number; updated: number }>("/api/sources/import", {
-        method: "POST",
-        body: JSON.stringify({ url: importUrl }),
-      });
-      setMsg(`导入完成：新增 ${r.added}，更新 ${r.updated}`);
-      setImportUrl("");
-      load();
-    } catch (e: any) {
-      setMsg(e.message);
-    }
-  };
-  const doExport = async () => {
-    const data = await api<any[]>("/api/sources/export");
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "legado-sources.json";
-    a.click();
-    URL.revokeObjectURL(a.href);
-  };
-
   // —— 调试：调已保存的源（不自动保存）——
   // 统一走 SSE：调试链路可能几十秒（浏览器启动 + 人机验证），日志必须边跑边到，不能攒到最后一次性返回
   const streamDebug = async (body: Record<string, unknown>, onEvt: (e: StreamEvt) => void) => {
@@ -526,24 +542,35 @@ export default function Sources() {
 
   return (
     <div className="mx-auto min-h-dvh max-w-7xl p-4">
+      {confirmUi}
+      {/* 顶栏：左返回书源列表，标题=当前源名/新建；新建时可选类型 */}
       <header className="mb-3 flex flex-wrap items-center gap-2">
-        <h1 className="text-lg font-bold">书源</h1>
-        <input
-          className="w-40 rounded-lg bg-neutral-800 px-3 py-1.5 text-sm"
-          placeholder="筛选（名称/URL/分组）"
-          value={filter}
-          onChange={(e) => setFilter(e.target.value)}
-        />
-        <input
-          className="w-64 rounded-lg bg-neutral-800 px-3 py-1.5 text-sm"
-          placeholder="书源 JSON 地址批量导入"
-          value={importUrl}
-          onChange={(e) => setImportUrl(e.target.value)}
-        />
-        <button onClick={doImportUrl} className="rounded-lg bg-neutral-700 px-3 py-1.5 text-sm hover:bg-neutral-600">导入</button>
-        <button onClick={doExport} className="rounded-lg bg-neutral-700 px-3 py-1.5 text-sm hover:bg-neutral-600">导出</button>
-        <span className="text-xs text-neutral-500">共 {rows.length} 个源</span>
-        <Link to="/" className="ml-auto text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
+        <button
+          onClick={backToList}
+          className="flex h-9 w-9 flex-none items-center justify-center rounded-lg text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
+          title="返回书源列表"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <polyline points="15 18 9 12 15 6" />
+          </svg>
+        </button>
+        <h1 className="max-w-[14rem] truncate text-lg font-bold">
+          {editId === null ? (srcType === "script" ? "新建脚本源" : "新建书源") : (srcType === "script" ? scriptForm.name : form.bookSourceName) || `书源 #${editId}`}
+        </h1>
+        {editId !== null && <span className="rounded bg-neutral-800 px-1.5 py-0.5 text-[11px] text-neutral-400">#{editId}</span>}
+        {editId === null && (
+          <div className="flex gap-1">
+            {(["rules", "script"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => selectSource(t === "script" ? "new-script" : null)}
+                className={`rounded-lg px-2.5 py-1 text-xs ${srcType === t ? "bg-neutral-600 text-neutral-100" : "bg-neutral-800 text-neutral-400 hover:bg-neutral-700"}`}
+              >
+                {t === "rules" ? "规则源" : "脚本源"}
+              </button>
+            ))}
+          </div>
+        )}
       </header>
       {msg && (
         <div className="fixed left-1/2 top-3 z-50 -translate-x-1/2 rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 shadow-lg">
@@ -552,24 +579,8 @@ export default function Sources() {
       )}
 
       <div className="grid gap-4 md:grid-cols-[minmax(0,5fr)_9rem_minmax(0,6fr)]">
-        {/* 左：源下拉 + 编辑表单（吸附，独立滚动） */}
+        {/* 左：编辑表单（吸附，独立滚动） */}
         <div className="space-y-3 md:sticky md:top-4 md:max-h-[calc(100dvh-2rem)] md:overflow-y-auto md:pr-1">
-          <select
-            className="w-full rounded-lg bg-neutral-800 px-3 py-2 text-sm"
-            value={editId ?? (srcType === "script" ? "new-script" : "")}
-            onChange={(e) =>
-              selectSource(e.target.value === "" ? null : e.target.value === "new-script" ? "new-script" : Number(e.target.value))
-            }
-          >
-            <option value="">＋ 新建源（规则）</option>
-            <option value="new-script">＋ 新建脚本源（表单方法）</option>
-            {shown.map((r) => (
-              <option key={r.id} value={r.id}>
-                {r.type === "script" ? "⚙ " : ""}
-                {r.name}（{r.enabled ? "启用" : "停用"}）
-              </option>
-            ))}
-          </select>
           {srcType === "script" ? (
             <>
               <div className="rounded-xl bg-neutral-800 p-3 text-xs leading-5 text-neutral-400">
@@ -706,7 +717,7 @@ export default function Sources() {
           >
             {dirty ? "● 保存源" : "保存源"}
           </button>
-          <button onClick={() => selectSource(null)} className={btn}>✗ 清空新建</button>
+          <button onClick={startNewBlank} className={btn}>✗ 清空新建</button>
           <label className="flex items-center gap-2 px-1 text-sm text-neutral-400">
             <input
               type="checkbox"
@@ -717,8 +728,9 @@ export default function Sources() {
             />
             启用搜索
           </label>
-          <button onClick={del} className="w-full rounded-lg px-3 py-1.5 text-sm text-red-400 hover:bg-red-950">删除此源</button>
-        </div>
+          {editId !== null && (
+            <button onClick={del} className="w-full rounded-lg px-3 py-1.5 text-sm text-red-400 hover:bg-red-950">删除此源</button>
+          )}        </div>
 
         {/* 右：JSON / 调试 */}
         <div className="flex flex-col rounded-xl bg-neutral-800 p-3 md:sticky md:top-4 md:max-h-[calc(100dvh-2rem)]">

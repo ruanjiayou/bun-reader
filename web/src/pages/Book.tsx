@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, fmtLatest } from "../api";
+import { useConfirm } from "../Confirm";
 
 const PAGE_SIZE = 100; // 目录分页：一页 100 章（几千章的目录一次渲染太重）
 
@@ -11,6 +12,8 @@ interface BookInfo {
   cover: string;
   intro: string;
   latestChapter: string;
+  sourceId?: number | null;
+  sourceName?: string; // 由 GET /api/books/:id 联表带出
   progress: { chapterIdx: number; scrollPos: number } | null;
 }
 interface Chapter {
@@ -29,6 +32,7 @@ export default function Book() {
   const { id } = useParams();
   const bookId = Number(id);
   const nav = useNavigate();
+  const [ask, confirmUi] = useConfirm();
   const [book, setBook] = useState<BookInfo | null>(null);
   const [chapters, setChapters] = useState<Chapter[]>([]);
   const [cur, setCur] = useState<number | null>(null); // 当前进度章节
@@ -193,7 +197,12 @@ export default function Book() {
   };
 
   const cacheRelease = async () => {
-    if (!confirm(`释放《${book?.name}》的全部已缓存正文？\n（${cache?.cachedCount ?? 0} 章，释放后阅读时重新抓取；同书所有用户共享此缓存，将一并释放）`)) return;
+    const ok = await ask({
+      title: `释放《${book?.name}》的全部已缓存正文？`,
+      desc: `共 ${cache?.cachedCount ?? 0} 章。释放后再次阅读会重新抓取（受书源限速，可能变慢）；\n同书所有用户共享这份缓存，会一并释放。`,
+      okText: "释放",
+    });
+    if (!ok) return;
     const r = await api<{ released: number }>(`/api/books/${bookId}/cache-release`, { method: "POST" });
     setMsg(`已释放 ${r.released} 章缓存`);
     await Promise.all([loadCache(), load()]);
@@ -213,7 +222,12 @@ export default function Book() {
   };
 
   const remove = async () => {
-    if (!confirm(`把《${book?.name}》移出书架？`)) return;
+    const ok = await ask({
+      title: `把《${book?.name}》移出书架？`,
+      desc: "只移除书架关联，章节与正文缓存保留；之后可在搜索里重新加入。",
+      okText: "移出",
+    });
+    if (!ok) return;
     await api(`/api/books/${bookId}`, { method: "DELETE" });
     nav("/");
   };
@@ -226,28 +240,9 @@ export default function Book() {
 
   return (
     <div className="mx-auto min-h-dvh max-w-3xl p-4">
+      {confirmUi}
       <header className="mb-4 flex items-center gap-2">
         <Link to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
-        {/* 缓存信息 + 缓存操作：右上角一排（检查更新移到卡片下方按钮排） */}
-        <div className="ml-auto flex flex-wrap items-center justify-end gap-2 text-xs">
-          <span className="text-neutral-400">
-            缓存：{cache?.cachedCount ?? 0}/{cache?.total ?? chapters.length} 章
-            {cache?.running && cache.job && (
-              <span className="ml-1 text-amber-400">
-                · 抓取中 {cache.job.done}/{cache.job.total}
-                {cache.job.failed ? `（失败 ${cache.job.failed}）` : ""}
-              </span>
-            )}
-          </span>
-          {cache?.running ? (
-            <button onClick={cacheStop} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-300 hover:bg-neutral-600">■ 停止缓存</button>
-          ) : (
-            <button onClick={cacheAll} disabled={caching} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-300 hover:bg-amber-500 hover:text-neutral-900 disabled:opacity-50">
-              {caching ? "启动中…" : "⤓ 缓存全本"}
-            </button>
-          )}
-          <button onClick={cacheRelease} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-400 hover:bg-red-950 hover:text-red-400">释放缓存</button>
-        </div>
       </header>
       {msg && (
         <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-neutral-700 px-4 py-2 text-sm text-neutral-100 shadow-lg">
@@ -288,12 +283,12 @@ export default function Book() {
         </div>
       )}
 
-      {/* 操作按钮一排（卡片下方）：阅读 / 移出书架 / 检查更新 */}
+      {/* 操作按钮一排（卡片下方）：全部左对齐、按内容定宽（阅读钮不再 flex-1 拉满） */}
       {book && (
-        <div className="mb-4 flex gap-2">
+        <div className="mb-2 flex flex-wrap items-center gap-2">
           <button
             onClick={() => nav(`/book/${bookId}/read/${startIdx}`)}
-            className="flex-1 rounded-lg bg-amber-500 py-2 text-sm font-medium text-neutral-900 hover:bg-amber-400"
+            className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-amber-400"
           >
             {cur !== null ? "继续阅读" : "开始阅读"}
           </button>
@@ -306,6 +301,38 @@ export default function Book() {
             {refreshing ? "检查中…" : "检查更新"}
           </button>
           <button onClick={openEdit} className="rounded-lg bg-neutral-700 px-4 py-2 text-sm text-neutral-300 hover:bg-neutral-600">编辑</button>
+        </div>
+      )}
+
+      {/* 缓存一排（阅读按钮下方）：左侧标出本书所属书源，右侧缓存信息 + 缓存操作。
+          justify-between：一行放得下时缓存组靠右，窄屏换行后整体左对齐，不会吊在右边 */}
+      {book && (
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 text-xs">
+          <span className="min-w-0 truncate text-neutral-500">
+            书源：
+            <span className={book.sourceName ? "text-neutral-300" : "text-amber-500"}>
+              {book.sourceName || (book.sourceId != null ? `#${book.sourceId}` : "无（源已删除）")}
+            </span>
+          </span>
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <span className="text-neutral-400">
+              缓存：{cache?.cachedCount ?? 0}/{cache?.total ?? chapters.length} 章
+              {cache?.running && cache.job && (
+                <span className="ml-1 text-amber-400">
+                  · 抓取中 {cache.job.done}/{cache.job.total}
+                  {cache.job.failed ? `（失败 ${cache.job.failed}）` : ""}
+                </span>
+              )}
+            </span>
+            {cache?.running ? (
+              <button onClick={cacheStop} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-300 hover:bg-neutral-600">■ 停止缓存</button>
+            ) : (
+              <button onClick={cacheAll} disabled={caching} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-300 hover:bg-amber-500 hover:text-neutral-900 disabled:opacity-50">
+                {caching ? "启动中…" : "⤓ 缓存全本"}
+              </button>
+            )}
+            <button onClick={cacheRelease} className="rounded bg-neutral-700 px-2.5 py-1 text-neutral-400 hover:bg-red-950 hover:text-red-400">释放缓存</button>
+          </div>
         </div>
       )}
 

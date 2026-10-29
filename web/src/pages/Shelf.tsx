@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { useConfirm } from "../Confirm";
 import type { Me } from "../App";
 
 interface ShelfBook {
@@ -40,6 +41,7 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
   const [tab, setTab] = useState<SortTab>("read"); // 默认按上次阅读时间
   const [menuOpen, setMenuOpen] = useState(false); // 头像下拉
   const nav = useNavigate();
+  const [ask, confirmUi] = useConfirm();
 
   const load = () =>
     api<ShelfBook[]>("/api/books")
@@ -66,7 +68,12 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
 
   // 移出书架（右键 / 长按共用）；长按后要吞掉随之而来的 click，避免又跳详情页
   const removeBook = async (b: ShelfBook) => {
-    if (!confirm(`把《${b.name}》移出书架？`)) return;
+    const ok = await ask({
+      title: `把《${b.name}》移出书架？`,
+      desc: "只移除书架关联，章节与正文缓存保留；之后可在搜索里重新加入。",
+      okText: "移出",
+    });
+    if (!ok) return;
     await api(`/api/books/${b.id}`, { method: "DELETE" });
     load();
   };
@@ -86,6 +93,7 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
 
   return (
     <div className="mx-auto min-h-dvh max-w-5xl p-4">
+      {confirmUi}
       <header className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-bold">书架</h1>
         <div className="flex items-center gap-3 text-sm text-neutral-400">

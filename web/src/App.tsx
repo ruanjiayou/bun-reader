@@ -3,6 +3,7 @@ import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
 import { api } from "./api";
 import Auth from "./pages/Auth";
 import Shelf from "./pages/Shelf";
+import SourceList from "./pages/SourceList";
 import Sources from "./pages/Sources";
 import Search from "./pages/Search";
 import Preview from "./pages/Preview";
@@ -54,7 +55,10 @@ export default function App() {
       <Route path="/book/:id" element={<Guard me={me} loading={loading}><Book /></Guard>} />
       <Route path="/book/:id/category" element={<Guard me={me} loading={loading}><Book /></Guard>} />
       <Route path="/book/:id/read/:idx" element={<Guard me={me} loading={loading}><Reader /></Guard>} />
-      <Route path="/sources" element={<Guard me={me} loading={loading}><Sources /></Guard>} />
+      {/* 书源：列表页（书架点「书源」进来的落地页）→ 编辑/调试页按 URL 的 id 区分 */}
+      <Route path="/sources" element={<Guard me={me} loading={loading}><SourceList /></Guard>} />
+      <Route path="/sources/new" element={<Guard me={me} loading={loading}><Sources /></Guard>} />
+      <Route path="/sources/:id" element={<Guard me={me} loading={loading}><Sources /></Guard>} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );

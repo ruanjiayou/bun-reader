@@ -2,6 +2,29 @@
 
 按日期记录功能变更（设计规范见 [docs/design.md](./docs/design.md)，当前计划见 [docs/plans.md](./docs/plans.md)）。
 
+## 2026-10-29（续）
+
+- **阅读器 PC 右下设置钮不再被底栏压住**：右侧浮动栏底距由 12px 抬到 56px（`bottom-14`），底栏约 33px 高，原来设置钮下半截被盖住
+- **章末衔接条可点**：正文末尾 `— 本章完 · 下一章继续 —` 改为按钮，行为与底栏「下一章」一致（含末章提示）；点击 `stopPropagation`，避免顺带切换工具栏
+- **书籍详情页按钮排与书源标识**：开始阅读/继续阅读不再 `flex-1` 拉满，与移出书架/检查更新/编辑一样按内容定宽、**整排左对齐**；缓存信息与缓存全本/停止/释放从页头移到**阅读按钮下方一排**，该排左侧显示**本书所属书源名**（前端靠 `GET /api/books/:id` 新增的 `sourceName`）
+
+## 2026-10-29
+
+- **脚本源落盘改为「自动生成」**：`data/sources/{id}.js` 只是产物，数据库 `code` 列才是真相
+  - 启动时 `materializeScripts()` 扫描 `type=script` 的源，文件缺失或头部不是相对路径 → 按 `code` 重新生成（日志「脚本源落盘重建 n/N」）；删掉整个 `data/sources` 重启即可恢复
+  - 运行时 `loadInst` 前先 `ensureScriptFile()`：文件被删也当场补出来，不用重启；调用方没带 code 时回查数据库
+  - 不再做「路径自愈」（改旧文件里的路径），一律按 `code` 重新生成
+- **修复脚本源跨平台加载失败**：脚手架曾把保存时那台机器的绝对路径写死（`file:///D:/projects/bun-reader/src/source/runtime.ts`），随库搬到 Linux 后被解析成 `/D:/projects/...`，定时巡检报 `Cannot find module ... imported from data:text/javascript`
+  - 脚手架改为**只写相对路径** `"../../src/source/runtime.ts"`，数据文件从此机器无关
+  - 加载时把该说明符改写成本机 `pathToFileURL(runtime.ts)`；runtime 位置按 `BUN_READER_RUNTIME` → `import.meta.dir` → `PROJECT_ROOT/src/source` 依次探测
+  - 新增 `test/script-runtime-path.test.ts`：文件缺失自动生成、老格式按 code 重建、无 code 明确报错、启动扫描幂等（测试 51→56）
+
+## 2026-10-28（续 3）
+
+- **书源列表页与编辑页拆分**：`/sources` 现在是列表页（顶栏左=返回书架 icon、右=新建；每行=源名称+角标+该源书籍数+调试 icon+删除 icon，筛选/导入/导出也移到这里）；`/sources/new` 新建、`/sources/:id` 编辑，`?tab=debug` 直接从调试进入（列表的调试 icon 就带这个参数）；新建保存后 `history.replaceState` 把 URL 换成 `/sources/:id`（保留 `/reader` 前缀、不进历史）
+- **`GET /api/sources` 增加 `bookCount`**：按 `books.book_url` 去重统计该源下书籍数
+- **危险操作统一确认弹层**：新增 `web/src/Confirm.tsx`（`useConfirm()`），替换书架移出、详情页释放缓存/移出书架、书源删除、阅读器换源的 `window.confirm`（iOS PWA 下 confirm 样式不可控、可能被静默吞掉）；`desc` 写明影响范围与能否恢复；书源编辑页带未保存改动返回列表也会先确认
+
 ## 2026-10-28（续 2）
 
 - **修复 iOS 升级后朗读只耳机有声**：iOS 上 Web Speech 走环境音（ambient）会话，侧边静音开关打开就无外放、耳机仍正常。新增 `web/src/tts-audio.ts`：朗读期间 `navigator.audioSession.type = "playback"`（iOS 17+）+ 循环播放 1s 静音 WAV 兜底抬会话；停止/读完/报错/离开阅读器时归还，章节自动续读期间保持不清理。仅 iOS 生效

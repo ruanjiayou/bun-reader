@@ -89,9 +89,9 @@ SQLite 表 + 磁盘文件：
 
 ## 5. API 概要
 
-- **书源**：`GET/POST/DELETE /sources`（URL 批量导入 / 粘贴 JSON / 文件上传）、`POST /sources/:id/test`（体检）、`POST /sources/:id/debug`（SSE 调试日志，`{bookUrl}` 调书籍 / `{mode:"search",key}` 调搜索）
+- **书源**：`GET/POST/DELETE /sources`（URL 批量导入 / 粘贴 JSON / 文件上传；列表额外返回 `bookCount` = 该源下书籍数，按 `bookUrl` 去重）、`POST /sources/:id/test`（体检）、`POST /sources/:id/debug`（SSE 调试日志，`{bookUrl}` 调书籍 / `{mode:"search",key}` 调搜索）
 - **搜索**：`GET /search?q=` — 并发扇出全部启用源（每源并发 1、间隔 300ms、总超时 15s），**SSE 流式返回**；前端按书名+作者聚合去重，并可查看逐源失败原因
-- **书架**：`GET /books`、`POST /books`（秒回落库，目录后台异步补）、`DELETE /books/:id`
+- **书架**：`GET /books`、`POST /books`（秒回落库，目录后台异步补）、`DELETE /books/:id`；`GET /books/:id` 返回书籍详情并**联表带出 `sourceName`**（详情页要显示这本书属于哪个源）
 - **目录**：`GET /books/:id/category`（`?refresh=1` 强制刷新）
 - **正文**：`GET /books/:id/content/:idx`（`?refresh=1` 绕过缓存重抓）
 - **进度**：`PUT /books/:id/progress`
@@ -111,10 +111,19 @@ SQLite 表 + 磁盘文件：
 |---|---|---|
 | `/` | 书架 | 手机 3 列网格 / 桌面列表；排序 tab（默认「最近阅读」，可切「最近更新」）。**右上角账号区**：未登录=登录按钮；已登录=头像圆钮（无头像显示首字）→ 下拉（昵称 / 设置 / 退出登录）。**移出书架 = 右键或长按 500ms**（移动端没有右键），长按触发后吞掉同一次 click 不进详情。列表有**加载中状态**（转圈 + 「书架加载中…」），请求未回不显示「空书架」 |
 | `/search` | 搜索 | SSE 实时追加结果卡片，聚合去重；搜索进度随新一轮搜索重置，失败书源及错误原因可展开查看。布局：`← 书架` 在左，输入框中间（**16px 字号防 iOS 聚焦缩放**，框内有 × 清空），搜索按钮在右。登录/设置页输入框同为 16px |
-| `/book/:id` | 书籍详情 | 封面左（垂直居中）、信息右（结构不变）；**操作按钮一排在卡片下方**：开始阅读/继续阅读（主按钮）、移出书架、检查更新；**缓存信息 + 缓存全本/停止/释放 在页面右上角**（与 ← 书架同一行）；目录**分页每页 100 章**（正/倒序先排序再切片，首次载入定位到「上次读到」所在页，切排序回第 1 页），目录有加载中状态 |
+| `/book/:id` | 书籍详情 | 封面左（垂直居中）、信息右（结构不变）；**操作按钮一排在卡片下方**：开始阅读/继续阅读（主按钮，与其他按钮同宽策略：按内容定宽、不 `flex-1` 拉满）、移出书架、检查更新、编辑，**全部左对齐**；**缓存一排紧跟其后**：左侧「书源：xxx」（源被删显示「无（源已删除）」，只有 id 时显示 `#id`），右侧缓存信息 + 缓存全本/停止/释放；目录**分页每页 100 章**（正/倒序先排序再切片，首次载入定位到「上次读到」所在页，切排序回第 1 页），目录有加载中状态 |
 | `/book/:id/read/:idx` | 阅读器 | 见第四部分 |
 | `/settings` | 账号设置 | 头像（点击圆形选图，本地压缩预览，随「保存资料」提交）、昵称、修改密码（旧密码 + 新密码×2）；保存后通知 App 刷新 `/auth/me`，书架头像立即生效 |
-| `/sources` | 书源管理 | 列表启停、导入、表单编辑、调试面板 |
+| `/sources` | 书源列表 | 书架点「书源」的落地页。顶栏：**左=返回书架 icon，右=新建**；列表每行 = 源名称（含「脚本」/「停用」角标）+ 该源书籍数（`bookCount`，按 `books.source_url` 去重计）+ 调试 icon + 删除 icon。点行进出编辑页，点调试 icon 进编辑页并直接落在调试 tab。筛选与导入/导出 URL 也在此页 |
+| `/sources/new`、`/sources/:id` | 书源编辑/调试 | **同一页面按 URL 区分**：无 id（`/sources/new`）= 新建（顶栏给「规则源 / 脚本源」类型切换），有 id = 载入该源；`?tab=debug` 直接打开调试 tab（列表的调试入口就带这个参数）。**新建保存成功后 `history.replaceState` 把 URL 换成 `/sources/:id`**（只替换路径尾段，保留 `/reader` 部署前缀；不进历史，刷新后能直达该源）。返回列表时有未保存改动会先确认 |
+
+### 危险操作确认（统一弹层）
+
+删除/移出/释放这类不可逆操作**一律先确认再执行**，用 `web/src/Confirm.tsx` 的 `useConfirm()`（`const [ask, ui] = useConfirm()` → `await ask({title, desc, okText})`）：弹层为深色卡片 + 半透明遮罩，确认键默认红色（`danger:false` 时琥珀色，用于换源这类非破坏动作），点遮罩等同取消。
+
+- **不用 `window.confirm`**：iOS PWA / 内嵌 WebView 里样式不可控，个别浏览器会静默吞掉，「点了没反应但已经删了」是最不能接受的失败方式。
+- `desc` 必须写清**影响范围与能否恢复**（例：释放缓存要说明章数 + 同书所有用户共享；删除书源要说明书架里的书保留、但之后无法再从该源更新）。
+- 覆盖点：书架长按/右键移出、详情页释放缓存与移出书架、书源删除、阅读器换源、书源编辑页带脏数据返回列表。
 
 ### 调试面板（书源页右侧）
 
@@ -282,6 +291,15 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 超时 → Promise.race 报错（目录抓取放宽 600s：多屏翻页 + 验证码人工验证最长 180s）
 ```
 
+- **落盘文件是产物，`code` 列才是真相**：`data/sources` 不进版本库、部署机上常常不与数据库同步（被清空、换机器、只拷了 `book.db`）。所以：
+  - **启动时自动生成**：`materializeScripts()` 扫 `type=script` 的源，文件不存在或头部不是相对路径 → 按数据库 `code` 重写；日志报「脚本源落盘重建 n/N」
+  - **运行时自动生成**：`loadInst` 加载前先 `ensureScriptFile()`，缺文件就按传入的 `row.code`（没有则查库）生成，不重启也能自恢复
+  - 不做「路径修复」：老文件里写死过 `file:///D:/projects/...`（搬到 Linux 变 `/D:/projects/...` → `Cannot find module`），一律按 `code` 重新生成，而不是改旧文件里的路径
+- **脚手架里的 runtime 路径必须是相对的**：`data/sources/{id}.js` 头部由引擎生成一行 `import { ... } from "../../src/source/runtime.ts"`，**不写机器绝对路径**，`ensureScriptFile` 用这一行判断文件是否健康。
+- 加载时把该说明符改写成本机 `pathToFileURL(runtime.ts)`：候选顺序 `BUN_READER_RUNTIME` 环境变量 → `import.meta.dir/runtime.ts` → `path.join(PROJECT_ROOT, "src/source/runtime.ts")`（`PROJECT_ROOT` = `src/source` 上两级）。
+- data:URL 模块没有 base URL，**相对 import 无法解析**，所以只能改写成绝对 `file://` URL，不能让 Bun 自己解析相对路径。
+- 孤儿文件（DB 里已没有这条源）不会被清理，重新生成只覆盖 DB 里仍存在的源。
+
 ## 5. 引擎接口
 
 - `engineFor(row)` 按 `type` 分流：rules → 规则引擎；script → 脚本引擎，统一 Engine 接口 `{ search, bookInfo, toc, content, hasSearch }`
@@ -359,8 +377,13 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 ### PC（>500px）
 
 - **左栏**：书架/书源/目录（icon+文字纵向排列；同顶栏，不设「首页」）。
-- **右栏**（靠底）：书籍详情、刷新、朗读、设置（纯 icon 圆钮）。
+- **右栏**（靠底）：书籍详情、刷新、朗读、设置（纯 icon 圆钮）。**底距 `bottom: 56px`（`bottom-14`）**——底栏约 33px 高，原来的 12px 会让最下面的设置钮下半截被底栏压住。
 - **底栏**：`上一章 · 章节进度 · 下一章` 居中悬浮。
+
+### 章末衔接条
+
+- 正文最后一行是居中浅色提示 `— 本章完 · 下一章继续 —`，**整体可点**，行为与底栏「下一章」完全一致（`goChapter(idx + 1)`，末章弹「没有更多章节」）。
+- 点击时必须 `stopPropagation`：正文容器点击是「显隐工具栏」，否则点章末会顺带把菜单切掉。
 
 ### PC 侧栏定位（贴正文，不贴窗口边）
 

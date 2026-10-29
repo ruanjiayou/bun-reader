@@ -5,6 +5,7 @@ import { log, requestLogger } from "./log";
 import { sourceRoutes } from "./routes/sources";
 import { bookRoutes, startBookUpdateScheduler } from "./routes/books";
 import { searchRoutes } from "./routes/search";
+import { materializeScripts } from "./source/script";
 
 const app = new Hono<AuthEnv>();
 
@@ -50,6 +51,13 @@ const port = Number(process.env.PORT ?? 8094);
 log.info("boot", `bun-reader listening on http://localhost:${port}`);
 // 书籍更新巡检（默认每 6h；UPDATE_INTERVAL_MS=0 关闭；用户上传封面不被覆盖）
 startBookUpdateScheduler();
+// 落盘脚本是产物、code 列才是真相：data/sources 被清空/换机器部署时按数据库重新生成
+materializeScripts()
+  .then(({ total, generated }) => {
+    if (generated.length) log.info("boot", `脚本源落盘重建 ${generated.length}/${total} 个（${generated.join(", ")}）`);
+    else log.info("boot", `脚本源落盘 ${total} 个，无缺失`);
+  })
+  .catch((e) => log.warn("boot", `脚本源落盘检查失败：${e?.message ?? e}`));
 // idleTimeout 默认 10s：目录多页翻页/全本缓存等长请求会被掐（warn: Bun.serve() timed out + Reader released），
 // 调到上限 255s（Bun 允许的最大值）
 Bun.serve({ port, idleTimeout: 255, fetch: app.fetch });

@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, fmtLatest } from "../api";
+import { useConfirm } from "../Confirm";
 import { holdAudioSession, releaseAudioSession } from "../tts-audio";
 
 interface ContentResp {
@@ -199,6 +200,7 @@ export default function Reader() {
   const bookId = Number(id);
   const idx = Number(idxParam);
   const nav = useNavigate();
+  const [ask, confirmUi] = useConfirm();
 
   const [chapters, setChapters] = useState<{ idx: number; title: string; cached?: boolean }[]>([]);
   const [ch, setCh] = useState<ContentResp | null>(null);
@@ -414,7 +416,13 @@ export default function Reader() {
   };
   // 确认换源：保留进度，重抓目录，超出新目录的章节回第 0 章
   const switchSource = async (h: { sourceId: number; sourceName: string; name: string; bookUrl: string }) => {
-    if (!confirm(`换源到「${h.sourceName}」的《${h.name}》？\n进度保留，目录将重新抓取。`)) return;
+    const ok = await ask({
+      title: `换源到「${h.sourceName}」的《${h.name}》？`,
+      desc: "阅读进度保留，目录会用新源重新抓取。",
+      okText: "换源",
+      danger: false,
+    });
+    if (!ok) return;
     setSwitching(true);
     setSrcErr("");
     try {
@@ -666,6 +674,7 @@ export default function Reader() {
 
   return (
     <div className="fixed inset-0" style={{ background: theme.bg, color: theme.text }}>
+      {confirmUi}
       {/* 正文铺满全屏（不随工具栏显隐移动，避免阅读中内容跳动）；点击切换工具栏；PC 固定 640px */}
       <div ref={scrollRef} onScroll={onScroll} onClick={() => { if (Date.now() < tapGuard.current) return; setChrome((v) => !v); }} className="no-scrollbar absolute inset-0 overflow-y-auto">
         <div className="mx-auto px-4 pt-16 pb-24 max-[500px]:px-5 min-[501px]:w-[640px] min-[501px]:pt-6 min-[501px]:pb-16" style={{ fontSize: prefs.fontSize, lineHeight: prefs.lineHeight }}>
@@ -690,7 +699,18 @@ export default function Reader() {
                     : p}
                 </p>
               ))}
-              <div className="mt-8 text-center text-xs" style={{ color: theme.sub }}>— 本章完 · 下一章继续 —</div>
+              {/* 章末衔接条：点一下等同底部「下一章」（stopPropagation 免得顺带把工具栏切掉） */}
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  goChapter(idx + 1);
+                }}
+                className="mt-8 block w-full rounded-lg py-3 text-center text-xs transition-opacity hover:opacity-100"
+                style={{ color: theme.sub }}
+                title="下一章"
+              >
+                — 本章完 · 下一章继续 —
+              </button>
             </>
           ) : (
             <div className="flex h-[60vh] items-center justify-center text-sm" style={{ color: theme.sub }}>
@@ -732,9 +752,10 @@ export default function Reader() {
         </div>
       )}
 
-      {/* PC 右栏：≥900px 时紧贴正文右缘（留 12px 间隙） */}
+      {/* PC 右栏：≥900px 时紧贴正文右缘（留 12px 间隙）；
+          抬到 bottom-14，让开底部「上一章 · 进度 · 下一章」条（约 33px 高），否则设置钮下半截被压住 */}
       {chrome && (
-        <div className="absolute bottom-3 right-1 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-end min-[501px]:gap-3 min-[900px]:right-auto min-[900px]:left-[calc(50%+320px)] min-[900px]:translate-x-[12px]">
+        <div className="absolute bottom-14 right-1 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-end min-[501px]:gap-3 min-[900px]:right-auto min-[900px]:left-[calc(50%+320px)] min-[900px]:translate-x-[12px]">
           <FloatBtn icon="book" title="书籍详情" onClick={() => nav(`/book/${bookId}`)} style={floatBtnStyle} />
           <FloatBtn icon="refresh" title="刷新本章" onClick={refreshCh} spinning={refreshing} style={floatBtnStyle} />
           <FloatBtn icon="speak" title={speaking ? "停止朗读" : "朗读"} onClick={toggleTts} active={speaking} style={floatBtnStyle} />

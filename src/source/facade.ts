@@ -37,7 +37,7 @@ export function rulesEngine(json: string): Engine {
   };
 }
 
-export function scriptEngine(row: { id: number; name?: string }): Engine {
+export function scriptEngine(row: { id: number; name?: string; code?: string | null }): Engine {
   return {
     sourceName: row.name ?? `源#${row.id}`,
     hasSearch: true, // 实际有没有 search 方法由 scriptSearch 判定（缺方法返回空列表）
@@ -48,6 +48,12 @@ export function scriptEngine(row: { id: number; name?: string }): Engine {
   };
 }
 
-export function engineFor(row: { id: number; name: string; type?: string | null; json: string }): Engine {
+export function engineFor(row: {
+  id: number;
+  name: string;
+  type?: string | null;
+  json: string;
+  code?: string | null; // script 源：生成脚本主体，落盘文件缺失时用于重建
+}): Engine {
   return row.type === "script" ? scriptEngine(row) : rulesEngine(row.json);
 }

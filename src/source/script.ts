@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { runWithInst } from "./runtime";
 import { isPlaceholder, type BookItem, type ChapterItem, type Log } from "./engine";
+import { log } from "../log";
 
 // —— 脚本书源引擎 ——
 // 源 = export default class Source，方法 search/getDetail/getChapters/getContent（全可选），
@@ -10,7 +11,37 @@ import { isPlaceholder, type BookItem, type ChapterItem, type Log } from "./engi
 // 契约见 docs/design.md（三、书源脚本引擎）。
 
 const SOURCES_DIR = "data/sources";
-const RUNTIME_URL = pathToFileURL(path.resolve(import.meta.dir, "runtime.ts")).href;
+
+// 引擎调用方传进来的行：code 是生成脚本的主体（不含脚手架），文件丢了靠它重建
+export interface ScriptRow {
+  id: number;
+  code?: string | null;
+}
+
+// 项目根（src/source 往上两级）。落盘脚本里的 import 一律只写「相对项目根」的路径，
+// 绝不把本机绝对路径烧进数据文件 —— 否则 Windows 上存的源搬到 Linux 直接找不到模块。
+const PROJECT_ROOT = path.resolve(import.meta.dir, "../..");
+const RUNTIME_SPEC = "../../src/source/runtime.ts";
+
+// runtime.ts 在当前机器上的真实位置 → file:// URL（data: 模块里只能 import 绝对 URL）
+const RUNTIME_URL = (() => {
+  const candidates = [
+    process.env.BUN_READER_RUNTIME,
+    path.join(import.meta.dir, "runtime.ts"), // 常规：与本源同目录
+    path.join(PROJECT_ROOT, "src/source/runtime.ts"), // 兜底：按项目根拼接（cwd/打包方式变化时）
+  ].filter((p): p is string => !!p);
+  const hit = candidates.find((p) => existsSync(p)) ?? candidates[0];
+  return pathToFileURL(hit).href;
+})();
+
+// 脚手架 import 行：import { ... } from "<任意说明符>";
+const SCAFFOLD_IMPORT_RE = /(^\s*import\s*\{[^}]*\}\s*from\s*)(["'])([^"']*)\2;/m;
+// 健康文件的标志：说明符就是相对路径（文件本身机器无关）
+const SPEC_MARK = `"${RUNTIME_SPEC}"`;
+// 把说明符统一换成本机 RUNTIME_URL。data:URL 没有 base，相对 import 解析不了，必须改成绝对 file URL。
+const withRuntime = (code: string): string =>
+  code.replace(SCAFFOLD_IMPORT_RE, (_m, head: string) => `${head}"${RUNTIME_URL}";`);
+
 const DEFAULT_TIMEOUT = 30_000;
 const TOC_TIMEOUT = 600_000; // 目录抓取放宽：加密翻页多屏 + 验证码人工验证最长 180s
 const TOC_MAX_PAGES = 200;
@@ -21,8 +52,56 @@ export function saveScriptFile(id: number, code: string) {
   mkdirSync(SOURCES_DIR, { recursive: true });
   const scaffold =
     `// AUTO SCAFFOLD —— 由引擎生成，请勿修改本段\n` +
-    `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel, browserOpen, browserText } from "${RUNTIME_URL}";\n\n`;
+    `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel, browserOpen, browserText } from "${RUNTIME_SPEC}";\n\n`;
   writeFileSync(`${SOURCES_DIR}/${id}.js`, scaffold + code.trim() + "\n");
+}
+
+// —— 落盘文件是产物，code 列才是真相 ——
+// 部署机上 data/sources 常常不跟数据库一起同步（文件被清、换机器、只拷了 book.db），
+// 所以文件缺失或头部不是相对路径时，直接按数据库的 code 重新生成，而不是修复旧文件。
+
+async function dbParts() {
+  const [{ db }, { sources }, { eq }] = await Promise.all([import("../db"), import("../schema"), import("drizzle-orm")]);
+  return { db, sources, eq };
+}
+
+async function codeFromDb(id: number): Promise<string | null> {
+  const { db, sources, eq } = await dbParts();
+  const [row] = await db
+    .select({ code: sources.code, type: sources.type })
+    .from(sources)
+    .where(eq(sources.id, id));
+  if (!row || row.type !== "script") return null; // 规则源不落盘脚本，走规则引擎
+  return row.code?.trim() || null;
+}
+
+// 确保 data/sources/{id}.js 存在且是「相对路径」格式；否则按 code 重新生成。返回文件路径。
+export async function ensureScriptFile(id: number, code?: string | null): Promise<string> {
+  const file = `${SOURCES_DIR}/${id}.js`;
+  if (existsSync(file) && readFileSync(file, "utf-8").includes(SPEC_MARK)) return file;
+  const body = code?.trim() || (await codeFromDb(id));
+  if (!body) throw new Error(`脚本源 ${id} 数据库里没有代码（code 为空），无法生成 ${file}`);
+  saveScriptFile(id, body);
+  log.info("script", `已按数据库代码生成 ${file}`);
+  return file;
+}
+
+// 启动时补齐：所有 script 源缺文件就重新生成（删了 data/sources 重启即可恢复）
+export async function materializeScripts(): Promise<{ total: number; generated: number[] }> {
+  const { db, sources, eq } = await dbParts();
+  const rows = await db.select({ id: sources.id, code: sources.code }).from(sources).where(eq(sources.type, "script"));
+  const generated: number[] = [];
+  for (const r of rows) {
+    const file = `${SOURCES_DIR}/${r.id}.js`;
+    if (existsSync(file) && readFileSync(file, "utf-8").includes(SPEC_MARK)) continue;
+    try {
+      await ensureScriptFile(r.id, r.code);
+      generated.push(r.id);
+    } catch (e: any) {
+      log.warn("script", `生成 ${file} 失败：${e?.message ?? e}`);
+    }
+  }
+  return { total: rows.length, generated };
 }
 
 // —— 表单 → class 代码：表单给人看和编辑，生成的脚本是给程序执行的产物 ——
@@ -81,9 +160,9 @@ export function formToCode(form: ScriptForm): string {
 
 // 保存前校验：scaffold + 生成代码可解析且 default 导出为 class
 export async function validateScriptCode(code: string): Promise<string | null> {
-  const scaffold = `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel, browserOpen, browserText } from ${JSON.stringify(RUNTIME_URL)};\n\n`;
+  const scaffold = `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel, browserOpen, browserText } from ${JSON.stringify(RUNTIME_SPEC)};\n\n`;
   try {
-    const mod = await import(`data:text/javascript;base64,${Buffer.from(scaffold + code).toString("base64")}`);
+    const mod = await import(`data:text/javascript;base64,${Buffer.from(withRuntime(scaffold + code)).toString("base64")}`);
     if (typeof mod.default !== "function") return "必须导出 export default class Source";
     return null;
   } catch (e: any) {
@@ -94,14 +173,14 @@ export async function validateScriptCode(code: string): Promise<string | null> {
 // 加载实例：按文件 mtime 缓存；模块经 data: URL 直载（Windows 下动态 import 新落盘文件有目录缓存竞态）
 const cache = new Map<number, { mtime: number; inst: any }>();
 
-export async function loadInst(id: number): Promise<any> {
-  const file = `${SOURCES_DIR}/${id}.js`;
-  if (!existsSync(file)) throw new Error(`脚本源未落盘：${file}（保存书源时自动生成）`);
+export async function loadInst(id: number, fallbackCode?: string | null): Promise<any> {
+  // 文件没了/是别台机器的格式 → 先用数据库代码补出文件（不重启也能自恢复）
+  const file = await ensureScriptFile(id, fallbackCode);
   const mtime = statSync(file).mtimeMs;
   const hit = cache.get(id);
   if (hit && hit.mtime === mtime) return hit.inst;
-  const code = readFileSync(file, "utf-8");
-  const mod = await import(`data:text/javascript;base64,${Buffer.from(code).toString("base64")}`);
+  const raw = readFileSync(file, "utf-8");
+  const mod = await import(`data:text/javascript;base64,${Buffer.from(withRuntime(raw)).toString("base64")}`);
   const Source = mod.default;
   if (typeof Source !== "function") throw new Error("脚本源必须 export default class Source");
   const inst = new Source();
@@ -165,8 +244,8 @@ function polish(text: string, inst: any): string {
     .trim();
 }
 
-export async function scriptSearch(row: { id: number }, key: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<BookItem[]> {
-  const inst = await loadInst(row.id);
+export async function scriptSearch(row: ScriptRow, key: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<BookItem[]> {
+  const inst = await loadInst(row.id, row.code);
   if (typeof inst.search !== "function") return []; // 未实现搜索 = 该源不参与聚合
   log?.("info", "search", `脚本源搜索: ${key}`);
   const items = await withTimeout(runWithInst(inst, () => inst.search(key, 1)), timeoutMs, "search");
@@ -186,12 +265,12 @@ export async function scriptSearch(row: { id: number }, key: string, log?: Log, 
 }
 
 export async function scriptBookInfo(
-  row: { id: number },
+  row: ScriptRow,
   url: string,
   log?: Log,
   timeoutMs = DEFAULT_TIMEOUT,
 ): Promise<{ name: string; author: string; intro: string; cover: string; latestChapter: string; latestChapterUrl: string; tocUrl: string }> {
-  const inst = await loadInst(row.id);
+  const inst = await loadInst(row.id, row.code);
   if (typeof inst.getDetail !== "function") throw new Error("该源未实现 getDetail");
   log?.("info", "book", `脚本源详情: ${url}`);
   const info = await withTimeout(runWithInst(inst, () => inst.getDetail(url)), timeoutMs, "getDetail");
@@ -207,8 +286,8 @@ export async function scriptBookInfo(
 }
 
 // 目录：源只返回当前页 {list, next}，翻页循环/防环/去重/上限都在引擎
-export async function scriptToc(row: { id: number }, tocUrl: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<ChapterItem[]> {
-  const inst = await loadInst(row.id);
+export async function scriptToc(row: ScriptRow, tocUrl: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<ChapterItem[]> {
+  const inst = await loadInst(row.id, row.code);
   if (typeof inst.getChapters !== "function") throw new Error("该源未实现 getChapters");
   const chapters: ChapterItem[] = [];
   const seen = new Set<string>();
@@ -243,8 +322,8 @@ export async function scriptToc(row: { id: number }, tocUrl: string, log?: Log, 
 }
 
 // 正文：源返回 string（单页）或 {text, next}（章节内翻页），引擎循环拼接后统一净化
-export async function scriptContent(row: { id: number }, chapterUrl: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<string> {
-  const inst = await loadInst(row.id);
+export async function scriptContent(row: ScriptRow, chapterUrl: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<string> {
+  const inst = await loadInst(row.id, row.code);
   if (typeof inst.getContent !== "function") throw new Error("该源未实现 getContent");
   const parts: string[] = [];
   const visited = new Set<string>();

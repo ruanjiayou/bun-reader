@@ -534,8 +534,15 @@ bookRoutes.get("/:id", async (c) => {
   const [book] = await db.select().from(books).where(and(eq(books.id, bookId), eq(books.userId, uid)));
   if (!book) return c.json({ error: "书籍不存在" }, 404);
   const [prog] = await db.select().from(progress).where(eq(progress.bookId, bookId));
+  // 带上书源名：详情页要显示这本书来自哪个源（源被删则 sourceId 为 null，前端显示「未知」）
+  let sourceName = "";
+  if (book.sourceId != null) {
+    const [src] = await db.select({ name: sources.name }).from(sources).where(eq(sources.id, book.sourceId));
+    sourceName = src?.name ?? "";
+  }
   return c.json({
     ...book,
+    sourceName,
     progress: prog ? { chapterIdx: prog.chapterIdx, scrollPos: prog.scrollPos, updatedAt: prog.updatedAt } : null,
   });
 });

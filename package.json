@@ -6,7 +6,7 @@
     "dev:web": "bun run --cwd web vite",
     "build": "bun run --cwd web vite build",
     "start": "bun run src/index.ts",
-    "check": "bun run --cwd web vite build && tsc --noEmit"
+    "check": "bun run --cwd web vite build && tsc --noEmit && tsc --noEmit -p web"
   },
   "dependencies": {
     "cheerio": "^1.2.0",
