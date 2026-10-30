@@ -200,6 +200,10 @@ async function withTimeout<T>(p: Promise<T>, ms: number, what: string): Promise<
   }
 }
 
+// 分页模板：next 里带 {page}/{ {page} } 占位符 = 按页码展开（与规则引擎一致）
+const hasPageTpl = (s: string): boolean => /\{\{?page\}?\}/.test(s);
+const expandPage = (t: string, n: number): string => t.replace(/\{\{?page\}?\}/g, String(n));
+
 const abs2 = (u: string, base = ""): string => {
   if (!u) return u;
   // 绝对地址原样返回（与旧引擎 ensureAbs 一致：new URL 会把 {} 编码成 %7Bpage%7D）
@@ -274,7 +278,7 @@ export async function scriptBookInfo(
   if (typeof inst.getDetail !== "function") throw new Error("该源未实现 getDetail");
   log?.("info", "book", `脚本源详情: ${url}`);
   const info = await withTimeout(runWithInst(inst, () => inst.getDetail(url)), timeoutMs, "getDetail");
-  return {
+  const out = {
     name: String(info?.title ?? ""),
     author: String(info?.author ?? ""),
     intro: String(info?.desc ?? ""),
@@ -283,6 +287,14 @@ export async function scriptBookInfo(
     latestChapterUrl: "",
     tocUrl: abs2(String(info?.tocUrl || url), inst.base || url),
   };
+  // 与规则源同样的「一行一条」：字段挤一行时看不出哪项 getDetail 没返回
+  const miss = (v: string) => v || "⚠️未取到";
+  log?.("ok", "book", `书名: ${miss(out.name)}`);
+  log?.("ok", "book", `作者: ${miss(out.author)}`);
+  log?.("ok", "book", `封面: ${miss(out.cover)}`);
+  log?.("info", "book", `简介: ${out.intro ? out.intro.replace(/\s+/g, " ").slice(0, 60) + (out.intro.length > 60 ? "…" : "") : "⚠️未取到"}`);
+  log?.("ok", "book", `目录地址: ${out.tocUrl}`);
+  return out;
 }
 
 // 目录：源只返回当前页 {list, next}，翻页循环/防环/去重/上限都在引擎
@@ -321,7 +333,8 @@ export async function scriptToc(row: ScriptRow, tocUrl: string, log?: Log, timeo
   return chapters;
 }
 
-// 正文：源返回 string（单页）或 {text, next}（章节内翻页），引擎循环拼接后统一净化
+// 正文：源返回 string（单页）或 {text, next}（章节内翻页），引擎循环拼接后统一净化。
+// next 里带 {page} 时视为分页模板（页内没有可跟的链接、但地址有规律），从第 2 页起按页码展开。
 export async function scriptContent(row: ScriptRow, chapterUrl: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<string> {
   const inst = await loadInst(row.id, row.code);
   if (typeof inst.getContent !== "function") throw new Error("该源未实现 getContent");
@@ -329,6 +342,8 @@ export async function scriptContent(row: ScriptRow, chapterUrl: string, log?: Lo
   const visited = new Set<string>();
   let url: string | null = chapterUrl;
   let page = 0;
+  let tpl: string | null = null; // 源返回的 {page} 模板
+  let tplPage = 1;
   while (url && page < CONTENT_MAX_PAGES) {
     if (visited.has(url)) {
       log?.("warn", "content", `第 ${page + 1} 页地址已抓过，停止翻页`);
@@ -338,7 +353,17 @@ export async function scriptContent(row: ScriptRow, chapterUrl: string, log?: Lo
     page++;
     const cur: string = url;
     if (page > 1) log?.("info", "content", `正文第 ${page} 页: ${cur}`);
-    const r: any = await withTimeout(runWithInst(inst, () => inst.getContent(cur)), timeoutMs, "getContent");
+    // 第 2 页起失败（末页之后一串 404、模板盲试撞墙）：保留已抓到的部分，不该整章报废
+    let r: any;
+    try {
+      r = await withTimeout(runWithInst(inst, () => inst.getContent(cur)), timeoutMs, "getContent");
+    } catch (e: any) {
+      if (page > 1) {
+        log?.("warn", "content", `第 ${page} 页抓取失败（${e?.message ?? e}），返回已抓取的 ${page - 1} 页`);
+        break;
+      }
+      throw e;
+    }
     const text = typeof r === "string" ? r : String(r?.text ?? "");
     if (!text.trim()) {
       if (page > 1) {
@@ -347,9 +372,29 @@ export async function scriptContent(row: ScriptRow, chapterUrl: string, log?: Lo
       }
       throw new Error("正文为空");
     }
+    // 末页之后站点常原样返回最后一页：内容一模一样就收口，避免同一段拼满上限
+    if (parts.length && text.trim() === parts[parts.length - 1].trim()) {
+      log?.("warn", "content", `第 ${page} 页正文与上一页相同，判定已到最后一页`);
+      break;
+    }
     parts.push(text);
-    const next = typeof r === "string" ? "" : String(r?.next ?? "");
-    url = next ? abs2(next, inst.base) : null;
+    const next = typeof r === "string" ? "" : String(r?.next ?? "").trim();
+    if (tpl) {
+      // 已在模板模式：不理会这一页返回的 next，按页码推进（页内链接在分页站上常常指向自己）
+      tplPage++;
+      url = abs2(expandPage(tpl, tplPage), inst.base);
+      log?.("info", "content", `正文第 ${page + 1} 页（{page} 模板 · 第 ${tplPage} 页）: ${url}`);
+    } else if (next && hasPageTpl(next)) {
+      // 分页模板：首页即第 1 页，之后只按页码推进，不再看页内链接
+      tpl = next;
+      tplPage = 2;
+      url = abs2(expandPage(tpl, tplPage), inst.base);
+      log?.("info", "content", `识别到 {page} 模板分页，第 2 页: ${url}`);
+    } else {
+      url = next ? abs2(next, inst.base) : null;
+      // 单页章节也要有日志，否则分不清「本来不分页」和「源没返回 next」
+      if (!url) log?.("info", "content", page === 1 ? "正文无翻页：源未返回 next（按单页处理）" : `正文翻页结束：第 ${page} 页源未返回 next`);
+    }
   }
   const merged = polish(parts.join("\n"), inst);
   const ph = isPlaceholder(merged);

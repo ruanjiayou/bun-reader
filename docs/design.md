@@ -203,6 +203,19 @@ location /reader/ {
 - **`.textBlocks()`**：正文段落提取专用——取最内层块级元素文本（嵌套 p 去重）、`<br>` 视为换行、容器裸文本（广告行）跳过、按文档序 `\n` 连接；容器内**没有块级子元素**（整段正文只用 `<br/>` 分行 + `&nbsp;` 缩进的手机站，如肉书屋）时回退为容器自身文本。正文规则**不要用 `.text()`**（全部拼一行无换行）
 - 保留：`||` 回退、`##正则##替换##变换`、`{{bookUrl}}/{{baseUrl}}` 模板、JsonPath（$ 开头）、目录 `{page}` 模板
 
+### 章节内翻页（正文分页）
+
+很多站点的正文一页放不下，末尾带「下一页」。`ruleContent.nextContentUrl` 处理，两种形态：
+
+| 形态 | 规则写法 | 引擎行为 |
+|---|---|---|
+| 下一页链接 | `'.bottem a:eq(3)'.attr('href')` 或 `'a:contains(下一页)'.attr('href')` | 逐页抓取后拼接；取到空即结束；地址已抓过则停（防环）；上限 50 页 |
+| `{page}` 模板 | `{{bookUrl}}##_?\d*\.html$##_{page}.html` | 首次求值即识破为模板，之后**不依赖页内链接**，按页码 2,3,4… 直接展开 |
+
+- `{{bookUrl}}` 在正文里的语义是**当前页地址**（`base` 传本页 URL，不是站点首页），所以模板建立在第 1 页 URL 上，`{page}` 从 **2** 起（第 1 页正文已在手）。适合「下一页」是 JS 按钮、末页链接被移除、但分页地址有规律（`xxx_2.html` / `?p=2`）的站点
+- 模板 URL **不能过 `new URL()`**：`{}` 会被编码成 `%7Bpage%7D`，占位符就废了 → 只做「相对路径补 origin」
+- **收口条件**：新页正文与上一页完全相同 → 判定站点对任意页码返回同一页，停止（模板盲试必须靠这条，否则同一段会拼满上限）；第 2 页起 HTTP 4xx/5xx 或正文规则未命中 → 保留已抓到的页，不整章报废；只有首页失败才抛错走重试
+
 ## 兼容迁移（normalizeSource，导入与运行前幂等转换）
 
 旧语法 → 新语法：
@@ -230,7 +243,7 @@ location /reader/ {
 | 方法名 | `search` / `getDetail` / `getChapters` / `getContent`（全可选，缺 = 能力不支持） |
 | 格式 | 单 JS 文本存 DB + 落盘 `data/sources/{id}.js`，`export default class Source` |
 | 配置 | 类成员声明（`base`/`headers`/`replace`），引擎只读，**无构造器注入** |
-| 翻页 | 引擎处理：`getChapters` 返回 `{list, next}` 引擎循环；`getContent` 可返回 `{text, next}` 引擎拼接 |
+| 翻页 | 引擎处理：`getChapters` 返回 `{list, next}` 引擎循环；`getContent` 可返回 `{text, next}` 引擎拼接；`next` 含 `{page}` 时引擎按页码展开（与规则源同规则） |
 | 净化 | `replace` 成员 = `{regex, replacement}` 对象数组，引擎在正文合并后自动应用 |
 | 执行 | 动态 import + 缓存（id+mtime 失效），Promise.race 超时；不做 Worker 隔离（源自用，半可信） |
 | 旧规则源 | 编辑走规则表单，保存时**转换器生成 .js**，JS 不可手改 |
@@ -260,6 +273,7 @@ export default class Source {
   }
   async getContent(url) {
     // 返回 string（无翻页）或 { text, next? }（章节内部翻页，引擎拼接）
+    // next 含 {page} 时视为分页模板（如 url.replace(/\.html$/, "_{page}.html")），引擎按页码展开
   }
 }
 ```
@@ -321,7 +335,7 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 | `ruleSearch/bookInfo/toc/content` 各字段 | parse + ruleText/ruleSel helper 调用 |
 | `ruleToc.nextTocUrl` 翻页 | getChapters 内 while 循环 |
 | `ruleToc` 的 `{page}` 模板 | while 循环展开 |
-| `ruleContent.nextContentUrl` | getContent 返回 `{text, next}` |
+| `ruleContent.nextContentUrl` | getContent 返回 `{text, next}`（next 含 `{page}` 时由脚本引擎展开） |
 | `replaceRegex` / `header` | class `replace` / `headers` 成员 |
 
 测试断言：同 fixture 下生成脚本与规则引擎产出一致。
@@ -476,3 +490,41 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 - **`SheetClose` 组件（目录/换源/设置三弹层共用）**：`touchend` 阶段 `preventDefault()` 吞掉合成 click 并直接关闭；`touchstart` 记录起点，手位移 >10px 视为滚动收尾不当作点按；桌面仍走 `onClick`。
 - **时间戳护栏（保险丝，`tapGuard`）**：`closeSheet(setter)` 统一关闭入口记录 `tapGuard = Date.now() + 500`；下层易误触的 onClick（目录章节行、换源条目、正文切工具栏）开头检查即忽略。结构修复后护栏只兜极端场景（关闭后合成 click 重定位到弹层外的元素，如误切工具栏），代价一行，**保留不删**。
 - 通用教训：**移动端「可点列表 + 覆盖其上的悬浮关闭钮」是点透温床**——优先用上下排列消除覆盖；确需覆盖时再上 SheetClose + tapGuard 双保险。
+
+# 五、部署与运维（Linux + supervisord）
+
+## 1. 进程模型：supervisord 直接跑 bun，不要套 `bun run start`
+
+- `bun run start` 只是「读 package.json 的 scripts.start 再起一个子进程」，实测进程树是 `bun run start` → `bun run src/index.ts`（真正的服务）**两层**。
+- supervisord 的 `stopsignal` 只发给它直属的那个 pid。发到 wrapper 时，真正监听端口的子进程可能被 init 收养继续活着：端口一直被占，新进程 bind 报 EADDRINUSE —— 日志里就是「重启失败」+ 旧实例还在跑。
+- 因此 `command` 直接写解释器 + 入口文件，并用 `directory` 指定工作目录（`data/`、`web/reader` 都是相对 cwd 的路径）：
+
+```ini
+[program:reader]
+directory=/srv/bun-reader
+command=/root/.bun/bin/bun src/index.ts
+environment=PORT="8094",BROWSER_HEADLESS="0"
+autostart=true
+autorestart=true
+startsecs=3
+stopsignal=TERM
+stopwaitsecs=15
+stopasgroup=true
+killasgroup=true
+stdout_logfile=/var/log/reader.out.log
+redirect_stderr=true
+```
+
+`stopasgroup/killasgroup`：把 SIGTERM / SIGKILL 发给**整个进程组**，playwright 拉起的 chromium 子进程也一起带走。
+
+## 2. 启动顺序（`src/index.ts`）
+
+1. `Bun.serve()` 绑端口 → 打 `listening` 日志（健康检查最先能过）；
+2. 延迟 1s 再做耗时初始化：`materializeScripts()`（脚本源落盘重建）+ 书籍巡检注册。期间请求打到脚本源时由 `ensureScriptFile` 惰性补单个脚本，不依赖全量重建；
+3. 端口被占时按 `BIND_RETRIES`（默认 3）每 1s 重试——旧进程刚收 SIGTERM、socket 还差几百毫秒才释放的窗口就这样吃掉；仍失败则打印 `ss -lptn 'sport = :PORT'` / `lsof -i:PORT` 查到的占用者，然后 `exit 1`。
+
+## 3. 退出顺序
+
+`SIGTERM`/`SIGINT` → `server.stop(true)`（端口立刻释放，在途 SSE 不拖泥带水）→ `await closeBrowser()`（最多等 2.5s，把 chromium 子进程真正关掉）→ `exit 0`。另有 4s 兜底强退，保证短于 supervisord 的 `stopwaitsecs`。
+
+**为什么要 await 关浏览器**：只在 `process.on("exit")` 里「发一个 close 就走」不可靠——进程先死，chromium 被 init 收养继续活着，占着 `data/browser-profile` 的锁，并且可能继承着父进程的监听 fd 不放。调试书源时人机验证窗口开着的情况下重启，最容易踩这个坑。

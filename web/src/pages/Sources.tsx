@@ -97,6 +97,12 @@ const SECTIONS: { title: string; fields: { path: string; label: string; ph?: str
     title: "正文",
     fields: [
       { path: "ruleContent.content", label: "正文规则（段落换行用 .textBlocks()，多行直文本用 .textNodes()）", rows: 2, ph: "'#content'.textBlocks()（每个 p/div 一行）\n或 '.readcontent'.textBlocks()\n或 '.readcontent'.textNodes()（正文是裸文本节点时）" },
+      {
+        path: "ruleContent.nextContentUrl",
+        label: "章节内翻页（正文分页的下一页链接；取到空即结束）",
+        rows: 4,
+        ph: "'.bottem a:eq(3)'.attr('href')（下一页）\n或 'a:contains(下一页)'.attr('href')\n或 text.下一页@href（按文字找，Legado 写法）\n分页地址有规律时用 {page} 模板：{{bookUrl}}##_?\\d*\\.html$##_{page}.html",
+      },
       { path: "ruleContent.replaceRegex", label: "替换净化（正则##替换为，替换为留空=删除）", ph: "广告.*?<br>##\n（##广告.*?##  删除匹配内容）" },
     ],
   },
@@ -162,6 +168,8 @@ const METHOD_DEFS: { key: "search" | "getDetail" | "getChapters" | "getContent";
     label: "获取正文 getContent(url) → string 或 { text, next? }（翻页引擎拼接）",
     tpl: `async getContent(url) {
   // 此处添加逻辑
+  // 正文分页：return { text, next } —— next 非空则引擎继续抓下一页并拼接
+  // 分页地址有规律时 next 可写模板：return { text, next: url.replace(/\\.html$/, "_{page}.html") }
 }`,
   },
 ];
@@ -884,7 +892,7 @@ export default function Sources() {
                   <div className="flex items-center gap-1.5 text-amber-400">
                     <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-amber-400" />
                     运行中{tickSec ? ` · ${tickSec}s` : ""}
-                    <span className="text-neutral-600">（长耗时步骤：浏览器启动 / 人机验证 / 目录翻页）</span>
+                    <span className="text-neutral-600">（长耗时步骤：浏览器启动 / 人机验证 / 目录与正文翻页）</span>
                   </div>
                 )}
                 {!logs.length && !debugging && (

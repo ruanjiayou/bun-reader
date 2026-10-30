@@ -54,6 +54,7 @@ async function launch(mode: BMode): Promise<any> {
     try {
       const ctx = await chromium.launchPersistentContext(PROFILE, {
         headless,
+        executablePath: '/usr/bin/chromium',
         viewport: { width: 1280, height: 800 },
         ...(headless ? { userAgent: HEADLESS_UA } : {}),
         // 降低自动化特征（Cloudflare Turnstile 等会检测 navigator.webdriver / enable-automation）：
@@ -212,6 +213,24 @@ export async function browserOpen(url: string, opts: { headless?: boolean; timeo
       ),
     close: () => page.close(),
   };
+}
+
+// 关掉当前实例并等它真的关完（退出流程用）。
+// exit 钩子里的 close() 是「发出去就不管」——进程立刻死掉后，chromium 子进程可能被 init 收养继续活着，
+// 既占着 data/browser-profile 的锁，也可能把从父进程继承来的监听 fd 一起带进阴间，
+// 导致新进程 bind 8094 报 EADDRINUSE（表现就是「重启失败」）。所以关服务时先 await 这个。
+export async function closeBrowser(): Promise<void> {
+  const cur = state;
+  if (!cur) return;
+  state = null;
+  pageCnt.headed = 0;
+  pageCnt.headless = 0;
+  try {
+    const ctx = await cur.p; // 可能还在启动中：启动完成后立刻关
+    await ctx.close();
+  } catch {
+    /* 已关闭 / 启动失败 */
+  }
 }
 
 // 一次性抓取：打开 → 等验证/挑战 → 取 HTML → 关页

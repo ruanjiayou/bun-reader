@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as cheerio from "cheerio";
 import { httpText, type FetchOpts } from "./fetcher";
-import { ruleStr, ruleList, guessNodes, type Node } from "./rule";
+import { ruleStr, ruleList, guessNodes, legadoToOurs, type Node } from "./rule";
 import { log as fileLog } from "../log";
 
 // 浏览器抓取（WAF/验证码/加密 AJAX 站点）：透传给脚本书源使用
@@ -77,10 +77,12 @@ export function log(msg: string) {
 }
 
 // —— 规则兼容 helper：转换器生成的代码使用，复用规则引擎求值器（|| 回退 / ##正则## 原样可用）——
+// 规则字符串统一先过 Legado 关键字转换（幂等，v2 语法原样返回）：与规则源的 normalizeSource 对齐，
+// 也顺带修好旧版本生成/手写在脚本里的 "text.xxx.attr('href')"（老转换器不会转换 text.）
 export function ruleText(nodes: Node[], rule: string, base?: string): string {
-  return ruleStr(nodes, rule, base ?? als.getStore()?.base ?? "");
+  return ruleStr(nodes, legadoToOurs(rule), base ?? als.getStore()?.base ?? "");
 }
 
 export function ruleSel(nodes: Node[], rule: string, base?: string): Node[] {
-  return ruleList(nodes, rule, base ?? als.getStore()?.base ?? "");
+  return ruleList(nodes, legadoToOurs(rule), base ?? als.getStore()?.base ?? "");
 }

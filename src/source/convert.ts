@@ -158,7 +158,7 @@ export function rulesToScript(src: any): string {
     out.push(`    if (res.status >= 400) throw new Error("HTTP " + res.status);`);
     out.push(`    const ns = nodes(res.text);`);
     out.push(`    const list = ${ind(chMap, 4)};`);
-    out.push(`    const next = abs((ruleText(ns, ${q(r.toc.nextTocUrl)}).split(/\\s+/).pop() || ""), res.url);`);
+    out.push(`    const next = abs((ruleText(ns, ${q(r.toc.nextTocUrl)}, res.url).split(/\\s+/).pop() || ""), res.url);`);
     out.push(`    return { list, next: next || undefined };`);
     out.push(`  }\n`);
   } else {
@@ -171,15 +171,19 @@ export function rulesToScript(src: any): string {
     out.push(`  }\n`);
   }
 
-  // getContent：{text, next} 交给引擎拼接（无 nextContentUrl 直接返回 string）
+  // getContent：{text, next} 交给引擎拼接（无 nextContentUrl 直接返回 string）。
+  // next 含 {page} 时原样交给引擎 —— 引擎识别模板后按页码展开（{{bookUrl}} 的语义是「当前页地址」，
+  // 所以必须把 res.url 作为 base 传进 ruleText，否则会拿站点首页去改写）。
   out.push(`  async getContent(url) {`);
   out.push(`    const res = await fetchText(url);`);
   out.push(`    if (res.status >= 400) throw new Error("HTTP " + res.status);`);
   out.push(`    const ns = nodes(res.text);`);
-  out.push(`    const text = ruleText(ns, ${q(r.content.content || "")});`);
+  out.push(`    const text = ruleText(ns, ${q(r.content.content || "")}, res.url);`);
   out.push(`    if (!text) throw new Error("正文规则未命中");`);
   if (r.content.nextContentUrl) {
-    out.push(`    const next = abs((ruleText(ns, ${q(r.content.nextContentUrl)}).split(/\\s+/).pop() || ""), res.url);`);
+    out.push(
+      `    const next = abs((ruleText(ns, ${q(r.content.nextContentUrl)}, res.url).split(/\\s+/).pop() || ""), res.url);`,
+    );
     out.push(`    return next ? { text, next } : text;`);
   } else {
     out.push(`    return text;`);

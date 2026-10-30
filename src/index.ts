@@ -6,6 +6,7 @@ import { sourceRoutes } from "./routes/sources";
 import { bookRoutes, startBookUpdateScheduler } from "./routes/books";
 import { searchRoutes } from "./routes/search";
 import { materializeScripts } from "./source/script";
+import { closeBrowser } from "./source/browser";
 
 const app = new Hono<AuthEnv>();
 
@@ -48,16 +49,93 @@ app.get("/reader/*", serveStatic({ root: webDist, path: "index.html", onFound: c
 app.get("/", (c) => c.redirect("/reader/"));
 
 const port = Number(process.env.PORT ?? 8094);
-log.info("boot", `bun-reader listening on http://localhost:${port}`);
-// 书籍更新巡检（默认每 6h；UPDATE_INTERVAL_MS=0 关闭；用户上传封面不被覆盖）
-startBookUpdateScheduler();
-// 落盘脚本是产物、code 列才是真相：data/sources 被清空/换机器部署时按数据库重新生成
-materializeScripts()
-  .then(({ total, generated }) => {
-    if (generated.length) log.info("boot", `脚本源落盘重建 ${generated.length}/${total} 个（${generated.join(", ")}）`);
-    else log.info("boot", `脚本源落盘 ${total} 个，无缺失`);
-  })
-  .catch((e) => log.warn("boot", `脚本源落盘检查失败：${e?.message ?? e}`));
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// EADDRINUSE 时把「谁占着端口」打出来（Linux 部署排查用）：
+// 常见是上一次进程没退干净，或被杀后残留的 chromium 继承着监听 fd 还活着。
+// 有这条日志就不用再猜了，直接 kill 对应 pid。
+function portHolder(p: number): string {
+  if (process.platform !== "linux") return "";
+  const probes: [string, string[]][] = [
+    ["ss", ["-lptnH", `sport = :${p}`]],
+    ["lsof", ["-nP", `-i:${p}`]],
+  ];
+  for (const [cmd, args] of probes) {
+    try {
+      const r = Bun.spawnSync({ cmd: [cmd, ...args], stdout: "pipe", stderr: "ignore", timeout: 2000 });
+      const out = r.stdout?.toString().trim();
+      if (out) return out.split("\n").slice(0, 3).join(" | ");
+    } catch {
+      /* 命令不存在（没装 iproute2/lsof）*/
+    }
+  }
+  return "";
+}
+
 // idleTimeout 默认 10s：目录多页翻页/全本缓存等长请求会被掐（warn: Bun.serve() timed out + Reader released），
-// 调到上限 255s（Bun 允许的最大值）
-Bun.serve({ port, idleTimeout: 255, fetch: app.fetch });
+// 调到上限 255s（Bun 允许的最大值）。
+// 端口被占时重试几次：旧进程刚收到 SIGTERM、socket 可能还差几百毫秒才释放，
+// 一撞就 exit 会让 supervisor 判定「启动失败」并退出重试链。
+const BIND_TRIES = Math.max(1, Number(process.env.BIND_RETRIES ?? 3));
+let server: ReturnType<typeof Bun.serve> | null = null;
+for (let i = 1; i <= BIND_TRIES && !server; i++) {
+  try {
+    server = Bun.serve({ port, idleTimeout: 255, fetch: app.fetch });
+  } catch (e: any) {
+    const msg = String(e?.message ?? e).split("\n")[0];
+    const busy = /in use|EADDRINUSE/i.test(msg);
+    if (busy && i < BIND_TRIES) {
+      log.warn("boot", `端口 ${port} 被占用，1s 后重试（${i}/${BIND_TRIES}）：${portHolder(port) || "占用者未知"}`);
+      await sleep(1000);
+      continue;
+    }
+    // 端口被占/无权限时不要再往上抛整段栈：部署脚本只认这条明确日志（常见：旧实例还没退干净）
+    log.error(
+      "boot",
+      `端口 ${port} 监听失败：${msg}` + (busy ? `（占用者：${portHolder(port) || "未知"}；是否已有实例在运行？）` : ""),
+    );
+    process.exit(1);
+  }
+}
+if (!server) process.exit(1);
+log.info("boot", `bun-reader listening on http://localhost:${server.port}`);
+
+// 优雅退出：部署脚本重启时先 SIGTERM 再起新进程，端口要立刻释放，
+// 否则新进程 bind 撞上 EADDRINUSE（日志「端口 xxx 监听失败」）——看起来就是「重启失败」。
+// 三步固定顺序：停监听（端口立刻可用）→ 等浏览器关完（顺手带走 chromium 子进程）→ 退出。
+let closing = false;
+async function shutdown(sig: string) {
+  if (closing) return;
+  closing = true;
+  log.info("boot", `收到 ${sig}，关闭服务`);
+  // 兜底：无论浏览器关得多慢，4s 内必退（supervisord 默认 stopwaitsecs=10，别等它 SIGKILL）
+  setTimeout(() => process.exit(0), 4000);
+  try {
+    server!.stop(true);
+  } catch {
+    /* 已停止 */
+  }
+  await Promise.race([closeBrowser(), sleep(2500)]);
+  process.exit(0);
+}
+for (const sig of ["SIGTERM", "SIGINT"] as const) {
+  process.on(sig, () => {
+    void shutdown(sig);
+  });
+}
+
+// —— 启动成功之后才做耗时初始化 ——
+// 落盘脚本重建 = 逐条查库 + 读文件 + 生成并编译校验，源多时要几秒到几十秒。
+// 放在 Bun.serve 之前会推迟端口就绪，部署脚本/反代健康检查等不到端口就判定「启动失败」并杀进程；
+// 这里延后一拍执行，期间有请求进来时 ensureScriptFile 仍会惰性补出单个脚本，不必等全量重建。
+setTimeout(() => {
+  // 落盘脚本是产物、code 列才是真相：data/sources 被清空/换机器部署时按数据库重新生成
+  materializeScripts()
+    .then(({ total, generated }) => {
+      if (generated.length) log.info("boot", `脚本源落盘重建 ${generated.length}/${total} 个（${generated.join(", ")}）`);
+      else log.info("boot", `脚本源落盘 ${total} 个，无缺失`);
+    })
+    .catch((e) => log.warn("boot", `脚本源落盘检查失败：${e?.message ?? e}`));
+  // 书籍更新巡检（默认每 6h；UPDATE_INTERVAL_MS=0 关闭；用户上传封面不被覆盖）
+  startBookUpdateScheduler();
+}, 1000);

@@ -2,6 +2,54 @@
 
 按日期记录功能变更（设计规范见 [docs/design.md](./docs/design.md)，当前计划见 [docs/plans.md](./docs/plans.md)）。
 
+## 2026-10-29（续 6）
+
+- **重启仍报「端口 8094 被占用」：定位到进程树 + 退出流程两处**
+  - 真凶不是 chromium 本身（浏览器是客户端，不监听端口），而是 `supervisord → bun run start → bun run src/index.ts` 的**两层进程**：SIGTERM 只打到 wrapper，真正监听端口的子进程被收养继续跑；旧实例不退，新实例永远 bind 失败。日志特征：`waiting for reader to stop` × 5 → `SIGKILL` → `reaped unknown pid ...` → 新 pid 立刻 EADDRINUSE
+  - `src/index.ts` 退出流程改为固定顺序：`server.stop(true)`（端口立刻释放）→ `await closeBrowser()`（≤2.5s）→ `exit 0`，另有 4s 兜底强退
+  - `src/source/browser.ts` 新增可 await 的 `closeBrowser()`：真正关掉持久化 context 再退出，避免 chromium 子进程被 init 收养后继续占用 `data/browser-profile` 锁、甚至带着继承来的监听 fd 不放
+  - 端口绑定加**重试**（`BIND_RETRIES`，默认 3 次 / 1s 间隔），吃掉旧进程刚退出那一小段释放窗口；仍失败时打印 `ss -lptn` / `lsof -i` 查到的占用者再 exit 1
+  - `docs/design.md` 新增「五、部署与运维」：supervisord 用 `command=bun src/index.ts` + `stopasgroup/killasgroup`，别再套 `bun run start`
+  - 实测：同端口第二个实例会打 `端口 8098 被占用，1s 后重试（1/3）`→（2/3）→ `监听失败…` 后 exit 1，第一个实例不受影响；测试 74 全绿，`tsc --noEmit` 通过
+
+## 2026-10-29（续 5）
+
+- **启动顺序调整：先监听端口，再做耗时初始化**（重启失败的根因）
+  - `Bun.serve()` 提到最前，`listening` 日志紧跟其后；脚本源落盘重建（逐条查库 + 读写文件 + 编译校验）与书籍巡检注册改为**监听成功后延迟 1s** 执行——以前它们在 `Bun.serve` 之前启动，端口就绪被推迟，部署脚本/反代的健康检查等不到端口就判定「启动失败」并杀进程
+  - 延迟期间若有请求打到脚本源，`ensureScriptFile` 仍会惰性补出单个脚本，不必等全量重建
+  - 端口占用不再抛整段栈：改为一行 `端口 8095 监听失败：…（是否已有实例在运行？）` 并 `exit 1`
+  - 补 **优雅退出**：SIGTERM/SIGINT 时 `server.stop(true)` 立即释放端口再退出，避免重启时新进程 bind 撞上旧进程还没退干净的 EADDRINUSE
+  - 实测（本地 8095）：`listening` → 1s 后落盘/巡检日志；占用端口时一行明确报错；退出后端口立即可再次绑定
+
+## 2026-10-29（续 4）
+
+- **支持 Legado 的 `text.xxx`（按文字找元素）**：`text.下一页@href` 以前转换器原样保留（CSS 无文本伪类），选择器无效 → 正文翻页静默失效，next 永远取到空
+  - 转换 `text.xxx` → `*:contains("xxx"):not(:has(*:contains("xxx")))`：取「自身含该文本、子孙不再含」的最内层元素，近似 `//*[text()="xxx"]`；不加最内层限制会连 body/html 一起命中
+  - 支持索引写法 `text.下一页.-1@href`；中间段也能用（`class.pager@text.下一页@href` → `.pager.find('*:contains(...)')`）
+  - `attr('href')` 求值时若命中元素自身没有 href（如 `<a href><span>下一页</span></a>` 命中 span），向上取最近带 href 的祖先，取文本时行为不变
+  - **存量兼容**：老转换器把规则原样存成了 `text.下一页.attr('href')`，现在 `normalizeSource` 会识别「text.段 + 已是 v2 调用链」并替换成正确选择器；脚本源 `runtime.ruleText/ruleSel` 也统一先过 `legadoToOurs`，已生成的旧脚本不用重新生成即可恢复
+  - 前端正文分组「章节内翻页」提示补一行 `text.下一页@href（按文字找，Legado 写法）`
+  - 测试 69→74（规则转换/求值/幂等/存量、规则源三页翻页、转换器脚本一致性、旧脚本存量兼容）
+
+## 2026-10-29（续 3）
+
+- **调试日志按「一行一条」输出**：详情解析后不再把书名/最新章节/目录地址拼成一行，改为逐条推送——`书名:` `作者:` `封面:` `简介:` `最新章节:` `目录地址:`，缺失项标 `⚠️未取到`，一眼看出哪条规则没配好（规则源与脚本源 `getDetail` 均如此）
+- **没翻页也打日志**：目录/正文以前只在「有翻页」时输出过程日志，单页章节或规则没命中时一片空白，分不清是「本来不分页」还是「规则没配」
+  - 目录：`目录无翻页：未配置 nextTocUrl（按单页处理）` / `目录无翻页：下一页规则未命中链接…` / 多页结束时 `目录翻页结束：第 N 页没有下一页链接`
+  - 正文：`正文无翻页：未配置 nextContentUrl（按单页处理）` / `正文无翻页：nextContentUrl 未命中下一页链接…`（脚本源为 `源未返回 next`）/ 多页结束时 `正文翻页结束：第 N 页…`
+- `test/content-paging.test.ts` 补 3 例（单页目录、翻页规则未命中、详情字段分行），测试 66→69
+
+## 2026-10-29（续 2）
+
+- **书源规则支持章节内翻页（正文分页）**：很多站点正文一页放不下、末尾带「下一页」，现在可配置
+  - 规则表单「正文」分组新增 **章节内翻页**（`ruleContent.nextContentUrl`）——之前引擎支持但表单没有输入框，等于配不了
+  - 两种写法：下一页链接 `'.bottem a:eq(3)'.attr('href')`（取到空即结束、地址已抓过即停、上限 50 页）；分页地址有规律时用 `{page}` 模板 `{{bookUrl}}##_?\d*\.html$##_{page}.html`（首次求值识破为模板，之后不依赖页内链接，按页码 2,3,4… 展开）
+  - `{{bookUrl}}` 在正文里语义是**当前页地址**（base 传本页 URL）；模板 URL 不过 `new URL()`，避免 `{page}` 被编码成 `%7Bpage%7D`
+  - **收口**：新页正文与上一页完全相同 → 判定站点对任意页码返回同一页，停止（模板盲试必须靠这条）；第 2 页起失败保留已抓页，不整章报废
+  - 脚本源 `getContent` 返回的 `next` 同样支持 `{page}` 模板；第 2 页起抓取失败改为保留已抓部分（原来整章失败）
+  - 转换器：`nextContentUrl` 生成 `{text, next}` 时把 `res.url` 作为 `ruleText` 的 base，`{{bookUrl}}` 语义与规则引擎一致
+  - 新增 `test/content-paging.test.ts`（10 例）+ 转换器一致性用例（测试 56→66）
+
 ## 2026-10-29（续）
 
 - **阅读器 PC 右下设置钮不再被底栏压住**：右侧浮动栏底距由 12px 抬到 56px（`bottom-14`），底栏约 33px 高，原来设置钮下半截被盖住

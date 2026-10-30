@@ -141,7 +141,16 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
     log?.("warn", "book", `tocUrl 规则命中 ${lines.length} 个链接，已取最后一个（要取指定位置请加索引如 a.-1）`);
   }
   info.tocUrl = ensureAbs(info.tocUrl, res.url);
-  log?.("ok", "book", `详情解析: ${info.name || "?"} · 最新=${info.latestChapter || info.latestChapterUrl || "无"} · tocUrl=${info.tocUrl}`);
+  // 详情字段一行一条：挤在一行里既看不清哪项没取到，窄屏日志区也会被撑爆
+  const miss = (v: string) => v || "⚠️未取到";
+  log?.("ok", "book", `书名: ${miss(info.name)}`);
+  log?.("ok", "book", `作者: ${miss(info.author)}`);
+  log?.("ok", "book", `封面: ${miss(info.cover)}`);
+  log?.("info", "book", `简介: ${info.intro ? info.intro.replace(/\s+/g, " ").slice(0, 60) + (info.intro.length > 60 ? "…" : "") : "⚠️未取到"}`);
+  log?.("ok", "book", `最新章节: ${miss(info.latestChapter)}`);
+  if (info.latestChapterUrl && info.latestChapterUrl !== info.latestChapter)
+    log?.("info", "book", `最新章节链接（供 {page} 推最大页码）: ${info.latestChapterUrl}`);
+  log?.("ok", "book", `目录地址: ${info.tocUrl}`);
   return info;
 }
 
@@ -156,6 +165,18 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
 const TOC_MAX_PAGES = 200;
 const hasPageTpl = (s: string) => /\{\{?page\}?\}/.test(s);
 const expandPage = (t: string, n: number) => t.replace(/\{\{?page\}?\}/g, String(n));
+
+// 模板 URL 不能走 new URL()：会把 {page} 编码成 %7Bpage%7D，占位符就没了。
+// 绝对地址原样返回，相对地址只补 origin。
+const absKeepTpl = (u: string, base: string) => {
+  if (!u) return u;
+  if (/^(https?:)?\/\//i.test(u)) return u;
+  try {
+    return new URL(base).origin + (u.startsWith("/") ? u : "/" + u);
+  } catch {
+    return u;
+  }
+};
 
 // 由最新章节 URL 反推 {page} 模板的最大页码：模板去掉 origin 后整体转正则，{page} 捕获为数字。
 // 匹配不上（latestChapter 是文本、或 URL 形态不同）返回 0 = 未知，退回盲试展开
@@ -269,8 +290,22 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log, lastCha
           .map((u) => ensureAbs(u, res.url));
         if (nRaw.length > 1) log?.("warn", "toc", `nextTocUrl 命中 ${nRaw.length} 个链接，已取最后一个`);
         const n = nRaw[nRaw.length - 1] ?? "";
-        current = n && !visited.has(n) ? n : null;
-        if (page === 1 && !current) log?.("info", "toc", `翻页规则未命中下一页链接（仅单页，或规则没匹配上）`);
+        const dup = !!n && visited.has(n);
+        current = n && !dup ? n : null;
+        if (!current)
+          log?.(
+            "info",
+            "toc",
+            page === 1
+              ? `目录无翻页：${n ? "下一页链接指向已抓过的页" : "下一页规则未命中链接"}（按单页处理，规则没配好也会这样）`
+              : dup
+                ? `目录翻页结束：第 ${page} 页的下一页已抓过`
+                : `目录翻页结束：第 ${page} 页没有下一页链接`,
+          );
+      } else if (page === 1) {
+        log?.("info", "toc", "目录无翻页：未配置 nextTocUrl（按单页处理）");
+      } else {
+        log?.("info", "toc", `目录翻页结束：第 ${page} 页之后不再翻页`);
       }
     }
   }
@@ -337,16 +372,25 @@ export async function getContent(src: BookSource, chapterUrl: string, log?: Log)
   throw lastErr;
 }
 
-// 抓单章并合并全部分页：ruleContent.nextContentUrl 命中即抓下一页拼接；href 空=结束；visited 防环，上限 50 页。
+// 抓单章并合并全部分页。两种翻页方式（与目录分页同构）：
+// ① ruleContent.nextContentUrl 命中"下一页"链接 → 逐页抓取（取到空 = 结束）；
+// ② 规则求值结果里带 {page} 占位符（如 {{bookUrl}}##\.html$##_{page}.html）→ 识破为模板，
+//    不再依赖页面里的链接，按页码 2,3,4… 直接展开。适合"下一页"是 JS 按钮、末页链接被移除，
+//    但分页地址有规律的站点。
 // 首页失败 → 抛错走重试；第 2 页起失败 → 记 warn 返回已抓到的部分（好过整章失败）。
+// 新页正文与上一页完全相同 → 判定站点对任意页码返回同一页，停止（模板盲试必须靠这条收口）。
+const CONTENT_MAX_PAGES = 50;
+
 async function fetchChapter(src: BookSource, url: string, opts: FetchOpts, log?: Log): Promise<string> {
   const rule = src.ruleContent ?? {};
   const visited = new Set<string>();
   const parts: string[] = [];
   let next: string | null = url;
   let page = 0;
+  let tpl: string | null = null; // nextContentUrl 求值出的 {page} 模板（首页解析出来，之后只按页码推进）
+  let tplPage = 1; // 模板已展开到的页码（第 1 页正文已在手）
 
-  while (next && page < 50) {
+  while (next && page < CONTENT_MAX_PAGES) {
     if (visited.has(next)) {
       log?.("warn", "content", `第 ${page + 1} 页地址已抓过，停止翻页`);
       break;
@@ -370,21 +414,47 @@ async function fetchChapter(src: BookSource, url: string, opts: FetchOpts, log?:
       }
       throw new Error(`正文规则未命中（content 规则：${rule.content || "未配置"}；若正文只用 <br> 分行，用 .textBlocks()）`);
     }
-    parts.push(applyReplace(content, rule.replaceRegex));
+    const body = applyReplace(content, rule.replaceRegex);
+    // 末页之后再"下一页"或模板盲试，站点常常照原样返回最后一页：内容一模一样就没必要再拼
+    if (parts.length && body.trim() === parts[parts.length - 1].trim()) {
+      log?.("warn", "content", `第 ${page} 页正文与上一页相同，判定已到最后一页`);
+      break;
+    }
+    parts.push(body);
 
     next = null;
-    if (rule.nextContentUrl) {
-      const nRaw = ruleStr(nodes, rule.nextContentUrl, res.url)
-        .split(/\s+/)
-        .filter(Boolean)
-        .map((u) => ensureAbs(u, res.url));
+    if (tpl) {
+      // 已有模板：不读页内链接，直接推进页码
+      tplPage++;
+      next = expandPage(tpl, tplPage);
+      log?.("info", "content", `正文第 ${page + 1} 页（{page} 模板 · 第 ${tplPage} 页）: ${next}`);
+      await sleep(250);
+    } else if (rule.nextContentUrl) {
+      const nRaw = ruleStr(nodes, rule.nextContentUrl, res.url).split(/\s+/).filter(Boolean);
       if (nRaw.length > 1) log?.("warn", "content", `nextContentUrl 命中 ${nRaw.length} 个链接，已取最后一个`);
-      const n = nRaw[nRaw.length - 1] ?? "";
-      next = n && !visited.has(n) ? n : null;
-      if (next) {
-        log?.("info", "content", `正文第 ${page + 1} 页: ${next}`);
+      const raw = nRaw[nRaw.length - 1] ?? "";
+      if (raw && hasPageTpl(raw)) {
+        // 规则把自己改写成了分页模板（{{bookUrl}}##正则##_{page}.html）：首页即第 1 页，从 2 起展开
+        tpl = absKeepTpl(raw, res.url);
+        tplPage = 2;
+        next = expandPage(tpl, tplPage);
+        log?.("info", "content", `识别到 {page} 模板分页，第 2 页: ${next}`);
         await sleep(250);
+      } else {
+        const n = raw ? ensureAbs(raw, res.url) : "";
+        const dup = !!n && visited.has(n);
+        next = n && !dup ? n : null;
+        if (next) {
+          log?.("info", "content", `正文第 ${page + 1} 页: ${next}`);
+          await sleep(250);
+        } else {
+          // 单页章节也要有明确日志：否则调试时看不出「这章本来就不分页」还是「翻页规则没配/没命中」
+          const why = raw ? (dup ? "下一页链接指向已抓过的页" : "下一页链接无效") : "nextContentUrl 未命中下一页链接";
+          log?.("info", "content", page === 1 ? `正文无翻页：${why}（按单页处理，规则没配好也会这样）` : `正文翻页结束：第 ${page} 页${why}`);
+        }
       }
+    } else {
+      log?.("info", "content", page === 1 ? "正文无翻页：未配置 nextContentUrl（按单页处理）" : `正文翻页结束：第 ${page} 页之后不再翻页`);
     }
   }
   if (page > 1) log?.("ok", "content", `分页合并完成：${page} 页`);

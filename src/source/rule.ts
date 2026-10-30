@@ -74,7 +74,7 @@ function unquote(s: string): string {
 }
 
 // —— Legado 关键字 → CSS（仅导入时转换）：class.x → .x · tag.x → x · id.x → #x · tag.a.-1 → a.-1 ——
-// text.x（按文字找元素）无 CSS 等价，原样保留（求值为空）
+// text.x（按文字找元素）→ 最内层文本匹配选择器，见 textSelector
 function convertSeg(seg: string): string {
   const kw = seg.match(/^(class|tag|id)\.([^@]+?)(?:\.(-?\d+))?$/);
   if (!kw) return seg;
@@ -84,6 +84,16 @@ function convertSeg(seg: string): string {
   if (type === "class") sel = isIdent(arg) ? `.${arg}` : `[class~="${arg}"]`;
   else sel = isIdent(arg) ? `#${arg}` : `[id="${arg}"]`;
   return nth ? `${sel} ${arg}.eq(${nth})` : sel;
+}
+
+// Legado 的 text.xxx ≡ //*[text()="xxx"]（直接文本等于该值）。
+// CSS 没有文本伪类，用 :contains 取「自身含该文本、子孙不再含」的最内层元素近似：
+// <a>下一页</a> 命中 a 本身；<a><span>下一页</span></a> 命中 span（与 text() 的语义一致）。
+// 不加 :not(:has(...)) 会连 body/html 一起命中，取 @href 时祖先的空值会污染结果。
+// 文本里的引号/反斜杠会被 CSS 解析吃掉，这里直接剔除（"下一页" 这类词实际不会出现）
+function textSelector(text: string): string {
+  const q = `"${text.replace(/["\\]/g, "")}"`;
+  return `*:contains(${q}):not(:has(*:contains(${q})))`;
 }
 
 // 单段（@分节的一段）→ 选择器 / 调用
@@ -97,6 +107,9 @@ function convertSegToStep(seg: string, first: boolean, sel: string, calls: strin
       idx = parseInt(m[2]);
     }
   }
+  // text.下一页 / text.下一页.-1（索引已被上面剥掉）
+  const txt = s.match(/^text\.(.+)$/);
+  if (txt) s = textSelector(txt[1]);
   if (CONTENT_CALLS[s]) {
     calls.push(CONTENT_CALLS[s]);
     return;
@@ -136,8 +149,13 @@ function convertSegToStep(seg: string, first: boolean, sel: string, calls: strin
 }
 
 // 主段转换：## 之后的段不参与；已是 v2 的原样返回
+// 例外：存量数据里 `text.xxx` 曾原样保留（求值为空），转换后存成 "text.下一页.attr('href')"，
+// 这种「文本段 + 已是 v2 调用链」的写法要先把文本段替换掉，否则再 normalize 也修不回来。
+const V2_TAIL = new RegExp(`^text\\.(.+?)\\.(?=(?:${CALL_NAMES})\\()`);
 function convertMain(main: string): string {
   main = main.trim();
+  const legacyText = main.match(V2_TAIL);
+  if (legacyText) return textSelector(legacyText[1]) + main.slice(legacyText[0].length - 1);
   if (!main || main.startsWith("$") || main.startsWith("{{") || isJsRule(main) || ALREADY_V2.test(main) || FULLY_QUOTED.test(main)) return main;
   const segs = main.split("@").map((s) => s.trim()).filter(Boolean);
   if (!segs.length) return main;
@@ -352,7 +370,17 @@ function evalChain(cur: Node[], calls: Call[]): Node[] {
         break;
       case "attr": {
         const name = unquote(c.arg);
-        for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: n.$(n.el).attr(name) ?? "" });
+        for (const n of cur) {
+          if (n.kind !== "html") continue;
+          let v = n.$(n.el).attr(name) ?? "";
+          // 文本匹配（text.下一页）常命中 <a><span>下一页</span></a> 里的内层元素：
+          // 自身没有链接属性就向上取最近带该属性的祖先，否则 text.xxx@href 在包一层的站点上取不到地址
+          if (!v && name === "href") {
+            const anc = n.$(n.el).parents("[href]").first();
+            if (anc.length) v = anc.attr("href") ?? "";
+          }
+          next.push({ kind: "json", v });
+        }
         break;
       }
     }
