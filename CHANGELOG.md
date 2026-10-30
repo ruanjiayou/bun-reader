@@ -16,6 +16,10 @@
 
 - **修复「搜索 HTTP 500、详情却正常」**：根因是站点换域名的 301 Location 是绝对路径且不带查询串（`www.sudugu.org → www.shudugu.org → www.suduguu.com`，`?key=` 被丢），跟随重定向后落到新域名的空参数搜索页 → 500；详情/目录靠 path 不靠 query，所以不受影响。`fetcher.ts` 加兜底：GET + 无 body + 跨域名跳转 + 最终 URL 无查询串 + 响应 ≥400 时，用「最终域名 + 原查询串」重试一次（命中打 warn 日志）；同域名重定向与 POST 不触发。HTTP 报错信息补上最终 URL（原来只有 `HTTP 500 · utf-8`，看不出落在哪个域名）。新增 `test/fetcher.test.ts` 4 例（真实本地 server 模拟跨域名丢参），57/57 通过
 - **书源「速读谷」域名更新**：`www.sudugu.org` → `www.suduguu.com`（bookSourceUrl / searchUrl），旧域名现在靠上面兜底也能work，但存库的书 URL 直接指向新域名更稳（改前已备份 db 到 `/tmp/book.db.bak.*`）
+- **探索（分类浏览）**：书架顶栏新增「探索」入口，新页面 `/explore` 上下结构——顶部书源 select + 分类按钮单行横滚，下方 `flex-1` 滚动书籍列表 + 底部翻页（空页即到底）；点卡片与搜索页一致跳 `/preview`
+  - 后端：`parseExploreGroups`（exploreUrl 的 `标题::模板` / 旧式 `标题,http…` / 裸模板行，JS 生成的不支持）+ `exploreSource`（复用 buildReq 替换 `{{page}}`，`ruleExplore` 缺省回退 `ruleSearch`，搜索/探索共用 `mapBooks` 字段映射）；路由 `GET /api/sources/explore`（探索源清单）+ `GET /api/sources/:id/explore?url=&page=`；`normalizeSource` 补上 `ruleExplore` 组的规则转换
+  - 前端：`Explore.tsx`（列表区 `min-h-0 flex-1 overflow-y-auto`，换源/分类/页自动回顶；select 同输入框 16px 规则）；Shelf 顶栏加「探索」；App 路由 `/explore`
+  - 实测速读谷：14 个分类，玄幻第 1/2 页各 10 条，书名/作者/链接/封面解析正常；新增 `test/explore.test.ts` 8 例，65/65 过
 
 ## 2026-10-29（续 6）
 
