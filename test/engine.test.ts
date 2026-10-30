@@ -355,33 +355,66 @@ describe("header 统一对象化（normalizeSource）", () => {
 });
 
 describe("旧语法 → v2 迁移转换（normalizeSource，幂等）", () => {
-  test("Legado 关键字与 @ 分节 → 链式调用", () => {
-    expect(legadoToOurs("class.bookbox")).toBe(".bookbox");
+  test("Legado 关键字与 @ 分节 → 链式调用（导航链压缩进选择器）", () => {
+    expect(legadoToOurs("class.bookbox")).toBe("'.bookbox'");
     expect(legadoToOurs("text")).toBe(".text()");
     expect(legadoToOurs("href")).toBe(".attr('href')");
-    expect(legadoToOurs("a@text")).toBe("a.text()");
+    expect(legadoToOurs("a@text")).toBe("'a'.text()");
     expect(legadoToOurs("@text")).toBe(".text()");
-    expect(legadoToOurs("a@href")).toBe("a.attr('href')");
-    expect(legadoToOurs("id.info@tag.h1@text")).toBe("#info.find('h1').text()");
-    expect(legadoToOurs("class.bookname@tag.a.0@href")).toBe(".bookname.find('a').eq(0).attr('href')");
-    expect(legadoToOurs("id.allchapter@tag.a.-1@href")).toBe("#allchapter.find('a').eq(-1).attr('href')");
-    expect(legadoToOurs("h4 a@text")).toBe("h4 a.text()");
-    expect(legadoToOurs("a.0@text")).toBe("a.eq(0).text()");
+    expect(legadoToOurs("a@href")).toBe("'a'.attr('href')");
+    expect(legadoToOurs("id.info@tag.h1@text")).toBe("'#info h1'.text()");
+    expect(legadoToOurs("class.bookname@tag.a.0@href")).toBe("'.bookname a:eq(0)'.attr('href')");
+    expect(legadoToOurs("id.allchapter@tag.a.-1@href")).toBe("'#allchapter a:eq(-1)'.attr('href')");
+    expect(legadoToOurs("h4 a@text")).toBe("'h4 a'.text()");
+    expect(legadoToOurs("a.0@text")).toBe("'a:eq(0)'.text()");
     expect(legadoToOurs("attr(data-src)")).toBe(".attr('data-src')");
     expect(legadoToOurs("data-src")).toBe(".attr('data-src')");
     expect(legadoToOurs("children")).toBe(".children()");
-    expect(legadoToOurs("tag(title).text()".replace(".text()", ""))).toBe("title");
+    expect(legadoToOurs("tag(title).text()".replace(".text()", ""))).toBe("'title'");
   });
 
   test("|| 回退与 ## 段不参与转换、JsonPath/模板原样保留", () => {
     expect(legadoToOurs("id.x@tag.a@href||{{bookUrl}}##/a/(\\d+)##/b/$1.html")).toBe(
-      "#x.find('a').attr('href')||{{bookUrl}}##/a/(\\d+)##/b/$1.html",
+      "'#x a'.attr('href')||{{bookUrl}}##/a/(\\d+)##/b/$1.html",
     );
     expect(legadoToOurs("a@onclick##.*?t=([^&]*).*##$1##urlDecode,base64Decode")).toBe(
-      "a.attr('onclick')##.*?t=([^&]*).*##$1##urlDecode,base64Decode",
+      "'a'.attr('onclick')##.*?t=([^&]*).*##$1##urlDecode,base64Decode",
     );
     expect(legadoToOurs("$.data.books[*].name")).toBe("$.data.books[*].name");
     expect(legadoToOurs("{{bookUrl}}##\\.html$##-{page}.html")).toBe("{{bookUrl}}##\\.html$##-{page}.html");
+  });
+
+  test("导航链压缩：find/eq 并进引号选择器（幂等）", () => {
+    expect(legadoToOurs("p.eq(1).find('a').text()")).toBe("'p:eq(1) a'.text()");
+    expect(legadoToOurs(".itemtxt.find('p').eq(1).find('a').text()")).toBe("'.itemtxt p:eq(1) a'.text()");
+    expect(legadoToOurs("p.first().find('a').attr('href')")).toBe("'p:eq(0) a'.attr('href')");
+    expect(legadoToOurs("p.last().text()")).toBe("'p:eq(-1)'.text()");
+    // 压缩前后求值结果一致
+    const nodes = htmlNodes(`<div class="itemtxt"><p>0</p><p>1<a href="/x">X</a></p><p>2<a href="/y">Y</a></p></div>`);
+    expect(nodeText(applyRule(nodes, ".itemtxt.find('p').eq(1).find('a').attr('href')")[0])).toBe("/x");
+    expect(nodeText(applyRule(nodes, legadoToOurs(".itemtxt.find('p').eq(1).find('a').attr('href')"))[0])).toBe("/x");
+    // 相对链开头的 .eq（作用在输入集本身）不压缩；children/parent 等断开压缩
+    expect(legadoToOurs(".eq(1).find('a').text()")).toBe(".eq(1).find('a').text()");
+    expect(legadoToOurs(".box.find('a').children().text()")).toBe("'.box a'.children().text()");
+    for (const r of ["p.eq(1).find('a').text()", ".itemtxt.find('p').eq(1).find('a').text()", "'p:eq(1) a'.text()", "'.bookbox'"]) {
+      const once = legadoToOurs(r);
+      expect(legadoToOurs(once)).toBe(once);
+    }
+  });
+
+  test(".trim() 取值后处理：去空白与两端字面量（简介：/作者： 标签）", () => {
+    const nodes = htmlNodes(`<div><p class="a">  作者：忘语  </p><p class="b">简介：凡人流开山之作</p></div>`);
+    expect(nodeText(applyRule(nodes, "'.a'.text().trim('作者：')")[0])).toBe("忘语");
+    expect(nodeText(applyRule(nodes, "'.b'.text().trim('简介：')")[0])).toBe("凡人流开山之作");
+    expect(nodeText(applyRule(nodes, "'.a'.text().trim()")[0])).toBe("作者：忘语"); // 无参=仅去空白
+    expect(nodeText(applyRule(nodes, "'.b'.text().trim('不存在')")[0])).toBe("简介：凡人流开山之作");
+    // attr 之后 trim 去空白；textBlocks 之后同样可 trim
+    const a = htmlNodes(`<a href="  /x  ">y</a>`);
+    expect(nodeText(applyRule(a, "a.attr('href').trim()")[0])).toBe("/x");
+    const c = htmlNodes(`<div id="c"><p>简介：第一段</p></div>`);
+    expect(nodeText(applyRule(c, "'#c'.textBlocks().trim('简介：')")[0])).toBe("第一段");
+    // 链上带 trim 时幂等不变形
+    expect(legadoToOurs("'.b'.text().trim('简介：')")).toBe("'.b'.text().trim('简介：')");
   });
 
   test("幂等：转一次和转两次结果一致", () => {

@@ -6,6 +6,7 @@ import { httpText } from "../source/fetcher";
 import { engineFor } from "../source/facade";
 import type { LogLevel } from "../source/engine";
 import { normalizeSource } from "../source/rule";
+import { exploreSource, parseExploreGroups } from "../source/engine";
 import { rulesToScript } from "../source/convert";
 import { saveScriptFile, formToCode, validateScriptCode, type ScriptForm } from "../source/script";
 import type { AuthEnv } from "../auth";
@@ -41,6 +42,50 @@ sourceRoutes.get("/", async (c) => {
 sourceRoutes.get("/export", async (c) => {
   const rows = await db.select({ json: sources.json }).from(sources);
   return c.json(rows.map((r) => JSON.parse(r.json)));
+});
+
+// 探索源列表：启用且 exploreUrl 能解析出分类的规则源（脚本源暂不支持探索）。
+// 注意必须注册在 /:id 之前，否则会被当成 id=explore 吃掉
+sourceRoutes.get("/explore", async (c) => {
+  const rows = await db
+    .select({ id: sources.id, name: sources.name, json: sources.json, type: sources.type })
+    .from(sources)
+    .where(eq(sources.enabled, true));
+  const list = rows
+    .filter((r) => r.type === "rules")
+    .map((r) => {
+      let categories: { title: string; tpl: string }[] = [];
+      try {
+        categories = parseExploreGroups(normalizeSource(JSON.parse(r.json)));
+      } catch {
+        /* 坏 json 的源没有探索 */
+      }
+      return { id: r.id, name: r.name, categories };
+    })
+    .filter((r) => r.categories.length);
+  return c.json(list);
+});
+
+// 抓一个探索分类页：url = 分类模板（原样透传给 buildReq 替换 {{page}}），page 从 1 起
+sourceRoutes.get("/:id/explore", async (c) => {
+  const [row] = await db.select().from(sources).where(eq(sources.id, Number(c.req.param("id"))));
+  if (!row) return c.json({ error: "书源不存在" }, 404);
+  if (row.type !== "rules") return c.json({ error: "脚本源暂不支持探索" }, 400);
+  const tpl = c.req.query("url") ?? "";
+  if (!tpl) return c.json({ error: "缺少分类模板 url" }, 400);
+  let src: any;
+  try {
+    src = normalizeSource(JSON.parse(row.json));
+  } catch {
+    return c.json({ error: "书源 JSON 解析失败" }, 500);
+  }
+  const page = Math.min(Math.max(1, Number(c.req.query("page")) || 1), 200);
+  try {
+    const books = await exploreSource(src, tpl, page);
+    return c.json({ page, books });
+  } catch (e: any) {
+    return c.json({ error: e?.message ?? String(e) }, 502);
+  }
 });
 
 sourceRoutes.get("/:id", async (c) => {

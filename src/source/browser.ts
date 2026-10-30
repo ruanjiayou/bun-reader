@@ -1,110 +1,46 @@
-import { AsyncLocalStorage } from "node:async_hooks";
 import { log } from "../log";
 
-// —— Playwright 浏览器（WAF / 验证码 / 加密 AJAX 站点专用）——
-// 单实例双模式：headed（默认，调试/预览，窗口可见、人工能介入验证）/
-//              headless（真实抓取：目录后台补/全本缓存/正文/刷新，经 runWithBrowserMode("headless") 注入）。
-// 共用同一个 profile（data/browser-profile），cookie 天然互通：
-//   切换模式时等当前实例空闲（无未关页面）→ 关闭 → 以新模式重启（cookie 在 profile 里自动保留）。
-// 不能同时开两个实例：Bun 下同进程第二个浏览器实例会卡死（实测 headed/headless 顺序均复现）；
-//   因此调试与批量抓取并发时后到者等待，超时报「浏览器被 XX 占用」。
-// 无头 UA 覆写：Chromium 无头 UA 含 HeadlessChrome 会被 WAF 识别，固定为正常 Chrome UA。
-// BROWSER_HEADLESS=1 强制全局无头（服务器部署用）。
-// channel 探测顺序：系统 Chrome → 系统 Edge → playwright 自带 chromium。
+// —— 远程浏览器（KasmWeb chrome 容器 · CDP 连接）——
+// 本地不再拉起 chromium：连接部署在 docker 的 kasmweb/chrome（compose 见 notes/docker/chromium-vnc）。
+// 默认端点 http://127.0.0.1:9222（宿主 9222 → 容器 cdp-proxy 9223 → chrome 9222），CDP_URL 可覆盖。
+// 形态收益：常驻实例（零启动成本）、cookie 落容器 profile 卷持久化、人机验证可开 VNC 网页（:6901）操作同一窗口。
+// 关键约束：**绝不能 browser.close()**——共享实例，close 会断开连接并清上下文；只关自己开的页。
+// 容器重启后连接失效：getCtx 检测 isConnected 自动重连。
+// 旧的 headed/headless 双模式、profile 锁、UA 覆写全部取消：远程是唯一实例且就是真实 Chrome（navigator.webdriver=false）。
 
-type BMode = "headed" | "headless";
+const CDP_URL = process.env.CDP_URL || "http://127.0.0.1:9222";
 
-const modeAls = new AsyncLocalStorage<BMode>();
-// 在 fn 执行期间把浏览器模式设为 mode（真实抓取路径用：runWithBrowserMode("headless", ...)）
-export function runWithBrowserMode<T>(mode: BMode, fn: () => T): T {
-  return modeAls.run(mode, fn);
-}
+let browserP: Promise<any> | null = null;
+const openPages = new Set<any>(); // 本进程打开的页：退出时清掉，避免容器里越积越多
 
-function resolveMode(explicit?: boolean): BMode {
-  if (process.env.BROWSER_HEADLESS === "1") return "headless";
-  if (explicit !== undefined) return explicit ? "headless" : "headed";
-  return modeAls.getStore() ?? "headed";
-}
-
-// 无头上下文的 UA（去 HeadlessChrome；Chrome 大版本升级后需同步）
-const HEADLESS_UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/148.0.0.0 Safari/537.36";
-
-const PROFILE = "data/browser-profile";
-// 每模式在用页面数（page close 事件回调递减；等待模式切换的空闲判定用）
-const pageCnt: Record<BMode, number> = { headed: 0, headless: 0 };
-// 当前浏览器实例（同一时刻只有一个）
-let state: { mode: BMode; p: Promise<any> } | null = null;
-let switchChain: Promise<unknown> = Promise.resolve();
-let exitHooked = false;
-
-async function launch(mode: BMode): Promise<any> {
+async function connect(): Promise<any> {
   const { chromium } = await import("playwright");
-  const headless = mode === "headless";
-  // 进程退出时顺手关浏览器，避免残留 chrome 进程（只挂一次）
-  if (!exitHooked) {
-    exitHooked = true;
-    process.once("exit", () => {
-      state?.p.then((c) => c.close()).catch(() => {});
-    });
+  try {
+    const b = await chromium.connectOverCDP(CDP_URL);
+    log.info("browser", `已连接远程浏览器（${CDP_URL} · Chrome ${b.version()}）`);
+    return b;
+  } catch (e: any) {
+    browserP = null;
+    throw new Error(
+      `远程浏览器连接失败（${CDP_URL}）——请确认 kasmweb/chrome 容器已启动（docker compose up -d）且 CDP 端口可达。原始错误：${String(e?.message ?? e).split("\n")[0]}`,
+    );
   }
-  const tries: Record<string, string>[] = [{ channel: "chrome" }, { channel: "msedge" }, {}];
-  const errs: string[] = [];
-  for (const opt of tries) {
-    try {
-      const ctx = await chromium.launchPersistentContext(PROFILE, {
-        headless,
-        executablePath: '/usr/bin/chromium',
-        viewport: { width: 1280, height: 800 },
-        ...(headless ? { userAgent: HEADLESS_UA } : {}),
-        // 降低自动化特征（Cloudflare Turnstile 等会检测 navigator.webdriver / enable-automation）：
-        // --disable-blink-features=AutomationControlled 让 webdriver=false；去掉默认 --enable-automation 开关
-        args: ["--disable-blink-features=AutomationControlled"],
-        ignoreDefaultArgs: ["--enable-automation"],
-        ...opt,
-      });
-      log.info("browser", `浏览器已启动（${opt.channel ?? "chromium"} · ${headless ? "无头" : "有头"} · ${PROFILE}）`);
-      return ctx;
-    } catch (e: any) {
-      errs.push(`${opt.channel ?? "chromium"}: ${String(e?.message ?? e).split("\n")[0]}`);
-    }
-  }
-  throw new Error(
-    `浏览器启动失败（依次尝试 chrome/msedge/chromium）——${errs.join("；")}。` +
-      `常见原因：另一个进程（如正在运行的 bun-reader 服务或残留 chrome 窗口）占用了同一 profile 目录，请先关闭后重试`,
-  );
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-// 切换到目标模式：串行化；切换前等当前实例空闲（无未关页面），关闭后以新模式重启（同 profile）
-function switchTo(mode: BMode): Promise<void> {
-  const run = switchChain.then(async () => {
-    if (state?.mode === mode) return;
-    if (state) {
-      const oldMode = state.mode;
-      const deadline = Date.now() + 120_000;
-      while (pageCnt[oldMode] > 0) {
-        if (Date.now() > deadline)
-          throw new Error(
-            `浏览器当前被${oldMode === "headless" ? "无头抓取任务" : "有头会话"}占用，无法切换到${mode === "headless" ? "无头" : "有头"}模式，请稍后重试`,
-          );
-        await sleep(300);
-      }
-      const old = state.p;
-      state = null;
-      await old.then((c) => c.close()).catch(() => {});
-      await sleep(500); // 等 profile 锁释放
-    }
-    state = { mode, p: launch(mode) };
-  });
-  switchChain = run.catch(() => {});
-  return run;
+function getBrowser(): Promise<any> {
+  if (!browserP) browserP = connect();
+  return browserP;
 }
 
-async function getContext(mode: BMode): Promise<any> {
-  if (!state || state.mode !== mode) await switchTo(mode);
-  return state!.p;
+// 默认上下文 = 容器 Chrome 的持久化 profile（cookie 全局共享，验证过一次后续复用）
+async function getCtx(): Promise<any> {
+  const b = await getBrowser();
+  if (!b.isConnected()) {
+    log.warn("browser", "远程浏览器连接已断开（容器重启？），自动重连");
+    browserP = null;
+    return getCtx();
+  }
+  return b.contexts()[0] ?? b.newContext();
 }
 
 const CAPTCHA_RE = /验证码|人机验证|安全验证|安全挑战|请完成验证|captcha/i;
@@ -141,21 +77,22 @@ export interface BrowserPage {
   close(): Promise<void>;
 }
 
-// 打开一个浏览器页：自动等 WAF 挑战/验证码通过（Turnstile 类自动过，图片验证码需有头窗口手动完成），返回页面操作句柄
-// headless 选项：true=无头（真实抓取路径经 runWithBrowserMode 注入，一般不用显式传）
+// 打开一个浏览器页（远程容器里的一个 tab）：自动等 WAF 挑战/验证码通过（Turnstile 类自动过，
+// 图片验证码开 VNC 网页 :6901 在同一窗口手动完成），返回页面操作句柄。
+// opts.headless 已废弃（远程唯一实例无此区分），保留参数只为脚本 API 兼容。
 export async function browserOpen(url: string, opts: { headless?: boolean; timeoutMs?: number } = {}): Promise<BrowserPage> {
-  const mode = resolveMode(opts.headless);
-  const ctx = await getContext(mode);
+  const ctx = await getCtx();
   const page = await ctx.newPage();
-  pageCnt[mode]++;
-  page.once("close", () => pageCnt[mode]--); // 任何途径关闭（句柄 close / 出错兜底 / 用户关窗口）都递减
+  openPages.add(page);
+  page.once("close", () => openPages.delete(page)); // 任何途径关闭（句柄 close / 出错兜底 / VNC 里手动关）都摘除
   try {
+    await page.setViewportSize({ width: 1280, height: 800 }).catch(() => {});
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: opts.timeoutMs ?? 45_000 });
     await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
     let html = await safeContent(page);
     const onChallenge = () => /WAF\/VERIFY/i.test(page.url());
     if (isCaptchaPage(html) || onChallenge()) {
-      log.warn("browser", `WAF/人机验证挑战（${page.url().slice(0, 90)}），等待通过（最长 180s；Turnstile 类挑战通常自动通过，图片验证码需在窗口手动输入）…`);
+      log.warn("browser", `WAF/人机验证挑战（${page.url().slice(0, 90)}），等待通过（最长 180s；Turnstile 类通常自动通过，图片验证码请开 VNC 窗口 :6901 手动输入）…`);
       const deadline = Date.now() + 180_000;
       let lastTip = Date.now();
       let passed = false;
@@ -165,7 +102,7 @@ export async function browserOpen(url: string, opts: { headless?: boolean; timeo
           html = await safeContent(page);
         } catch (e: any) {
           if (/closed|destroyed/i.test(String(e?.message ?? e)))
-            throw new Error("浏览器窗口已关闭，人机验证中断（验证期间请勿关闭浏览器窗口）");
+            throw new Error("浏览器页已关闭，人机验证中断（验证期间请勿在 VNC 里关掉该 tab）");
           throw e;
         }
         // 通过标志：不再是挑战页（Turnstile 自动跳转 / 图片验证码提交后 redirect 都走这里）
@@ -174,12 +111,12 @@ export async function browserOpen(url: string, opts: { headless?: boolean; timeo
           break;
         }
         if (Date.now() - lastTip > 30_000) {
-          log.info("browser", "仍在等待人机验证…（Turnstile 会自动通过；如需图片验证码请在浏览器窗口输入并提交）");
+          log.info("browser", "仍在等待人机验证…（Turnstile 会自动通过；如需图片验证码请在 VNC 窗口 :6901 输入并提交）");
           lastTip = Date.now();
         }
       }
-      if (!passed) throw new Error("人机验证未通过（等待 180s 超时），请重试并在浏览器窗口及时完成验证");
-      log.info("browser", "验证已通过，cookie 已存入持久化 profile，下次直接复用");
+      if (!passed) throw new Error("人机验证未通过（等待 180s 超时），请在 VNC 窗口 :6901 完成验证后重试");
+      log.info("browser", "验证已通过，cookie 已存入容器 profile，下次直接复用");
       await page.waitForLoadState("networkidle", { timeout: 15_000 }).catch(() => {});
     }
   } catch (e) {
@@ -215,22 +152,12 @@ export async function browserOpen(url: string, opts: { headless?: boolean; timeo
   };
 }
 
-// 关掉当前实例并等它真的关完（退出流程用）。
-// exit 钩子里的 close() 是「发出去就不管」——进程立刻死掉后，chromium 子进程可能被 init 收养继续活着，
-// 既占着 data/browser-profile 的锁，也可能把从父进程继承来的监听 fd 一起带进阴间，
-// 导致新进程 bind 8094 报 EADDRINUSE（表现就是「重启失败」）。所以关服务时先 await 这个。
+// 服务退出：只关本进程打开的页。**不关远程浏览器**（共享常驻实例，browser.close() 会断开连接清上下文）。
 export async function closeBrowser(): Promise<void> {
-  const cur = state;
-  if (!cur) return;
-  state = null;
-  pageCnt.headed = 0;
-  pageCnt.headless = 0;
-  try {
-    const ctx = await cur.p; // 可能还在启动中：启动完成后立刻关
-    await ctx.close();
-  } catch {
-    /* 已关闭 / 启动失败 */
-  }
+  const pages = [...openPages];
+  openPages.clear();
+  await Promise.allSettled(pages.map((p) => p.close().catch(() => {})));
+  browserP = null; // 丢弃连接引用，WS 随进程退出消亡，远端 Chrome 不受影响
 }
 
 // 一次性抓取：打开 → 等验证/挑战 → 取 HTML → 关页
@@ -243,12 +170,14 @@ export async function browserText(url: string, opts: { headless?: boolean; timeo
   }
 }
 
-// 持久化 profile 里某 URL 同域的 cookie 串（"k=v; k=v"），供服务端 fetchText 合并复用；
-// 浏览器实例未启动时返回空串（不会为了取 cookie 拉起浏览器；单实例共用 profile，无需分模式）
-export async function browserCookieHeader(url: string, headless?: boolean): Promise<string> {
-  if (!state) return "";
+// 远程 profile 里某 URL 同域的 cookie 串（"k=v; k=v"），供服务端 fetchText 合并复用；
+// 浏览器未连接时返回空串（不会为了取 cookie 建立连接）
+export async function browserCookieHeader(url: string): Promise<string> {
+  if (!browserP) return "";
   try {
-    const ctx = await state.p;
+    const b = await getBrowser();
+    if (!b.isConnected()) return "";
+    const ctx = b.contexts()[0];
     const cookies = await ctx.cookies(url);
     return cookies.map((c: any) => `${c.name}=${c.value}`).join("; ");
   } catch {

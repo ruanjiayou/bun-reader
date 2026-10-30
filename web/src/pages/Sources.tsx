@@ -196,6 +196,7 @@ export default function Sources() {
   const [searchResults, setSearchResults] = useState<SearchBook[]>([]);
   const [logs, setLogs] = useState<DebugEvt[]>([]);
   const [debugging, setDebugging] = useState(false);
+  const [openSecs, setOpenSecs] = useState<Record<string, boolean>>({}); // 表单区块折叠态（缺省=展开）
   const [tickSec, setTickSec] = useState(0); // SSE 心跳：仍在运行多少秒（长时间静默时给反馈）
   const [dirty, setDirty] = useState(false); // 表单/JSON 有未保存改动 → 保存按钮高亮
   const [dbgBook, setDbgBook] = useState<DebugBookInfo | null>(null); // 调试全链路成功后的书籍信息，可加书架
@@ -683,36 +684,59 @@ export default function Sources() {
               </fieldset>
             </>
           ) : (
-            SECTIONS.map((sec) => (
-            <fieldset key={sec.title} className="rounded-xl bg-neutral-800 p-4">
-              <legend className="px-1 text-sm font-bold text-amber-400">{sec.title}</legend>
-              <div className="space-y-2">
-                {sec.fields.map(({ path, label, ph, rows: rowsN = 1 }) => (
-                  <label key={path} className="block">
-                    <span className="mb-0.5 block text-xs text-neutral-400">{label}</span>
-                    {rowsN > 1 ? (
-                      <textarea
-                        rows={rowsN}
-                        className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500"
-                        placeholder={ph}
-                        value={getIn(form, path) ?? ""}
-                        onChange={(e) => setField(path, e.target.value)}
-                        onBlur={() => setJsonText(formJson(form))}
-                      />
-                    ) : (
-                      <input
-                        className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500"
-                        placeholder={ph}
-                        value={getIn(form, path) ?? ""}
-                        onChange={(e) => setField(path, e.target.value)}
-                        onBlur={() => setJsonText(formJson(form))}
-                      />
-                    )}
-                  </label>
-                ))}
-              </div>
-            </fieldset>
-            ))
+            SECTIONS.map((sec) => {
+              const open = openSecs[sec.title] ?? true;
+              return (
+                <div key={sec.title} className="rounded-xl bg-neutral-800 p-4">
+                  {/* 折叠头：点标题行收放，箭头旋转 + 高度 200ms 过渡（grid-rows 0fr↔1fr） */}
+                  <button
+                    type="button"
+                    onClick={() => setOpenSecs((m) => ({ ...m, [sec.title]: !(m[sec.title] ?? true) }))}
+                    className="flex w-full items-center gap-2 text-left"
+                  >
+                    <span className="text-sm font-bold text-amber-400">{sec.title}</span>
+                    <svg
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth={2.5}
+                      className={`ml-auto h-3.5 w-3.5 flex-none text-neutral-500 transition-transform duration-200 ${open ? "" : "-rotate-90"}`}
+                    >
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
+                  <div className={`grid transition-[grid-template-rows] duration-200 ease-out ${open ? "grid-rows-[1fr]" : "grid-rows-[0fr]"}`}>
+                    <div className="overflow-hidden">
+                      <div className="space-y-2 pt-2">
+                        {sec.fields.map(({ path, label, ph, rows: rowsN = 1 }) => (
+                          <label key={path} className="block">
+                            <span className="mb-0.5 block text-xs text-neutral-400">{label}</span>
+                            {rowsN > 1 ? (
+                              <textarea
+                                rows={rowsN}
+                                className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500"
+                                placeholder={ph}
+                                value={getIn(form, path) ?? ""}
+                                onChange={(e) => setField(path, e.target.value)}
+                                onBlur={() => setJsonText(formJson(form))}
+                              />
+                            ) : (
+                              <input
+                                className="w-full rounded-lg bg-neutral-700 px-2 py-1.5 font-mono text-xs placeholder:text-neutral-500"
+                                placeholder={ph}
+                                value={getIn(form, path) ?? ""}
+                                onChange={(e) => setField(path, e.target.value)}
+                                onBlur={() => setJsonText(formJson(form))}
+                              />
+                            )}
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
           )}
         </div>
 

@@ -97,6 +97,7 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
       <header className="mb-3 flex items-center justify-between">
         <h1 className="text-lg font-bold">书架</h1>
         <div className="flex items-center gap-3 text-sm text-neutral-400">
+          <Link to="/explore" className="hover:text-neutral-200">探索</Link>
           <Link to="/search" className="hover:text-neutral-200">搜索</Link>
           <Link to="/sources" className="hover:text-neutral-200">书源</Link>
           {/* 未登录：登录按钮；已登录：头像 + 下拉（昵称/设置/退出）。下拉打开时盖一层全屏透明层接收点外关闭 */}

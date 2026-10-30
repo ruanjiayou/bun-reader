@@ -2,6 +2,21 @@
 
 按日期记录功能变更（设计规范见 [docs/design.md](./docs/design.md)，当前计划见 [docs/plans.md](./docs/plans.md)）。
 
+## 2026-10-30
+
+- **规则导航链压缩**：`legadoToOurs` 自动把 `.find('sel')`/`.eq(n)`/`.first()`/`.last()` 并进选择器（空格相接、`:eq(n)`），整段引号包裹——`p.eq(1).find('a').text()` → `'p:eq(1) a'.text()`，`.itemtxt.find('p').eq(1).find('a').text()` → `'.itemtxt p:eq(1) a'.text()`；children/parent/next/prev 与取值调用断开保留，相对链开头的 `.eq` 不压缩；幂等（存量已转换规则同样吃进去）。依据：`:eq(N)` 与 `.eq(N)` 同为结果集全局索引（cheerio 1.2 实测单/多容器一致）+ 引擎按项求值
+- **`.trim()` 后处理**：跟在 `.text()`/`.textBlocks()`/`.attr()` 等取值调用后；无参=去两端空白，`.trim('简介：')`/`.trim('作者：')` 再去两端字面量（标签前缀清理）。引擎 `splitLatestChapter` 互换取值调用时保留尾部 trim 链
+- **书源编辑表单折叠**：左栏规则源 基本/搜索/详情/目录/正文 区块改为折叠面板（缺省展开），点标题行收放，箭头旋转 + 高度 200ms 过渡（grid-rows 0fr↔1fr），收起不丢表单值
+
+- **浏览器抓取远程化**：`browser.ts` 不再本地拉起 chromium，改为 `chromium.connectOverCDP` 连接部署好的 `kasmweb/chrome` 容器（compose 见 `notes/docker/chromium-vnc`），默认 `http://127.0.0.1:9222`，`CDP_URL` 环境变量可覆盖
+  - 持久化 profile 移到容器侧（`./profile` 卷），cookie 验证一次全后续复用；人机验证可开 VNC 网页（`:6901`）在同一窗口手动完成
+  - **绝不能 `browser.close()`**（共享实例，close 即断连清上下文）：`closeBrowser()` 只关本进程打开的 tab 并丢弃连接；容器重启后自动重连
+  - headed/headless 双模式、channel 探测、UA 覆写、本地 profile 锁全部删除——远程即真实 Chrome（实测 `navigator.webdriver=false`）；`runWithBrowserMode` 随之移除，`books.ts` 调用点改为直接调用
+  - supervisord 示例环境变量 `BROWSER_HEADLESS` → `CDP_URL`；EADDRINUSE/profile 锁等历史退出问题随远程化消失
+
+- **修复「搜索 HTTP 500、详情却正常」**：根因是站点换域名的 301 Location 是绝对路径且不带查询串（`www.sudugu.org → www.shudugu.org → www.suduguu.com`，`?key=` 被丢），跟随重定向后落到新域名的空参数搜索页 → 500；详情/目录靠 path 不靠 query，所以不受影响。`fetcher.ts` 加兜底：GET + 无 body + 跨域名跳转 + 最终 URL 无查询串 + 响应 ≥400 时，用「最终域名 + 原查询串」重试一次（命中打 warn 日志）；同域名重定向与 POST 不触发。HTTP 报错信息补上最终 URL（原来只有 `HTTP 500 · utf-8`，看不出落在哪个域名）。新增 `test/fetcher.test.ts` 4 例（真实本地 server 模拟跨域名丢参），57/57 通过
+- **书源「速读谷」域名更新**：`www.sudugu.org` → `www.suduguu.com`（bookSourceUrl / searchUrl），旧域名现在靠上面兜底也能work，但存库的书 URL 直接指向新域名更稳（改前已备份 db 到 `/tmp/book.db.bak.*`）
+
 ## 2026-10-29（续 6）
 
 - **重启仍报「端口 8094 被占用」：定位到进程树 + 退出流程两处**

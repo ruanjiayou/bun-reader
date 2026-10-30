@@ -6,12 +6,16 @@ import type { AnyNode } from "domhandler";
 // 规则 = ['CSS选择器'][.链式调用...] + 可选 ##正则##替换##变换 + 可选 || 回退
 // 选择器：cheerio 支持的 CSS —— '#id' / '.class' / 'a.content' / 'div.main div.content' / ':eq(N)'
 //   选择器建议用引号包裹（'h1'.text()），引擎也接受裸写 h1.text()
-//   :eq(N) 是 cheerio 原生伪类，直接透传；从根查询的全局上下文里语义=整个结果集的第 N 个（≡ .eq(N)）
+//   :eq(N) 与 .eq(N)/.first()/.last() 一样 = 整个结果集的全局索引（cheerio 1.2 实测单/多容器一致）
 // 链式调用（永远在末尾，.xxx(...) 风格）。取值核心就两个：.text() 和 .attr('name')，
-// 其余（.ownText() .textNodes() .html() .all() 及 find/children/eq/first/last/parent/next/prev 导航）是辅助：
-//   取值：.text() .ownText() .textNodes() .html() .all() .attr('name')
+// 其余（.ownText() .textNodes() .textBlocks() .html() .all() 及 find/children/eq/first/last/parent/next/prev 导航）是辅助：
+//   取值：.text() .ownText() .textNodes() .textBlocks() .html() .all() .attr('name')
+//   后处理：.trim() 去两端空白；.trim('字面量') 再去两端该字面量（处理「简介：」「作者：」这类标签前缀）
 //   导航：.find('sel') .children() .eq(n) .first() .last() .parent() .next() .prev()
-//   .eq(n)/.first()/.last() 语义=整个结果集的全局索引（与 :eq 的逐容器语义不同）
+// 导航链压缩（legadoToOurs 自动做，幂等）：.find('x') 并进选择器空格相接、.eq(n)/.first()/.last() 并成 :eq(n)，
+//   整段引号包裹 —— p.eq(1).find('a').text() → 'p:eq(1) a'.text()；.itemtxt.find('p').eq(1).find('a').text() →
+//   '.itemtxt p:eq(1) a'.text()。children/parent/next/prev 与取值调用不能并进选择器，断开后原样保留在链上；
+//   相对链开头的 .eq/.first/.last（无选择器、作用在输入集本身）保持调用形态不压缩
 // 无选择器 = 相对当前节点：章节列表项上直接 .attr('href') ≡ $(node).attr('href')，
 //            .find('a').attr('href') ≡ $(node).find('a').attr('href')
 // 保留：|| 回退、##正则##替换##变换（urlDecode/base64Decode）、{{bookUrl}}/{{baseUrl}} 模板、
@@ -58,7 +62,7 @@ const HTML_TAGS = new Set(
 const IDX = /^(.+)\.(-?\d+)$/;
 // 纯标签/类/id（可含连字符和数字，如 h1、.item-2、#grid-12）→ 不拆索引，避免误伤合法类名
 const PLAIN_SEL = /^[.#]?[A-Za-z][A-Za-z0-9_-]*$/;
-const CALL_NAMES = "text|textNodes|textBlocks|ownText|html|all|attr|find|children|eq|first|last|parent|next|prev";
+const CALL_NAMES = "text|textNodes|textBlocks|ownText|html|all|attr|find|children|eq|first|last|parent|next|prev|trim";
 // 规则末尾已是 .xxx(...) 方法调用，或选择器整体引号包裹 → 判定为 v2 语法，转换器原样返回（幂等）
 const ALREADY_V2 = new RegExp(`\\.(${CALL_NAMES})\\((?:[^()']|'[^']*'|"[^"]*")*\\)$`);
 const FULLY_QUOTED = /^'[^']*'$|^"[^"]*"$/;
@@ -167,6 +171,39 @@ function convertMain(main: string): string {
   return sel + calls.join("");
 }
 
+// —— v2 链压缩：导航调用并进选择器 ——
+// .find('x') 用空格并进选择器、.eq(n)/.first()/.last() 并成 :eq(n)（0/-1），整段引号包裹：
+//   p.eq(1).find('a').text() → 'p:eq(1) a'.text()；.itemtxt.find('p').eq(1).find('a').text() → '.itemtxt p:eq(1) a'.text()
+// 可靠性依据：:eq(N) 与 .eq(N) 同为结果集全局索引（cheerio 1.2 实测单/多容器一致）；引擎按项求值
+//（ruleStr([el],…) 单节点上下文），此时 find+eq 与选择器内 :eq 严格等价。
+// 不可并入的调用（children/parent/next/prev/取值/trim）断开压缩、原样保留在链上；相对链开头的
+// .eq/.first/.last（无选择器、作用在输入集本身）保持调用形态。幂等：压缩形态再跑不变形。
+function compressChain(main: string): string {
+  const raw = main.trim();
+  if (!raw || raw.startsWith("$") || raw.startsWith("{{") || isJsRule(raw)) return main;
+  const { sel: sel0, calls } = parseChain(raw);
+  let sel = sel0;
+  let consumed = 0;
+  for (const c of calls) {
+    if (c.name === "find") {
+      const x = unquote(c.arg);
+      if (!x || /['"]/.test(x)) break; // 段内含引号，拼进引号串会破，保持原链
+      sel = sel ? `${sel} ${x}` : x;
+      consumed++;
+    } else if (c.name === "eq" || c.name === "first" || c.name === "last") {
+      const n = c.name === "eq" ? parseInt(c.arg, 10) : c.name === "first" ? 0 : -1;
+      if (!sel || Number.isNaN(n)) break;
+      sel += `:eq(${n})`;
+      consumed++;
+    } else break;
+  }
+  if (!sel) return main;
+  // 选择器整体引号包裹（优先单引号，含单引号时换双引号，两种都含则不改写）
+  const quote = !sel.includes("'") ? "'" : !sel.includes('"') ? '"' : null;
+  if (!quote) return main;
+  return quote + sel + quote + calls.slice(consumed).map((c) => `.${c.name}(${c.arg})`).join("");
+}
+
 export function legadoToOurs(rule: string): string {
   if (!rule || !rule.trim()) return rule;
   return rule
@@ -175,8 +212,8 @@ export function legadoToOurs(rule: string): string {
       const r = part.trim();
       if (!r || r.startsWith("$") || r.startsWith("{{") || r.includes("<js>")) return r;
       const h = r.indexOf("##");
-      if (h > -1) return convertMain(r.slice(0, h)) + r.slice(h); // ## 后是正则/替换/变换，不动
-      return convertMain(r);
+      if (h > -1) return compressChain(convertMain(r.slice(0, h))) + r.slice(h); // ## 后是正则/替换/变换，不动
+      return compressChain(convertMain(r));
     })
     .join("||");
 }
@@ -227,7 +264,7 @@ export function normalizeSource(src: any): any {
     const h = parseHeaderLoose(out.header);
     if (h) out.header = h;
   }
-  for (const grp of ["ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent"]) {
+  for (const grp of ["ruleSearch", "ruleExplore", "ruleBookInfo", "ruleToc", "ruleContent"]) {
     if (out[grp] && typeof out[grp] === "object")
       out[grp] = Object.fromEntries(
         Object.entries(out[grp]).map(([k, v]) => [k, typeof v === "string" && RULE_FIELDS.has(k) ? legadoToOurs(v) : v]),
@@ -378,6 +415,24 @@ function evalChain(cur: Node[], calls: Call[]): Node[] {
           if (!v && name === "href") {
             const anc = n.$(n.el).parents("[href]").first();
             if (anc.length) v = anc.attr("href") ?? "";
+          }
+          next.push({ kind: "json", v });
+        }
+        break;
+      }
+      case "trim": {
+        // 取值后处理：无参 = 去两端空白；.trim('字面量') = 再去两端该字面量（「简介：」「作者：」标签前缀）。
+        // 只作用于字符串值（.text()/.attr() 等取值调用之后）；元素节点原样放行
+        const lit = unquote(c.arg);
+        for (const n of cur) {
+          if (n.kind !== "json" || typeof n.v !== "string") {
+            next.push(n);
+            continue;
+          }
+          let v = n.v.trim();
+          if (lit) {
+            if (v.startsWith(lit)) v = v.slice(lit.length).trim();
+            if (v.endsWith(lit)) v = v.slice(0, -lit.length).trim();
           }
           next.push({ kind: "json", v });
         }

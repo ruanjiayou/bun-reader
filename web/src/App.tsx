@@ -6,6 +6,7 @@ import Shelf from "./pages/Shelf";
 import SourceList from "./pages/SourceList";
 import Sources from "./pages/Sources";
 import Search from "./pages/Search";
+import Explore from "./pages/Explore";
 import Preview from "./pages/Preview";
 import Book from "./pages/Book";
 import Reader from "./pages/Reader";
@@ -51,6 +52,7 @@ export default function App() {
       <Route path="/" element={<Guard me={me} loading={loading}><Shelf me={me} onLogout={logout} /></Guard>} />
       <Route path="/settings" element={<Guard me={me} loading={loading}><Settings me={me!} onSaved={refresh} /></Guard>} />
       <Route path="/search" element={<Guard me={me} loading={loading}><Search /></Guard>} />
+      <Route path="/explore" element={<Guard me={me} loading={loading}><Explore /></Guard>} />
       <Route path="/preview" element={<Guard me={me} loading={loading}><Preview /></Guard>} />
       <Route path="/book/:id" element={<Guard me={me} loading={loading}><Book /></Guard>} />
       <Route path="/book/:id/category" element={<Guard me={me} loading={loading}><Book /></Guard>} />

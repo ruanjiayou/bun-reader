@@ -60,29 +60,25 @@ function buildReq(src: BookSource, path: string, vars: Record<string, string> = 
   return { url: ensureAbs(raw, src.bookSourceUrl), opts };
 }
 
+// HTTP 报错带上最终 URL：站点换域名时请求 URL 和落地 URL 不一致，少了它就只能看到一句「HTTP 500」
+function httpErr(res: { status: number; charset: string; url: string }, reqUrl: string) {
+  const at = res.url && res.url !== reqUrl ? ` · ${res.url}` : "";
+  return `HTTP ${res.status} · ${res.charset}${at}`;
+}
+
 export async function searchSource(src: BookSource, key: string, log?: Log): Promise<BookItem[]> {
   const { url, opts } = buildReq(src, String(src.searchUrl ?? ""), { key: encodeURIComponent(key), page: "1" });
   if (!url) throw new Error("书源缺少 searchUrl");
   log?.("info", "search", `${opts.method ?? "GET"} ${url}`);
   const res = await httpText(url, opts);
-  if (res.status >= 400) throw new Error(`HTTP ${res.status} · ${res.charset}`);
+  if (res.status >= 400) throw new Error(httpErr(res, url));
   log?.("info", "search", `响应 ${res.status} · ${res.charset} · ${res.text.length} 字`);
   const nodes = guessNodes(res.text);
   const r = src.ruleSearch ?? {};
   if (!r.bookList) throw new Error("书源缺少 ruleSearch.bookList");
   const items = ruleList(nodes, r.bookList ?? "", res.url);
   log?.(items.length ? "ok" : "warn", "search", `bookList 命中 ${items.length} 条`);
-  const books = items
-    .map((el) => ({
-      name: ruleStr([el], r.name || ".text()", res.url),
-      author: ruleStr([el], r.author || "", res.url),
-      bookUrl: ruleStr([el], r.bookUrl || "", res.url),
-      cover: ruleStr([el], r.coverUrl || "", res.url).split(/\s+/)[0] ?? "", // 封面取第一个 URL
-      intro: ruleStr([el], r.intro || "", res.url),
-      latestChapter: ruleStr([el], r.lastChapter || "", res.url),
-    }))
-    .filter((b) => b.name && b.bookUrl)
-    .map((b) => ({ ...b, bookUrl: ensureAbs(b.bookUrl, res.url), cover: ensureAbs(b.cover, res.url) }));
+  const books = mapBooks(items, r, res.url);
   if (books.length) log?.("ok", "search", `首条: ${books[0].name} · ${books[0].author || "佚名"}`);
   else if (items.length && log)
     log?.(
@@ -98,21 +94,86 @@ export async function searchSource(src: BookSource, key: string, log?: Log): Pro
   return books;
 }
 
+// bookList 项 → BookItem 字段映射（搜索与探索共用；规则缺省同 Legado：name 回退 .text()）
+function mapBooks(items: any[], r: any, baseUrl: string): BookItem[] {
+  return items
+    .map((el) => ({
+      name: ruleStr([el], r.name || ".text()", baseUrl),
+      author: ruleStr([el], r.author || "", baseUrl),
+      bookUrl: ruleStr([el], r.bookUrl || "", baseUrl),
+      cover: ruleStr([el], r.coverUrl || "", baseUrl).split(/\s+/)[0] ?? "", // 封面取第一个 URL
+      intro: ruleStr([el], r.intro || "", baseUrl),
+      latestChapter: ruleStr([el], r.lastChapter || "", baseUrl),
+    }))
+    .filter((b) => b.name && b.bookUrl)
+    .map((b) => ({ ...b, bookUrl: ensureAbs(b.bookUrl, baseUrl), cover: ensureAbs(b.cover, baseUrl) }));
+}
+
+// —— 探索（分类浏览）——
+// exploreUrl 每行一个分类：「标题::url模板」（Legado 标准）；旧式「标题,http…」（url 以 http(s):// 或 / 开头才算分隔，
+// 避免切到 url 自带的 ,{json 选项}）；裸 url 行标题自动编号。模板支持 {{page}} 与 ,{json 选项}（buildReq 处理）。
+// JS 生成的 exploreUrl（<js>/@js:）静态解析不了，视为无分类。
+export interface ExploreGroup {
+  title: string;
+  tpl: string;
+}
+
+export function parseExploreGroups(src: BookSource): ExploreGroup[] {
+  const raw = String(src.exploreUrl ?? "").trim();
+  if (!raw || raw.includes("<js>") || raw.startsWith("@js:") || raw.startsWith("@JavaScript:")) return [];
+  const groups: ExploreGroup[] = [];
+  for (const line of raw.split("\n")) {
+    const s = line.trim();
+    if (!s) continue;
+    const ci = s.indexOf("::");
+    if (ci > -1) {
+      const tpl = s.slice(ci + 2).trim();
+      if (tpl) groups.push({ title: s.slice(0, ci).trim() || `分类${groups.length + 1}`, tpl });
+      continue;
+    }
+    const comma = s.indexOf(",");
+    if (comma > -1 && /^https?:\/\/|^\//.test(s.slice(comma + 1).trim())) {
+      groups.push({ title: s.slice(0, comma).trim() || `分类${groups.length + 1}`, tpl: s.slice(comma + 1).trim() });
+      continue;
+    }
+    groups.push({ title: `分类${groups.length + 1}`, tpl: s });
+  }
+  return groups;
+}
+
+// 抓一个分类页。规则：ruleExplore 缺省回退 ruleSearch（与 Legado 行为一致）。
+export async function exploreSource(src: BookSource, tpl: string, page: number, log?: Log): Promise<BookItem[]> {
+  const p = Math.min(Math.max(1, Math.floor(page) || 1), 200);
+  const { url, opts } = buildReq(src, tpl, { page: String(p) });
+  if (!url) throw new Error("探索地址为空");
+  log?.("info", "explore", `第 ${p} 页: ${opts.method ?? "GET"} ${url}`);
+  const res = await httpText(url, opts);
+  if (res.status >= 400) throw new Error(httpErr(res, url));
+  const r = src.ruleExplore?.bookList ? src.ruleExplore : src.ruleSearch ?? {};
+  if (!r.bookList) throw new Error("书源缺少 ruleExplore/ruleSearch.bookList");
+  const items = ruleList(guessNodes(res.text), r.bookList, res.url);
+  const books = mapBooks(items, r, res.url);
+  log?.(books.length ? "ok" : "warn", "explore", `第 ${p} 页命中 ${items.length} 条，有效 ${books.length} 条`);
+  return books;
+}
+
 // 最新章节双取：详情页反正要抓，同一个链接节点上 URL 和标题都能拿到。
 // 规则取到 URL（如 .attr('href')）→ 同一规则换 .text() 再取标题；规则取到文本（.text()）→ 换 .attr('href') 反推 URL。
 // URL 仅供 {page} 目录模板推最大页码，入库展示（书架/详情）的永远是标题。
 const urlLike = (s: string) => /^(https?:)?\/\//i.test(s) || s.startsWith("/");
+// 尾部取值调用（.attr(...) 或 .text()）+ 可能跟着的 .trim(...) 后处理：互换取值调用时保留 trim 链
+const SWAP_VALUE_CALL = /\.(?:attr\s*\([^)]*\)|text\s*\(\s*\))((?:\s*\.trim\((?:[^()']|'[^']*'|"[^"]*")*\))*)\s*$/;
 function splitLatestChapter(nodes: any, rule: string, baseUrl: string): { title: string; url: string } {
   const raw = ruleStr(nodes, rule, baseUrl).trim();
   if (!raw) return { title: "", url: "" };
   const lastTok = raw.split(/\s+/).filter(Boolean).pop() ?? "";
   if (urlLike(lastTok)) {
     // 规则取到的是链接：URL 留给翻页推算，标题用同一规则换 .text() 再取（规则带 ## 后缀换不动时宁可空也不显示 URL）
-    const title = raw === lastTok ? ruleStr(nodes, rule.replace(/\.\s*attr\s*\([^)]*\)\s*$/, ".text()"), baseUrl).trim() : "";
+    const title = raw === lastTok ? ruleStr(nodes, rule.replace(SWAP_VALUE_CALL, (_m, tail) => `.text()${tail}`), baseUrl).trim() : "";
     return { title: title && !urlLike(title) ? title : "", url: ensureAbs(lastTok, baseUrl) };
   }
   // 规则取到的是文本：换 .attr('href') 反推 URL（供 {page} 推最大页码；推不出就空，退回盲试展开）
-  const u = ruleStr(nodes, rule.replace(/\.\s*text\s*\(\s*\)\s*$/, ".attr('href')"), baseUrl).trim();
+  const u = ruleStr(nodes, rule.replace(SWAP_VALUE_CALL, (_m, tail) => `.attr('href')${tail}`), baseUrl).trim();
   const uTok = u.split(/\s+/).filter(Boolean).pop() ?? "";
   return { title: raw, url: uTok && urlLike(uTok) ? ensureAbs(uTok, baseUrl) : "" };
 }
@@ -121,7 +182,7 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
   const { url, opts } = buildReq(src, bookUrl);
   log?.("info", "book", `详情: ${url}`);
   const res = await httpText(url, opts);
-  if (res.status >= 400) throw new Error(`HTTP ${res.status} · ${res.charset}`);
+  if (res.status >= 400) throw new Error(httpErr(res, url));
   const nodes = guessNodes(res.text);
   const r = src.ruleBookInfo ?? {};
   const lc = splitLatestChapter(nodes, String(r.lastChapter ?? ""), res.url);
@@ -235,7 +296,7 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log, lastCha
         log?.("warn", "toc", `第 ${page} 页 HTTP ${res.status}，返回已抓取的 ${chapters.length} 章`);
         break;
       }
-      throw new Error(`HTTP ${res.status} · ${res.charset}`);
+      throw new Error(httpErr(res, url));
     }
     const nodes = guessNodes(res.text);
     const items = ruleList(nodes, r.chapterList ?? "", res.url);
@@ -403,7 +464,7 @@ async function fetchChapter(src: BookSource, url: string, opts: FetchOpts, log?:
         log?.("warn", "content", `第 ${page} 页 HTTP ${res.status}，返回已抓取的 ${page - 1} 页`);
         break;
       }
-      throw new Error(`HTTP ${res.status} · ${res.charset}`);
+      throw new Error(httpErr(res, next));
     }
     const nodes = guessNodes(res.text);
     const content = ruleStr(nodes, rule.content ?? "", res.url);

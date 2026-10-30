@@ -105,17 +105,27 @@ SQLite 表 + 磁盘文件：
 
 限流：搜索每源串行 + 300ms 间隔，超时 10s，失败不阻塞其他源。
 
+**探索（分类浏览）**：书源 `exploreUrl` 每行一个分类，`parseExploreGroups` 解析「标题::模板」（Legado 标准）、旧式「标题,http…」（后段以 `http(s)://` 或 `/` 开头才算分隔，避免切到模板自带的 `,{json 选项}`）与裸模板行（标题自动编号）；`<js>`/`@js:` 生成的静态解析不了，视为无分类。`exploreSource(src, tpl, page)` 复用 `buildReq`（替换 `{{page}}` + 请求选项）与搜索同一套 bookList 映射（`mapBooks`，搜索/探索共用）；规则缺省 `ruleExplore` 回退 `ruleSearch`（同 Legado）。页码 clamp 1..200。脚本源暂不支持探索。
+
+**抓取层容错（`fetcher.ts`）**——站点换域名导致「搜索 500、详情正常」的根治点：
+
+- 换域名站点的 301 Location 常写成「绝对路径、不带查询串」（实测 `www.sudugu.org → www.shudugu.org → www.suduguu.com`，`/i/sor.aspx` 的 `?key=` 全丢），跟随重定向后落到新域名的空参数页，ASP.NET 直接 500；而详情/目录靠 path 不靠 query，重定向后照样能开——这就是「详情调试没问题，就搜索报错」的成因。
+- 兜底规则（仅下列条件全中才触发一次重试）：请求是 GET 且无 body、原 URL 带 `?`、**最终 URL 的 host 与原来不同**、最终 URL 没有查询串、且最终响应 ≥400 → 用「最终域名 + 原查询串」重发一次；重试结果更差就返回原始错误。同域名重定向（多为 URL 规范化）不猜，POST 不猜。
+- 命中时 `log.warn("fetch", ...)` 一行，调试面板可见。
+- HTTP 报错统一带最终 URL（`HTTP 500 · utf-8 · https://www.suduguu.com/i/sor.aspx`）：请求 URL 与落地 URL 不一致时，少了它就只剩一句「HTTP 500」，无从下手。
+
 ## 7. 前端页面
 
 | 路由 | 页面 | 要点 |
 |---|---|---|
 | `/` | 书架 | 手机 3 列网格 / 桌面列表；排序 tab（默认「最近阅读」，可切「最近更新」）。**右上角账号区**：未登录=登录按钮；已登录=头像圆钮（无头像显示首字）→ 下拉（昵称 / 设置 / 退出登录）。**移出书架 = 右键或长按 500ms**（移动端没有右键），长按触发后吞掉同一次 click 不进详情。列表有**加载中状态**（转圈 + 「书架加载中…」），请求未回不显示「空书架」 |
 | `/search` | 搜索 | SSE 实时追加结果卡片，聚合去重；搜索进度随新一轮搜索重置，失败书源及错误原因可展开查看。布局：`← 书架` 在左，输入框中间（**16px 字号防 iOS 聚焦缩放**，框内有 × 清空），搜索按钮在右。登录/设置页输入框同为 16px |
+| `/explore` | 探索（分类浏览） | **上下结构 + `flex h-dvh flex-col`**：顶部行 = `← 书架` + 标题 + 书源 select（`text-base`，同 16px 规则）；分类按钮单行横向滚动（`overflow-x-auto` + 按钮 `flex-none`，选中 amber）；列表区 `min-h-0 flex-1 overflow-y-auto`（**flex 子元素滚动必须 `min-h-0`**），换源/换分类/换页自动回顶；底部翻页条（上一页/第 N 页/下一页）。下一页可用性看本页结果（空页=到底，显「没有更多了」）。点卡片与搜索页一致：`/preview?sourceId=&bookUrl=` + state hint。后端 `GET /api/sources/explore`（启用且有 exploreUrl 分类的规则源）与 `GET /api/sources/:id/explore?url=分类模板&page=N`；模板原样透传给引擎替换 `{{page}}` |
 | `/book/:id` | 书籍详情 | 封面左（垂直居中）、信息右（结构不变）；**操作按钮一排在卡片下方**：开始阅读/继续阅读（主按钮，与其他按钮同宽策略：按内容定宽、不 `flex-1` 拉满）、移出书架、检查更新、编辑，**全部左对齐**；**缓存一排紧跟其后**：左侧「书源：xxx」（源被删显示「无（源已删除）」，只有 id 时显示 `#id`），右侧缓存信息 + 缓存全本/停止/释放；目录**分页每页 100 章**（正/倒序先排序再切片，首次载入定位到「上次读到」所在页，切排序回第 1 页），目录有加载中状态 |
 | `/book/:id/read/:idx` | 阅读器 | 见第四部分 |
 | `/settings` | 账号设置 | 头像（点击圆形选图，本地压缩预览，随「保存资料」提交）、昵称、修改密码（旧密码 + 新密码×2）；保存后通知 App 刷新 `/auth/me`，书架头像立即生效 |
 | `/sources` | 书源列表 | 书架点「书源」的落地页。顶栏：**左=返回书架 icon，右=新建**；列表每行 = 源名称（含「脚本」/「停用」角标）+ 该源书籍数（`bookCount`，按 `books.source_url` 去重计）+ 调试 icon + 删除 icon。点行进出编辑页，点调试 icon 进编辑页并直接落在调试 tab。筛选与导入/导出 URL 也在此页 |
-| `/sources/new`、`/sources/:id` | 书源编辑/调试 | **同一页面按 URL 区分**：无 id（`/sources/new`）= 新建（顶栏给「规则源 / 脚本源」类型切换），有 id = 载入该源；`?tab=debug` 直接打开调试 tab（列表的调试入口就带这个参数）。**新建保存成功后 `history.replaceState` 把 URL 换成 `/sources/:id`**（只替换路径尾段，保留 `/reader` 部署前缀；不进历史，刷新后能直达该源）。返回列表时有未保存改动会先确认 |
+| `/sources/new`、`/sources/:id` | 书源编辑/调试 | **同一页面按 URL 区分**：无 id（`/sources/new`）= 新建（顶栏给「规则源 / 脚本源」类型切换），有 id = 载入该源；`?tab=debug` 直接打开调试 tab（列表的调试入口就带这个参数）。**新建保存成功后 `history.replaceState` 把 URL 换成 `/sources/:id`**（只替换路径尾段，保留 `/reader` 部署前缀；不进历史，刷新后能直达该源）。返回列表时有未保存改动会先确认。**左栏规则源表单按区块折叠**：基本/搜索/详情/目录/正文 各区块是折叠面板（缺省展开），点标题行收放——箭头旋转 + 内容高度 200ms 过渡（grid-rows 0fr↔1fr），表单值不因收起丢失 |
 
 ### 危险操作确认（统一弹层）
 
@@ -198,8 +208,10 @@ location /reader/ {
   - `'h1'.text()` → 引擎处理为 `$('h1').text()`
   - 章节地址：`'a'.attr('href')`，或列表项已是元素时直接 `.attr('href')`
   - 深层取值：`.find('a').attr('href')`
-- `:eq(N)` 语义：整个结果集的第 N 个（≡ `.eq(N)`，`.eq(n)` 方法保留）
-- 链式调用清单：取值 `text/html/all/ownText/textNodes/textBlocks/attr('x')`；导航 `find('sel')/children/eq(n)/first/last/parent/next/prev`
+- `:eq(N)` 语义：整个结果集的第 N 个（≡ `.eq(N)`，`.eq(n)` 方法保留；cheerio 1.2 实测单/多容器一致）
+- 链式调用清单：取值 `text/html/all/ownText/textNodes/textBlocks/attr('x')`；导航 `find('sel')/children/eq(n)/first/last/parent/next/prev`；后处理 `trim()`
+- **`.trim()` 后处理**：跟在 `.text()` / `.textBlocks()` / `.attr()` 等取值调用后面。无参 = 去两端空白；`.trim('字面量')` = 再去两端该字面量，用于处理「简介：」「作者：」这类标签前缀（`'.intro'.text().trim('简介：')`）。只作用于字符串值，元素节点原样放行
+- **导航链压缩（legadoToOurs 自动做，幂等）**：`.find('x')` 并进选择器用空格相接、`.eq(n)/.first()/.last()` 并成 `:eq(n)`（0/-1），整段引号包裹——`p.eq(1).find('a').text()` → `'p:eq(1) a'.text()`；`.itemtxt.find('p').eq(1).find('a').text()` → `'.itemtxt p:eq(1) a'.text()`。`children/parent/next/prev` 与取值/后处理调用不能并进选择器，断开后原样保留在链上；相对链开头的 `.eq/.first/.last`（无选择器、作用在输入集本身）保持调用形态不压缩。**可靠性依据**：`:eq(N)` 与 `.eq(N)` 同为结果集全局索引，且引擎按项求值（单节点上下文），此时 find+eq 与选择器内 `:eq` 严格等价
 - **`.textBlocks()`**：正文段落提取专用——取最内层块级元素文本（嵌套 p 去重）、`<br>` 视为换行、容器裸文本（广告行）跳过、按文档序 `\n` 连接；容器内**没有块级子元素**（整段正文只用 `<br/>` 分行 + `&nbsp;` 缩进的手机站，如肉书屋）时回退为容器自身文本。正文规则**不要用 `.text()`**（全部拼一行无换行）
 - 保留：`||` 回退、`##正则##替换##变换`、`{{bookUrl}}/{{baseUrl}}` 模板、JsonPath（$ 开头）、目录 `{page}` 模板
 
@@ -220,11 +232,11 @@ location /reader/ {
 
 旧语法 → 新语法：
 - 裸取值器 `text/href/src/...` → `.text()` / `.attr('href')` / ...
-- `a@text` → `a.text()`；`#info a.0@href` → `#info.find('a').eq(0).attr('href')`
-- `sel.N` 索引后缀 → `.eq(N)`（带数字类名如 `.item-2` 不误拆）
+- `a@text` → `'a'.text()`；`#info a.0@href` → `'#info a:eq(0)'.attr('href')`（导航链自动压缩进选择器，见上）
+- `sel.N` 索引后缀 → `:eq(N)`（带数字类名如 `.item-2` 不误拆）
 - `attr(x)` → `.attr(x)`；`tag(x)` → `x`；`children` → `.children()`
 - Legado 关键字 class./tag./id. 照旧转换
-- 已是新语法（末尾含方法调用）的规则原样返回（幂等）
+- 已是新语法（末尾含方法调用，含 `.trim(...)`）的规则只做链压缩，不再当旧语法拆（幂等）
 
 **header 统一对象化**：legado 的字符串 header 在导入/运行前解析为对象入库（宽松解析：标准 JSON 失败时截取首个平衡的 `{...}`，容错 devtools 复制片段）。本项目存储与运行期都不使用字符串形态。
 
@@ -340,14 +352,15 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 
 测试断言：同 fixture 下生成脚本与规则引擎产出一致。
 
-## 8. Playwright 浏览器抓取（browser.ts）
+## 8. 浏览器抓取（browser.ts · 远程 KasmWeb chrome）
 
-- `launchPersistentContext("data/browser-profile")`：cookie/localStorage 自动持久化，验证通过一次后续自动复用
-- channel 探测：系统 Chrome → Edge → playwright chromium；`BROWSER_HEADLESS=1` 切无头（默认有头）
+- **连接部署在 docker 的 `kasmweb/chrome`**（compose 见 `notes/docker/chromium-vnc`）：`chromium.connectOverCDP(CDP_URL)`，默认 `http://127.0.0.1:9222`（宿主 9222 → 容器 cdp-proxy 9223 → chrome 9222），`CDP_URL` 可覆盖。本地不再拉起 chromium
+- **绝不能 `browser.close()`**：远程是共享常驻实例，close 会断开连接并清上下文（连接测试脚本已实测）；`closeBrowser()` 只关本进程打开的页、丢弃连接引用，远端 Chrome 不受影响；容器重启后 `getCtx` 检测 `isConnected` 自动重连
+- **持久化 profile 在容器侧**（`./profile` 卷 → chrome user-data-dir）：cookie/localStorage 验证通过一次后续自动复用；人机验证可开 VNC 网页（`:6901`）在同一窗口手动完成
+- **无 headed/headless 双模式**（旧设计已废弃）：远程唯一实例即真实 Chrome（实测 `navigator.webdriver=false`、UA 无 HeadlessChrome 标记，反自动化检测天然规避）；`browserOpen` 的 `headless` 参数仅为脚本 API 兼容保留
 - WAF 判定（防误报）：标题命中（中文验证词 / captcha / waf / human verification）、「小页面(<4000) + 关键词」、或页面内嵌 Turnstile 特征（`challenges.cloudflare.com/turnstile` / `cf-turnstile` / `aegis_captcha_verify`）；挑战页轮询等待通过（30s 提示、180s 超时）
-- **反自动化检测**（Cloudflare Turnstile 等）：启动参数必须带 `args:["--disable-blink-features=AutomationControlled"]` + `ignoreDefaultArgs:["--enable-automation"]`，否则 `navigator.webdriver=true` 被识别、挑战永远不通过（普通浏览器能过、自动化过不了的根因）；Turnstile 自动通过无需人工，图片验证码需窗口手动输入
 - **cookie 不能替代浏览器**：部分 WAF（如 69shuba aegis）同时校验 TLS 指纹，提取 cookie 给服务端 fetch 仍 403 → 这类站点必须全链路走浏览器（fetchText 会自动合并浏览器同域 cookie，可作普通 WAF 站的加速路径，但不保证够用）
-- `BrowserPage.fetch(url, opts)`：页内上下文 fetch（page.evaluate），自动带浏览器 cookie / 真实 TLS 指纹，**支持 POST**（WAF 站搜索表单用）；`page.content()` 有「导航中」竞态（safeContent 重试兜底）；残留 chrome 持 profile 锁需按 CommandLine 杀进程
+- `BrowserPage.fetch(url, opts)`：页内上下文 fetch（page.evaluate），自动带浏览器 cookie / 真实 TLS 指纹，**支持 POST**（WAF 站搜索表单用）；`page.content()` 有「导航中」竞态（safeContent 重试兜底）
 
 ---
 
@@ -436,7 +449,7 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 
 ## 11. 定时巡检与书籍编辑
 
-- **定时巡检（后端）**：服务启动后启用后台定时器，每 `UPDATE_INTERVAL_MS`（默认 6×3600×1000，**0 关闭**）遍历全部书籍，逐本重抓目录比对章节数；仅「新增章节」才置 `updatedAt`（影响书架「最近更新」排序），纯检查不动排序时间。复用检查更新的抓取逻辑，按书源限速器限流、两本之间留 800ms 间隔，避免无头浏览器抢占。日志落 `data/logs`，不阻塞请求。
+- **定时巡检（后端）**：服务启动后启用后台定时器，每 `UPDATE_INTERVAL_MS`（默认 6×3600×1000，**0 关闭**）遍历全部书籍，逐本重抓目录比对章节数；仅「新增章节」才置 `updatedAt`（影响书架「最近更新」排序），纯检查不动排序时间。复用检查更新的抓取逻辑，按书源限速器限流、两本之间留 800ms 间隔，避免远程浏览器任务相互抢占。日志落 `data/logs`，不阻塞请求。
 - **用户上传封面受保护**：巡检以源站封面覆盖 `cover`，但若当前 `cover` 以 `data:` 开头（本地上传）则**保留不动**——用户自定义封面不会被源站更新冲掉。
 - **编辑书籍元数据**：`PATCH /api/books/:id`，仅更新传入字段（name/author/intro/latestChapter/cover）。封面校验：以 `data:` 开头须是 `data:image/`（上限 2MB，前端已压缩）；否则须为 http(s) URL；空串即清除。其余字段按长度截断（name≤200/author≤100/intro≤4000/latestChapter≤300）。
 - **前端编辑弹层**：书籍详情页新增「编辑」按钮 → 底部弹层（无背景遮罩色、面板实底），书名/作者/简介/最新章节为文本框；**封面 = URL 输入框 + 上传图片**二选一，上传时 canvas 压缩至最长边 360px 的 JPEG(0.82) 转 dataURL 预览，可「清除封面」。保存走 PATCH，成功 toast + 重新加载详情。
@@ -503,7 +516,7 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 [program:reader]
 directory=/srv/bun-reader
 command=/root/.bun/bin/bun src/index.ts
-environment=PORT="8094",BROWSER_HEADLESS="0"
+environment=PORT="8094",CDP_URL="http://127.0.0.1:9222"
 autostart=true
 autorestart=true
 startsecs=3
@@ -515,7 +528,7 @@ stdout_logfile=/var/log/reader.out.log
 redirect_stderr=true
 ```
 
-`stopasgroup/killasgroup`：把 SIGTERM / SIGKILL 发给**整个进程组**，playwright 拉起的 chromium 子进程也一起带走。
+`CDP_URL` 指向 kasmweb/chrome 容器的 CDP 端点（默认即 `http://127.0.0.1:9222`，同 compose 的宿主映射）。`stopasgroup/killasgroup` 保留兜底——本地已不拉起 chromium，远程浏览器随 docker 管理。
 
 ## 2. 启动顺序（`src/index.ts`）
 
@@ -525,6 +538,6 @@ redirect_stderr=true
 
 ## 3. 退出顺序
 
-`SIGTERM`/`SIGINT` → `server.stop(true)`（端口立刻释放，在途 SSE 不拖泥带水）→ `await closeBrowser()`（最多等 2.5s，把 chromium 子进程真正关掉）→ `exit 0`。另有 4s 兜底强退，保证短于 supervisord 的 `stopwaitsecs`。
+`SIGTERM`/`SIGINT` → `server.stop(true)`（端口立刻释放，在途 SSE 不拖泥带水）→ `await closeBrowser()`（最多等 2.5s，清掉本进程在远程浏览器里打开的页）→ `exit 0`。另有 4s 兜底强退，保证短于 supervisord 的 `stopwaitsecs`。
 
-**为什么要 await 关浏览器**：只在 `process.on("exit")` 里「发一个 close 就走」不可靠——进程先死，chromium 被 init 收养继续活着，占着 `data/browser-profile` 的锁，并且可能继承着父进程的监听 fd 不放。调试书源时人机验证窗口开着的情况下重启，最容易踩这个坑。
+**closeBrowser 不关远程浏览器**：kasmweb/chrome 是共享常驻实例，`browser.close()` 会断开连接并清上下文；退出流程只关本进程打开的 tab、丢弃连接引用（WS 随进程消亡），远端 Chrome 与 VNC 会话不受影响。历史包袱（本地 chromium 子进程被 init 收养、占 profile 锁、继承监听 fd 致 EADDRINUSE）随远程化自然消失。
