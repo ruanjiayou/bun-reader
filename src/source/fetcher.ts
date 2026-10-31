@@ -24,6 +24,7 @@ const DEFAULT_HEADERS: Record<string, string> = {
 async function raw(url: string, opts: FetchOpts, timeoutMs: number): Promise<TextRes> {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
+  const startedAt = Date.now();
   try {
     const res = await fetch(url, {
       method: opts.method ?? "GET",
@@ -46,6 +47,13 @@ async function raw(url: string, opts: FetchOpts, timeoutMs: number): Promise<Tex
     }
     if (!charset || charset === "utf8") charset = "utf-8";
     return { text: iconv.decode(buf, charset), url: res.url || url, status: res.status, charset };
+  } catch (e: any) {
+    // AbortError 的 message 是 "The operation was aborted."，日志里看不出是超时、也看不出等了多少秒
+    if (ctl.signal.aborted) {
+      const spent = ((Date.now() - startedAt) / 1000).toFixed(1);
+      throw new Error(`请求超时（上限 ${Math.round(timeoutMs / 1000)}s，已等 ${spent}s）：${url}`);
+    }
+    throw e;
   } finally {
     clearTimeout(timer);
   }
@@ -68,11 +76,24 @@ function retryUrlAfterLostQuery(from: string, finalUrl: string): string | null {
   }
 }
 
-export async function httpText(url: string, opts: FetchOpts = {}, timeoutMs = 10000): Promise<TextRes> {
-  const first = await raw(url, opts, timeoutMs);
-  if (first.status < 400) return first;
-  const isGet = (opts.method ?? "GET").toUpperCase() === "GET" && !opts.body;
-  if (!isGet) return first;
+// 站点限流的典型表现：HTTP 200 + Content-Length: 0。它既不是错误响应、也不是空页面，是「被拦了」。
+// 不识别就会一路往下走：规则解析 0 个元素 → 上层报「目录为空」，看着像规则配错（肉色屋就是这么表现的）。
+const EMPTY_RETRIES = 2;
+const isGetWithoutBody = (opts: FetchOpts) => (opts.method ?? "GET").toUpperCase() === "GET" && !opts.body;
+const isEmptyBody = (r: TextRes, opts: FetchOpts) => isGetWithoutBody(opts) && r.status < 400 && r.status !== 204 && !r.text.trim();
+
+export async function httpText(url: string, opts: FetchOpts = {}, timeoutMs = 20000): Promise<TextRes> {
+  let first = await raw(url, opts, timeoutMs);
+  for (let i = 0; i < EMPTY_RETRIES && isEmptyBody(first, opts); i++) {
+    log.warn("fetch", `响应 ${first.status} 但内容为空（站点限流？）重试 ${i + 1}/${EMPTY_RETRIES}：${url}`);
+    await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+    first = await raw(url, opts, timeoutMs);
+  }
+  if (first.status < 400) {
+    if (isEmptyBody(first, opts)) log.warn("fetch", `重试 ${EMPTY_RETRIES} 次仍是空内容：${url}`);
+    return first;
+  }
+  if (!isGetWithoutBody(opts)) return first; // POST 重定向会丢 body，猜参数没有意义
   const retry = retryUrlAfterLostQuery(url, first.url);
   if (!retry) return first;
   const second = await raw(retry, opts, timeoutMs);

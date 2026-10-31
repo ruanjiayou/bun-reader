@@ -1,8 +1,10 @@
-import { httpText, type FetchOpts } from "./fetcher";
-import { guessNodes, ruleList, ruleStr } from "./rule";
+import { httpText, type FetchOpts, type TextRes } from "./fetcher";
+import { contentRule, guessNodes, ruleList, ruleStr } from "./rule";
+import { cleanChapter } from "./clean";
 
 export type BookSource = Record<string, any>;
-export type LogLevel = "info" | "ok" | "warn" | "err";
+// text = 正文原文行（调试时逐行铺开，给中性高亮，不当作普通 info）
+export type LogLevel = "info" | "ok" | "warn" | "err" | "text";
 export type Log = (level: LogLevel, step: string, msg: string) => void;
 
 export interface BookItem {
@@ -183,6 +185,9 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
   log?.("info", "book", `详情: ${url}`);
   const res = await httpText(url, opts);
   if (res.status >= 400) throw new Error(httpErr(res, url));
+  // 200 但零字节：站点限流或该书已下架/需登录。继续往下解析只会得到「书名空 + 目录地址=书籍地址」
+  // 然后在目录环节报「目录为空」，把真正的原因埋掉
+  if (!res.text.trim()) throw new Error(`详情页内容为空（HTTP ${res.status}，0 字节）：站点限流，或该书需登录/已下架`);
   const nodes = guessNodes(res.text);
   const r = src.ruleBookInfo ?? {};
   const lc = splitLatestChapter(nodes, String(r.lastChapter ?? ""), res.url);
@@ -254,6 +259,33 @@ function maxPageFromTpl(tpl: string, lastChapterUrl?: string): number {
   return 0;
 }
 
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+// 目录页比正文页大、又常被站点限速，给宽一点；10s 在面对慢站（肉色屋单页 15s+）时必然超时
+const TOC_TIMEOUT = 25000;
+
+// 抓一页目录。超时、网络错误、200-空内容（限流）都算失败并重试——
+// 目录第 1 页只试一次就直接判「目录为空/HTTP 错误」，用户看到的原因和真实原因完全是两回事。
+// 三次都失败才把最后一次的结果交回调用方（4xx 与空内容在翻页逻辑里处理方式不同）。
+async function fetchTocPage(url: string, opts: FetchOpts, page: number, log?: Log): Promise<TextRes> {
+  let lastRes: TextRes | undefined;
+  let lastErr: unknown;
+  for (let i = 0; i <= 2; i++) {
+    try {
+      const res = await httpText(url, opts, TOC_TIMEOUT);
+      if (res.status < 400 && res.text.trim()) return res;
+      lastRes = res;
+      if (i < 2) log?.("warn", "toc", `第 ${page} 页${res.status >= 400 ? ` HTTP ${res.status}` : " 内容为空"}，重试 ${i + 1}/2`);
+    } catch (e: any) {
+      lastErr = e;
+      if (i < 2) log?.("warn", "toc", `第 ${page} 页请求失败（${e?.message ?? e}），重试 ${i + 1}/2`);
+    }
+    if (i < 2) await sleep(1000 * (i + 1));
+  }
+  if (lastRes) return lastRes;
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
 export async function getToc(src: BookSource, tocUrl: string, log?: Log, lastChapterUrl?: string): Promise<ChapterItem[]> {
   const r = src.ruleToc ?? {};
   const chapters: ChapterItem[] = [];
@@ -277,25 +309,20 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log, lastCha
     page++;
     const { url, opts } = buildReq(src, reqUrl);
     log?.("info", "toc", page === 1 ? `目录: ${url}` : `目录第 ${page} 页: ${url}`);
-    let res = await httpText(url, opts);
-    // 模板模式中间页偶发 4xx（WAF/限流）：重试两次再放弃，好过丢整页章节
-    for (let retry = 0; tpl && page > 1 && res.status >= 400 && retry < 2; retry++) {
-      await sleep(1000 * (retry + 1));
-      log?.("warn", "toc", `第 ${page} 页 HTTP ${res.status}，重试 ${retry + 1}/2`);
-      res = await httpText(url, opts);
-    }
-    if (res.status >= 400) {
+    const res = await fetchTocPage(url, opts, page, log);
+    if (res.status >= 400 || !res.text.trim()) {
       // 模板模式下中间页失败不致命：已知最大页则跳过该页继续，否则返回已抓到的部分
       if (tpl && page > 1) {
         if (maxPage) {
-          log?.("warn", "toc", `第 ${page} 页 HTTP ${res.status}，跳过该页继续`);
+          log?.("warn", "toc", `第 ${page} 页 ${res.status >= 400 ? `HTTP ${res.status}` : "内容为空"}，跳过该页继续`);
           tplPage++;
           current = expandPage(tpl, tplPage);
           continue;
         }
-        log?.("warn", "toc", `第 ${page} 页 HTTP ${res.status}，返回已抓取的 ${chapters.length} 章`);
+        log?.("warn", "toc", `第 ${page} 页 ${res.status >= 400 ? `HTTP ${res.status}` : "内容为空"}，返回已抓取的 ${chapters.length} 章`);
         break;
       }
+      if (res.status < 400) throw new Error(`目录页内容为空（HTTP ${res.status}，0 字节）：站点限流，或该书需登录/已下架 · ${url}`);
       throw new Error(httpErr(res, url));
     }
     const nodes = guessNodes(res.text);
@@ -379,24 +406,44 @@ export async function getToc(src: BookSource, tocUrl: string, log?: Log, lastCha
   return chapters;
 }
 
-function applyReplace(content: string, rr: any): string {
-  if (!rr) return content;
-  let rule = "";
-  let rep = "";
-  if (typeof rr === "object") {
-    rule = rr.regex ?? "";
-    rep = rr.replacement ?? "";
-  } else {
-    const parts = String(rr).split("##");
-    rule = parts[0];
-    rep = parts[1] ?? "";
+// 正文净化：整章合并后统一做一次。
+// 以前是每页各净化一次，跨页广告（第一页尾「本章未完，点击下一页」、第二页头「接上页」）
+// 永远删不掉；整章一次做，行级规则才能命中完整的行。
+function shortRule(r: string): string {
+  return r.length > 24 ? `${r.slice(0, 24)}…` : r;
+}
+
+export function cleanForSource(src: BookSource, raw: string, log?: Log): string {
+  const rule = src.ruleContent ?? {};
+  const { text, hits, warnings } = cleanChapter(raw, rule.replaceRegex, rule.replaceMap);
+  const stat = hits.filter((h) => h.count > 0).map((h) => `${shortRule(h.rule)}×${h.count}`);
+  if (stat.length) log?.("info", "content", `净化命中 ${stat.length}/${hits.length} 条：${stat.join(" · ")}`);
+  for (const w of warnings) log?.("warn", "content", w);
+  const ph = isPlaceholder(text);
+  log?.(text.length ? "ok" : "warn", "content", `正文 ${text.length} 字${ph ? " · ⚠️疑似占位内容" : ""}`);
+  if (log && text) log("info", "content", `预览: ${text.slice(0, 80)}…`);
+  return text;
+}
+
+export async function getContent(src: BookSource, chapterUrl: string, log?: Log): Promise<string> {
+  return cleanForSource(src, await getContentRaw(src, chapterUrl, log), log);
+}
+
+// 未净化的整章原文：缓存层存这一份，读的时候再按当前规则净化（改规则立即生效）
+export async function getContentRaw(src: BookSource, chapterUrl: string, log?: Log): Promise<string> {
+  const { url, opts } = buildReq(src, chapterUrl);
+  log?.("info", "content", `正文: ${url}`);
+  // 站点偶发 4xx/5xx（反爬/限流）重试兜底：1s → 2s → 4s
+  let lastErr: unknown;
+  for (let i = 0; i < 3; i++) {
+    try {
+      return await fetchChapterRaw(src, url, opts, log);
+    } catch (e) {
+      lastErr = e;
+      if (i < 2) await sleep(1000 * 2 ** i);
+    }
   }
-  if (!rule) return content;
-  try {
-    return content.replace(new RegExp(rule, "g"), rep);
-  } catch {
-    return content; // ponytail: 书源正则可能非法，跳过不炸
-  }
+  throw lastErr;
 }
 
 export const PLACEHOLDER_WORDS = [
@@ -415,24 +462,6 @@ export function isPlaceholder(content: string, words: string[] = PLACEHOLDER_WOR
   return words.some((w) => content.includes(w));
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
-
-export async function getContent(src: BookSource, chapterUrl: string, log?: Log): Promise<string> {
-  const { url, opts } = buildReq(src, chapterUrl);
-  log?.("info", "content", `正文: ${url}`);
-  // 站点偶发 4xx/5xx（反爬/限流）重试兜底：1s → 2s → 4s
-  let lastErr: unknown;
-  for (let i = 0; i < 3; i++) {
-    try {
-      return await fetchChapter(src, url, opts, log);
-    } catch (e) {
-      lastErr = e;
-      if (i < 2) await sleep(1000 * 2 ** i);
-    }
-  }
-  throw lastErr;
-}
-
 // 抓单章并合并全部分页。两种翻页方式（与目录分页同构）：
 // ① ruleContent.nextContentUrl 命中"下一页"链接 → 逐页抓取（取到空 = 结束）；
 // ② 规则求值结果里带 {page} 占位符（如 {{bookUrl}}##\.html$##_{page}.html）→ 识破为模板，
@@ -442,8 +471,12 @@ export async function getContent(src: BookSource, chapterUrl: string, log?: Log)
 // 新页正文与上一页完全相同 → 判定站点对任意页码返回同一页，停止（模板盲试必须靠这条收口）。
 const CONTENT_MAX_PAGES = 50;
 
-async function fetchChapter(src: BookSource, url: string, opts: FetchOpts, log?: Log): Promise<string> {
+async function fetchChapterRaw(src: BookSource, url: string, opts: FetchOpts, log?: Log): Promise<string> {
   const rule = src.ruleContent ?? {};
+  // 正文容器级清洗开关（删隐藏节点/短链接块、解包 a）；个别站点正文就藏在隐藏节点里时可关。
+  // dropTags：源级追加要删的标签（span/font/section…），删的是「标签连同内容」——只对正文生效，
+  // 标题/简介/目录等字段不受影响（那里取到 <span> 里的字是必须的）
+  const evalOpts = { sanitize: rule.stripTags !== false, dropTags: rule.dropTags as string | undefined };
   const visited = new Set<string>();
   const parts: string[] = [];
   let next: string | null = url;
@@ -467,21 +500,22 @@ async function fetchChapter(src: BookSource, url: string, opts: FetchOpts, log?:
       throw new Error(httpErr(res, next));
     }
     const nodes = guessNodes(res.text);
-    const content = ruleStr(nodes, rule.content ?? "", res.url);
+    // 正文规则只写选择器即可（'.articlebody' / '#content'）：contentRule 自动补 .textBlocks()，
+    // 即「选到节点 → 清洗 script/a/隐藏节点 → 按块分段」
+    const content = ruleStr(nodes, contentRule(rule.content ?? ""), res.url, evalOpts);
     if (!content) {
       if (page > 1) {
         log?.("warn", "content", `第 ${page} 页正文规则未命中，返回已抓取的 ${page - 1} 页`);
         break;
       }
-      throw new Error(`正文规则未命中（content 规则：${rule.content || "未配置"}；若正文只用 <br> 分行，用 .textBlocks()）`);
+      throw new Error(`正文规则未命中（content 规则：${rule.content || "未配置"}；只写选择器即可，引擎会按块分段）`);
     }
-    const body = applyReplace(content, rule.replaceRegex);
     // 末页之后再"下一页"或模板盲试，站点常常照原样返回最后一页：内容一模一样就没必要再拼
-    if (parts.length && body.trim() === parts[parts.length - 1].trim()) {
+    if (parts.length && content.trim() === parts[parts.length - 1].trim()) {
       log?.("warn", "content", `第 ${page} 页正文与上一页相同，判定已到最后一页`);
       break;
     }
-    parts.push(body);
+    parts.push(content);
 
     next = null;
     if (tpl) {
@@ -519,19 +553,6 @@ async function fetchChapter(src: BookSource, url: string, opts: FetchOpts, log?:
     }
   }
   if (page > 1) log?.("ok", "content", `分页合并完成：${page} 页`);
-
-  // 部分站点正文里带字面量 \n / \r\n，统一还原成真实换行
-  const merged = parts
-    .join("\n")
-    .replace(/\\r\\n/g, "\n")
-    .replace(/\\n/g, "\n")
-    .split("\n")
-    .map((l) => l.trim())
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-  const ph = isPlaceholder(merged);
-  log?.("ok", "content", `正文 ${merged.length} 字${ph ? " · ⚠️疑似占位内容" : ""}`);
-  if (log) log("info", "content", `预览: ${merged.slice(0, 80)}…`);
-  return merged;
+  // 只做拼接：净化/规范化统一在 cleanForSource（整章一次），这里保持原文，缓存层存的就是它
+  return parts.join("\n");
 }

@@ -67,14 +67,19 @@ SQLite 表 + 磁盘文件：
 | `users` | id, username, password_hash, nickname, avatar, created_at | 多用户；nickname/avatar 为可选资料（avatar=128px dataURL） |
 | `sources` | id, name, enabled, "group", json, type, code, last_use_at | **全局共享**；json 存源定义（rules=规则原文 / script=表单数据），code 存生成脚本 |
 | `rate_states` | source_id, cap, high, window_ms, last_fail_at | 缓存自适应限速频率（按书源持久化） |
-| `books` | id, user_id, book_url, source_id, name, author, cover, intro, latest_chapter, last_check_at, updated_at | 书架；唯一约束 (user_id, book_url, source_id)；updated_at = 最近「发现新章节」时间（书架「最近更新」排序） |
-| `chapters` | id, book_id, idx, title, url | 目录快照，加书架时抓取，按需刷新 |
+| `books` | id, book_url, source_id, name, author, cover, intro, latest_chapter, last_check_at, updated_at | **全局共享**（预览即入库）：唯一约束 (book_url, source_id)，同一本书全站一行；updated_at = 最近「发现新章节」时间（书架「最近更新」排序） |
+| `shelf` | user_id, book_id, created_at | 书架 = 用户↔书籍关联；**加书架只插这一行**，created_at 即「加入书架时间」（书架按它排序） |
+| `chapters` | id, book_id, idx, title, url | 目录快照，入库时后台抓取，按需刷新 |
 | `chapter_cache` | content_key(sha1(book_url)), idx, file_path, size, is_placeholder, fetched_at | 正文索引；文件在 `data/cache/` |
 | `cache_jobs` | content_key, total, done, failed, status, updated_at | 全本缓存后台任务进度（多用户共享） |
-| `progress` | book_id, chapter_idx, scroll_pos, updated_at | 随 book 按用户隔离 |
+| `progress` | user_id, book_id, chapter_idx, scroll_pos, updated_at | 主键 (user_id, book_id)：书共享，进度各人一份 |
 | `settings` | user_id, key, value | 阅读偏好 |
 
-**建表与加列**：`db.ts` 启动时 `CREATE TABLE IF NOT EXISTS` 幂等建表，**表结构以 CREATE 语句为唯一事实来源**——加列直接改 CREATE；存量库由开发者手动执行一次 `ALTER TABLE`，不再保留启动期迁移代码（SQLite 无 `ADD COLUMN IF NOT EXISTS`，靠 try/catch 的迁移块已删除）。
+**建表与加列**：`db.ts` 启动时 `CREATE TABLE IF NOT EXISTS` 幂等建表，**表结构以 CREATE 语句为唯一事实来源**——加列直接改 CREATE；存量库靠 `PRAGMA user_version` 标记的迁移块推进（目前 v1：books 去掉 user_id 全局化 + 新增 shelf + progress 主键改 (user_id, book_id)；按 (book_url, source_id) 合并重复书籍，然后把旧行里的书架/进度迁过去，全程一个事务，`foreign_keys` 临时关闭）。
+
+**预览即入库（为什么 books 不带 user_id）**：搜索/探索/调试页点开一本书，先把 books + 目录写进库再进详情页，于是详情页同时也是「预览页」——未收藏时按钮显示「＋ 加入书架」，收藏后变「移出书架」。代价是库里会堆很多只看过一次的书，所以有**每日清理**（见 §9 定时任务）：删除「没有任何 shelf 引用」且入库超过 24h 的书，连同 chapters / progress / 正文缓存 / cache_jobs 一起回收，并顺手清掉「没有书引用」的缓存目录（换源后的旧地址残留）。宽限期与周期都可用 `CLEANUP_GRACE_MS` / `CLEANUP_INTERVAL_MS` 调（置 0 关闭）。
+
+**换源语义**：`PUT /books/:id/source` 是**原地改这一行**的 source_id + book_url 再重抓目录，书架关联、阅读进度、书籍 id 全部不变（阅读器换源后不用跳转，进度按章节序号延续）。若目标 (book_url, source_id) 已经被别人预览入库，会先把那本书的 shelf / progress 合并到当前书上再删掉它，避免撞 `books_url_src` 唯一索引。注意：换源后 `contentKey = sha1(newBookUrl)` 变了，旧源的正文缓存成为孤儿，由每日清理回收（新源若已有缓存则直接复用）。
 
 **正文落盘**：`data/cache/{sha1(book_url)}/{idx}.txt`。库只存元数据；同一本书不同用户天然共享缓存；清理即删目录。服务端以异步文件 I/O 读写正文，避免大文件操作阻塞请求处理。
 
@@ -90,8 +95,10 @@ SQLite 表 + 磁盘文件：
 ## 5. API 概要
 
 - **书源**：`GET/POST/DELETE /sources`（URL 批量导入 / 粘贴 JSON / 文件上传；列表额外返回 `bookCount` = 该源下书籍数，按 `bookUrl` 去重）、`POST /sources/:id/test`（体检）、`POST /sources/:id/debug`（SSE 调试日志，`{bookUrl}` 调书籍 / `{mode:"search",key}` 调搜索）
+  - **脚本源保存**：`POST /sources/script`（新建）、`PUT /sources/script/:id`（更新）。`PUT` **允许把已有的规则源就地切成脚本源**（`type` 改 `script`、`json` 换成脚本表单、`code` 重新生成），**id 不变**——书籍/书架按 `source_id` 引用，改类型不会连带失效；规则 JSON 会被脚本表单覆盖（要留规则请先导出）。返回 `{ok, id, converted}`，`converted=true` 表示这次发生了类型切换。典型场景：WAF 站点（如 69shuba）规则源的普通 fetch 恒 403，只能整源改成走浏览器的脚本源
 - **搜索**：`GET /search?q=` — 并发扇出全部启用源（每源并发 1、间隔 300ms、总超时 15s），**SSE 流式返回**；前端按书名+作者聚合去重，并可查看逐源失败原因
-- **书架**：`GET /books`、`POST /books`（秒回落库，目录后台异步补）、`DELETE /books/:id`；`GET /books/:id` 返回书籍详情并**联表带出 `sourceName`**（详情页要显示这本书属于哪个源）
+- **书架**：`GET /books`（join shelf，`createdAt` 取加入书架时间）、`POST /books/import`（**预览即入库**：按 (bookUrl, sourceId) 幂等写 books，目录后台补；`onShelf:true` 顺带加书架；返回 id 供前端直接进详情）、`POST /books/:id/shelf`（加入书架）、`DELETE /books/:id/shelf`（移出书架，书与缓存保留）、`GET /books/:id` 返回书籍详情 + `onShelf` 并**联表带出 `sourceName`**
+- **读接口不再按用户过滤**：books 全局共享，未加入书架也能看详情/目录/正文/缓存；只有 `GET /books`（书架列表）和 `progress` 是用户维度的
 - **目录**：`GET /books/:id/category`（`?refresh=1` 强制刷新）
 - **正文**：`GET /books/:id/content/:idx`（`?refresh=1` 绕过缓存重抓）
 - **进度**：`PUT /books/:id/progress`
@@ -103,9 +110,9 @@ SQLite 表 + 磁盘文件：
 
 抓取管线：构造模板 URL（`{{key}}`）→ fetch（书源 headers 优先，默认浏览器 UA/Referer）→ 编码识别（GBK/GB2312 用 iconv-lite，默认 UTF-8）→ 规则提取 → 正文正则净化 → 落盘。
 
-限流：搜索每源串行 + 300ms 间隔，超时 10s，失败不阻塞其他源。
+限流：搜索每源串行 + 300ms 间隔，超时取 `httpText` 默认 20s，失败不阻塞其他源。
 
-**探索（分类浏览）**：书源 `exploreUrl` 每行一个分类，`parseExploreGroups` 解析「标题::模板」（Legado 标准）、旧式「标题,http…」（后段以 `http(s)://` 或 `/` 开头才算分隔，避免切到模板自带的 `,{json 选项}`）与裸模板行（标题自动编号）；`<js>`/`@js:` 生成的静态解析不了，视为无分类。`exploreSource(src, tpl, page)` 复用 `buildReq`（替换 `{{page}}` + 请求选项）与搜索同一套 bookList 映射（`mapBooks`，搜索/探索共用）；规则缺省 `ruleExplore` 回退 `ruleSearch`（同 Legado）。页码 clamp 1..200。脚本源暂不支持探索。
+**探索（分类浏览）**：书源 `exploreUrl` 每行一个分类，`parseExploreGroups` 解析「标题::模板」（Legado 标准）、旧式「标题,http…」（后段以 `http(s)://` 或 `/` 开头才算分隔，避免切到模板自带的 `,{json 选项}`）与裸模板行（标题自动编号）；`<js>`/`@js:` 生成的静态解析不了，视为无分类。`exploreSource(src, tpl, page)` 复用 `buildReq`（替换 `{{page}}` + 请求选项）与搜索同一套 bookList 映射（`mapBooks`，搜索/探索共用）；规则缺省 `ruleExplore` 回退 `ruleSearch`（同 Legado）。页码 clamp 1..200。脚本源暂不支持探索。**探索源清单不做过滤**：所有启用的源都返回，没配 exploreUrl 的由前端提示去「分类」区块补（以前按「解析出分类」过滤，新加的源直接消失，看起来像没保存成功）。
 
 **抓取层容错（`fetcher.ts`）**——站点换域名导致「搜索 500、详情正常」的根治点：
 
@@ -114,18 +121,40 @@ SQLite 表 + 磁盘文件：
 - 命中时 `log.warn("fetch", ...)` 一行，调试面板可见。
 - HTTP 报错统一带最终 URL（`HTTP 500 · utf-8 · https://www.suduguu.com/i/sor.aspx`）：请求 URL 与落地 URL 不一致时，少了它就只剩一句「HTTP 500」，无从下手。
 
+**超时与「200 + 0 字节」（`fetcher.ts`）**——IIS/ASP.NET 站限流的典型表现，不识别就会误判成书源规则写错：
+
+- **默认超时 20s**（原 10s）。慢站单页就要 15s+（实测肉色屋：详情 15s、目录页 17s、偶发 60s），10s 必然超时；目录页另给 25s（`TOC_TIMEOUT`，页面更大又常被限速）。
+- **超时错误带人话**：`请求超时（上限 20s，已等 20.0s）：<url>`。`AbortError` 原本的 message 是 `The operation was aborted.`，谁也看不出等了多久、卡在哪个 URL。
+- **200 + 空 body 当失败重试**（最多 2 次，间隔 0.8s/1.6s）。站点限流时返回的不是 404 而是 `200 + Content-Length: 0`；不识别就会一路解析出 0 个元素，最后报「目录为空」——用户以为是规则配错，实际是被拦了。
+- **目录页抓取另有 3 次重试**（`fetchTocPage`：超时 / 网络错误 / 空内容都算失败），第 1 页尤其不能一次就判死整本书。
+- 详情页仍是空内容时抛 `详情页内容为空（HTTP 200，0 字节）：站点限流，或该书需登录/已下架`，不再把原因埋到「目录为空」里。
+
+**目录抓取状态（`tocStates`，进程内）**——决定前端该不该继续等：
+
+| 状态 | 含义 | 前端行为 |
+|---|---|---|
+| `fetching` | 后台 `fillToc` 正在抓 | 轮询（间隔 1.5s→3s→5s→8s→10s 封顶，最长 5 分钟） |
+| `done` | 目录已就绪 | 停止轮询 |
+| `failed` | 抓取失败，带 `error` 原文 | **立即停止**，显示原因 + 「重试抓目录」按钮 |
+| `idle` | 目录为空但没有任务（进程重启过） | 不轮询，显示「抓取目录」按钮 |
+
+- `/category` 与 `POST /import` 都返回 `toc: {status, error}`；`PUT /:id/refresh`（手工重试）失败时返回 **502 + 可读 error**，不再抛 500。
+- 前端轮询是**串行**的（一次返回才发下一次）。原来是 `setInterval` 固定 2s：接口一慢请求就堆积、后台早失败页面还在打满 2 分钟、刷新页面又开一轮——「一直在发请求、重启也停不下来」就是这么来的。
+- 后台任务日志接进服务日志（`[toc] 第 2 页请求失败（请求超时…），重试 1/2`），排查时能看到卡在哪一页；原来 `fillToc` 不传 log，只剩一句「目录抓取失败」。
+
 ## 7. 前端页面
 
 | 路由 | 页面 | 要点 |
 |---|---|---|
 | `/` | 书架 | 手机 3 列网格 / 桌面列表；排序 tab（默认「最近阅读」，可切「最近更新」）。**右上角账号区**：未登录=登录按钮；已登录=头像圆钮（无头像显示首字）→ 下拉（昵称 / 设置 / 退出登录）。**移出书架 = 右键或长按 500ms**（移动端没有右键），长按触发后吞掉同一次 click 不进详情。列表有**加载中状态**（转圈 + 「书架加载中…」），请求未回不显示「空书架」 |
 | `/search` | 搜索 | SSE 实时追加结果卡片，聚合去重；搜索进度随新一轮搜索重置，失败书源及错误原因可展开查看。布局：`← 书架` 在左，输入框中间（**16px 字号防 iOS 聚焦缩放**，框内有 × 清空），搜索按钮在右。登录/设置页输入框同为 16px |
-| `/explore` | 探索（分类浏览） | **上下结构 + `flex h-dvh flex-col`**：顶部行 = `← 书架` + 标题 + 书源 select（`text-base`，同 16px 规则）；分类按钮单行横向滚动（`overflow-x-auto` + 按钮 `flex-none`，选中 amber）；列表区 `min-h-0 flex-1 overflow-y-auto`（**flex 子元素滚动必须 `min-h-0`**），换源/换分类/换页自动回顶；底部翻页条（上一页/第 N 页/下一页）。下一页可用性看本页结果（空页=到底，显「没有更多了」）。点卡片与搜索页一致：`/preview?sourceId=&bookUrl=` + state hint。后端 `GET /api/sources/explore`（启用且有 exploreUrl 分类的规则源）与 `GET /api/sources/:id/explore?url=分类模板&page=N`；模板原样透传给引擎替换 `{{page}}` |
-| `/book/:id` | 书籍详情 | 封面左（垂直居中）、信息右（结构不变）；**操作按钮一排在卡片下方**：开始阅读/继续阅读（主按钮，与其他按钮同宽策略：按内容定宽、不 `flex-1` 拉满）、移出书架、检查更新、编辑，**全部左对齐**；**缓存一排紧跟其后**：左侧「书源：xxx」（源被删显示「无（源已删除）」，只有 id 时显示 `#id`），右侧缓存信息 + 缓存全本/停止/释放；目录**分页每页 100 章**（正/倒序先排序再切片，首次载入定位到「上次读到」所在页，切排序回第 1 页），目录有加载中状态 |
+| `/explore` | 探索（分类浏览） | **上下结构 + `flex h-dvh flex-col`**：顶部**两行**——①`← 书架`（+ 页面标题）独占一行 ②书源 select（`text-base`，同 16px 规则，`max-w-40 flex-none`）+ 分类按钮（`flex-1 overflow-x-auto no-scrollbar` 单行横向滚动、**隐藏滚动条**，按钮 `flex-none`，选中 amber）；列表区 `min-h-0 flex-1 overflow-y-auto`（**flex 子元素滚动必须 `min-h-0`**），换源/换分类/换页自动回顶；底部翻页条（上一页/第 N 页/下一页）。下一页可用性看本页结果（空页=到底，显「没有更多了」）。点卡片 = `POST /api/books/import` 入库后直接进 `/book/:id`（不再是独立的预览页）。后端 `GET /api/sources/explore`（**全部启用的源**，含还没配分类的新源——前端显示「还没有探索分类」并指引去编辑书源 →「分类」；脚本源 categories 恒为空、提示不支持）与 `GET /api/sources/:id/explore?url=分类模板&page=N`；模板原样透传给引擎替换 `{{page}}`。默认选中的是**第一个配了分类的源** |
+| `/book/:id` | 书籍详情（兼预览） | **预览与详情共用这一个页面**：进页面时书与目录已在库中（来源：搜索/探索/调试页入库），只是用户还没加入书架。封面左（垂直居中）、信息右；**操作按钮一排在卡片下方**：开始阅读/继续阅读（主按钮，按内容定宽、不 `flex-1` 拉满）、**加入书架 ⇄ 移出书架**（`onShelf` 切换；移出后停留在本页不跳走）、检查更新、编辑，**全部左对齐**；**缓存一排紧跟其后**：左侧「书源：xxx」（源被删显示「无（源已删除）」，只有 id 时显示 `#id`），右侧缓存信息 + 缓存全本/停止/释放。**整页定高 `flex h-dvh flex-col overflow-hidden`**：头部信息/按钮/缓存 `flex-none`，目录区 `flex min-h-0 flex-1 flex-col`——列表 `min-h-0 flex-1 overflow-y-auto no-scrollbar`（**目录自己滚、隐藏滚动条**，翻页/切排序回顶），**分页条 `flex-none` 贴底不跟着滚**。目录**分页每页 100 章**（正/倒序先排序再切片，首次载入定位到「上次读到」所在页），**页码是 select 可直接跳到最后一页**，目录有加载中状态 |
+| `/preview` | 兼容旧链接 | 旧入口 `/preview?sourceId=&bookUrl=` 只做「入库 → `replace` 跳 `/book/:id`」，不再有独立预览界面 |
 | `/book/:id/read/:idx` | 阅读器 | 见第四部分 |
 | `/settings` | 账号设置 | 头像（点击圆形选图，本地压缩预览，随「保存资料」提交）、昵称、修改密码（旧密码 + 新密码×2）；保存后通知 App 刷新 `/auth/me`，书架头像立即生效 |
-| `/sources` | 书源列表 | 书架点「书源」的落地页。顶栏：**左=返回书架 icon，右=新建**；列表每行 = 源名称（含「脚本」/「停用」角标）+ 该源书籍数（`bookCount`，按 `books.source_url` 去重计）+ 调试 icon + 删除 icon。点行进出编辑页，点调试 icon 进编辑页并直接落在调试 tab。筛选与导入/导出 URL 也在此页 |
-| `/sources/new`、`/sources/:id` | 书源编辑/调试 | **同一页面按 URL 区分**：无 id（`/sources/new`）= 新建（顶栏给「规则源 / 脚本源」类型切换），有 id = 载入该源；`?tab=debug` 直接打开调试 tab（列表的调试入口就带这个参数）。**新建保存成功后 `history.replaceState` 把 URL 换成 `/sources/:id`**（只替换路径尾段，保留 `/reader` 部署前缀；不进历史，刷新后能直达该源）。返回列表时有未保存改动会先确认。**左栏规则源表单按区块折叠**：基本/搜索/详情/目录/正文 各区块是折叠面板（缺省展开），点标题行收放——箭头旋转 + 内容高度 200ms 过渡（grid-rows 0fr↔1fr），表单值不因收起丢失 |
+| `/sources` | 书源列表 | 书架点「书源」的落地页。顶栏：**左=返回书架 icon，右=新建**；列表每行 = 源名称 + **分组角标**（`sources.group`，导入的 Legado 源自带 `bookSourceGroup`，常见「自制」「网络文学」；自建源默认「默认」——**一律显示**，不再「非默认才显示」） + 「脚本」/「停用」角标 + 该源书籍数（`bookCount`，按 `books.book_url` 去重计）+ 调试 icon + 删除 icon。点行进出编辑页，点调试 icon 进编辑页并直接落在调试 tab。筛选与导入/导出 URL 也在此页 |
+| `/sources/new`、`/sources/:id` | 书源编辑/调试 | **同一页面按 URL 区分**：无 id（`/sources/new`）= 新建（顶栏给「规则源 / 脚本源」类型切换），有 id = 载入该源；`?tab=debug` 直接打开调试 tab（列表的调试入口就带这个参数）。**新建保存成功后 `history.replaceState` 把 URL 换成 `/sources/:id`**（只替换路径尾段，保留 `/reader` 部署前缀；不进历史，刷新后能直达该源）。返回列表时有未保存改动会先确认。**左栏规则源表单按区块折叠**：基本/搜索/**分类**/详情/目录/正文 各区块是折叠面板（缺省展开），点标题行收放——箭头旋转 + 内容高度 200ms 过渡（grid-rows 0fr↔1fr），表单值不因收起丢失。**「分类」区块位于搜索与详情之间**：`exploreUrl`（每行 `分类名::分类地址`，可含 `{{page}}`，填了才会出现在探索页）+ `ruleExplore.*`（列表/书名/作者/封面/详情地址，留空复用搜索规则）。脚本源表单的「基本」里有**源分组**字段（以前硬编码 `group="脚本"`） |
 
 ### 危险操作确认（统一弹层）
 
@@ -141,9 +170,10 @@ SQLite 表 + 磁盘文件：
 
 | 事件 | 含义 | 前端处理 |
 |---|---|---|
-| `{level,step,msg}` | 引擎/底层日志行 | 追加到日志区（info/ok/warn/err 四色） |
+| `{level,step,msg}` | 引擎/底层日志行 | 追加到日志区（info/ok/warn/err/text 五色，`text` 为正文原文行） |
 | `{step:"books",books}` | 搜索书单 | 渲染结果卡片（封面+书名+作者+最新章，书 URL 可点填入「调书籍」） |
 | `{step:"bookinfo",info}` | 详情解析结果 | **详情一解析完就推**（不等目录正文），渲染书籍卡片：封面 / 书名 / 作者 / 最新章 / 简介；字段取不到时显式标「未取到」并提示对应规则名，避免只看到下游的「佚名」 |
+| `{step:"chapter",msg}` + 逐行 `{level:"text",step:"正文"}` | 首章正文全文 | 调试跑完目录后，先报「首章《x》正文全文 · N 段」+ 首章地址，再把正文**按段落逐条**推进流里（空行显示 `·（空行）`，首尾有 `────── 正文开始/结束 ──────` 分隔）；正文行不打 `[step]` 前缀，读起来就是一篇文章。只看字数无法判断段落是否被压成一行、广告/拼音残留在哪 |
 | `{tick:秒}` | 3s 无事件时的心跳 | 日志区尾部显示「运行中 · Ns」，让人知道没卡死 |
 
 三个保证实时性的手段：
@@ -212,8 +242,52 @@ location /reader/ {
 - 链式调用清单：取值 `text/html/all/ownText/textNodes/textBlocks/attr('x')`；导航 `find('sel')/children/eq(n)/first/last/parent/next/prev`；后处理 `trim()`
 - **`.trim()` 后处理**：跟在 `.text()` / `.textBlocks()` / `.attr()` 等取值调用后面。无参 = 去两端空白；`.trim('字面量')` = 再去两端该字面量，用于处理「简介：」「作者：」这类标签前缀（`'.intro'.text().trim('简介：')`）。只作用于字符串值，元素节点原样放行
 - **导航链压缩（legadoToOurs 自动做，幂等）**：`.find('x')` 并进选择器用空格相接、`.eq(n)/.first()/.last()` 并成 `:eq(n)`（0/-1），整段引号包裹——`p.eq(1).find('a').text()` → `'p:eq(1) a'.text()`；`.itemtxt.find('p').eq(1).find('a').text()` → `'.itemtxt p:eq(1) a'.text()`。`children/parent/next/prev` 与取值/后处理调用不能并进选择器，断开后原样保留在链上；相对链开头的 `.eq/.first/.last`（无选择器、作用在输入集本身）保持调用形态不压缩。**可靠性依据**：`:eq(N)` 与 `.eq(N)` 同为结果集全局索引，且引擎按项求值（单节点上下文），此时 find+eq 与选择器内 `:eq` 严格等价
-- **`.textBlocks()`**：正文段落提取专用——取最内层块级元素文本（嵌套 p 去重）、`<br>` 视为换行、容器裸文本（广告行）跳过、按文档序 `\n` 连接；容器内**没有块级子元素**（整段正文只用 `<br/>` 分行 + `&nbsp;` 缩进的手机站，如肉书屋）时回退为容器自身文本。正文规则**不要用 `.text()`**（全部拼一行无换行）
+- **正文规则只写选择器**（推荐写法）：`ruleContent.content = '.articlebody'` 就够，引擎先用选择器选到节点，再做**结构清洗**（删 `script/style/ins/…`、删隐藏节点、删「只含链接的短块」、独立短链接 `<a>` 整块删、夹在散文里的 `<a>` 解包保留文字），最后按块分段——也就是 `contentRule()` 自动补的那一个 `.textBlocks()`。实现：规则的 `||` 每一段、`##` 后处理之前，若链上没有任何取值调用（`text/textNodes/textBlocks/ownText/html/all/attr/trim`）就补 `.textBlocks()`；显式写了取值调用的原样生效，存量源零改动（`src/source/rule.ts` 的 `contentRule()`，规则源引擎与脚本源 `ruleContent()` 共用）。**强制要求用户记 `.textBlocks()` 是个坑**：漏写就静默退化成一行文本，整章没段落，排查时极难看出是规则少了尾巴
+- **`.textBlocks()`**：正文段落提取——取最内层块级元素文本（嵌套 p 去重）、`<br>` 视为换行、容器裸文本（广告行）跳过、按文档序 `\n` 连接；容器内**没有块级子元素**（整段正文只用 `<br/>` 分行 + `&nbsp;` 缩进的手机站，如肉书屋）时回退为容器自身文本。默认还做上面那套**容器级清洗**，`ruleContent.stripTags=false` 可关（个别站点正文就藏在隐藏节点里）。正文规则**不要用 `.text()`**（全部拼一行无换行，且不做容器清洗）
+- **额外删标签 `ruleContent.dropTags`（源级开关，不进规则语法）**：逗号/空格分隔，`span,font,section`。默认删除清单是 `script,style,iframe,noscript,template,object,embed,svg,canvas,video,audio,source,track,ins`——**`span` 默认必须保留**：正文常整段包在 span 里（字体加密、字数统计、高亮），按标签删会把字一起删掉。所以「某站用 span / font 包广告」这类需求走 `dropTags`，语义是**删标签连同内容**。三条边界：
+  - **只作用于正文**。标题/简介/目录用 `.text()` 取，不受影响；`dropTags` 只进 `textBlocks()` 的清洗路径（`EvalOpts.dropTags`）
+  - **`stripTags=false` 时也不生效**（总开关优先），避免两个开关打架
+  - **非法标签名静默忽略**：只收 `[a-z][a-z0-9-]*`，且已在默认清单里的自动去重。用户写 `</div>`、`#content` 这类会把选择器拼坏 → 整个清洗失效、正文结构全乱，这是最难排查的一类故障，宁可忽略
+  - 为什么不做成规则里的 `.remove('span')`：选择器是「定位」，删标签是「策略」。混进规则链要同时改链式解析、`legadoToOurs` 兼容层和转换器生成逻辑，而收益只是少填一个输入框；表单字段还能被「脚本源 / 规则源 / 转换器」三条链路自然共享（脚本源对应 `dropTags` 成员，`ruleText/ruleContent` 自动从实例取）
 - 保留：`||` 回退、`##正则##替换##变换`、`{{bookUrl}}/{{baseUrl}}` 模板、JsonPath（$ 开头）、目录 `{page}` 模板
+
+### 正文净化管线（`src/source/clean.ts`）
+
+正文净化的本质不是「一串正则」，而是**固定顺序的几段**。顺序错了结果就错，所以段序写死在代码里，不交给配置：
+
+| # | 段 | 做什么 | 为什么必须在这个位置 |
+|---|---|---|---|
+| ① | DOM 结构清洗 | 删 `script/style/iframe/ins/svg/video…`；**正文容器内**再删 `[hidden]`、`display:none`、`visibility:hidden`，删「只含链接 + ≤12 字 + 无句末标点」的块，独占一块的短链接 `<a>` 整块删、夹在散文里的 `<a>` 解包保留文字 | 标签只能在 DOM 阶段删。等取成纯文本，`<script>` 里的 JS 已经混进正文了——cheerio 的 `.text()` 会把脚本源码原样拼进去（实测 `正文<script>var ad="广告"</script>` → `正文var ad="广告"`），后面再强的正则也只能删残渣 |
+| ② | 文本抽取 | 正文一律按块分段（内容规则只写选择器时由 `contentRule()` 补 `.textBlocks()`，块级分段 + `<br>` 换行） | `.text()` 全拼一行、`.textNodes()` 只取直接文本节点，正文场景都不对 |
+| ③ | 整行删除 `line:` / `line!:` | 命中即删整行，不留空行 | **必须早于行内删除**：行内先把「【广告】」删掉，整行的特征就没了，`line:广告` 再也匹配不上 |
+| ④ | 行内删除/替换 `re:` | 正则替换，默认不区分大小写 | — |
+| ⑤ | 词典替换 `map:` / `map?:` | 单次扫描、长词优先 | 必须晚于删除：否则广告里的拼音也会被「还原」，白造垃圾。单次扫描是为了避免 A→B 之后 B 又被 C 命中 |
+| ⑥ | 规范化 | 零宽/方向控制符、字面量 `\n`、全角空格、行内空白、连续空行、首尾 | 前几步都会制造空行与多余空格 |
+| ⑦ | 质检告警 | 删过头（<40%）、中文占比过低、残留 JS、汉字夹拼音 | 净化失败要看得见，而不是让用户读到乱码才来问 |
+
+**规则语法**（字段 `ruleContent.replaceRegex` / class `replace`，一行一条，`//` 开头是注释）：
+
+| 写法 | 含义 |
+|---|---|
+| `line:正则` | 整行命中即删（删行不留空行） |
+| `line!:字面量` | 同上，按字面量匹配，不用写转义 |
+| `re:正则##替换` | 行内删除/替换（`re:` 可省） |
+| `正则##替换为` / `##正则##` / `裸正则` | 旧写法，语义完全不变（`##正则##` = 删除；无 `##` = 删除） |
+| `map:原词=新词` | 词典替换 |
+| `map?:原词=新词` | 低频保护：全章出现 ≥2 次才换 |
+
+- 词表也可单独写在 `ruleContent.replaceMap`（一行一条 `原词=新词`，或对象）/ class `replaceMap`，与 `map:` 等价
+- **默认不区分大小写**。站点常用大小写混淆规避过滤（正文里塞 `www.qUAnbEn-xIaosHuo.CoM`），净化类规则的意图几乎总是「把这段干掉」，区分大小写只会漏删。要严格区分时写 `(?-i)`
+- **兼容 Java/Legado 的内联标志** `(?i)` `(?im)` `(?-i)`：JS 不认识这种前缀，直接 `new RegExp("(?i)…")` 抛 `Invalid group`，以前被 catch 吞掉 —— 规则配了却毫无效果且没有任何提示。现在剥成真正的 flags，只映射 `i/m/s`（`u` 不映射：JS 的 `u` 会收紧转义，反而让 Java 写法的正则报错）
+- **拼音与反义词不做自动还原**。这两类是信息丢失，不是编码问题：`de` 可能是的/得/地/德，`高兴↔难过` 无法判定原文哪一边。引擎只提供 `map:` 显式词表（人工维护）+「汉字夹拼音」「中文占比过低」告警，由人核对。`map?` 的低频保护是有依据的启发式：站点批量污染必然高频，正常用词低频
+- **坏正则不再静默**：编译失败进 `warnings`（`N 条规则正则非法已跳过：…`），随日志输出
+- **命中统计**：每章日志输出「净化命中 x/y 条：规则×次数」。0 命中的规则不报警（只对某些章有效），但保留在 `hits` 里，供规则预览面板使用
+- **整章一次净化**：翻页循环只负责拼接原文，合并后净化一次。分页边界上的「本章未完，请点击下一页」「接上页」只有整章合并后才删得掉（以前每页各净化一次，永远删不掉）
+- **缓存存原文、读时净化**：`data/cache/{key}/{idx}.txt` 存未净化的整章原文，`GET /:id/content/:idx` 命中缓存后再按当前规则净化。改规则立即生效，不必整本重抓（`Engine.contentRaw` + `Engine.cleanText`）
+- **编译缓存**：`compilePipeline` 按（规则原文 + 词表）缓存编译结果（上限 128 条），全本缓存 2000 章不会把同一条正则编译 2000 次
+- **四条链路统一**：规则源正文（`engine.cleanForSource`）、脚本源正文（`script.polish`）、字段级 `##` 后处理（`rule.applyRule`，只走正则段）、规则源→脚本转换（`convert.replaceMember`：纯正则是 `{regex,replacement}` 数组；含 `line:/re:/map:` 前缀时输出多行原文，否则 `line:广告` 会被当成字面量正则而失效）
+- **可关容器清洗**：`ruleContent.stripTags=false`（个别站点正文就藏在隐藏节点里）
+
 
 ### 章节内翻页（正文分页）
 
@@ -303,7 +377,8 @@ const $ = parse(res.text);   // cheerio load
 abs("/book/1", res.url);     // 相对→绝对，base 参数缺省用源.base
 log("调试信息");
 // 规则兼容 helper（转换器生成的代码用）：
-nodes(res.text); ruleText(ns, "'#article'.textBlocks()"); ruleSel(ns, "规则");
+nodes(res.text); ruleText(ns, "'#article'.text()"); ruleSel(ns, "规则");
+ruleContent(ns, "'#article'");  // 正文专用：只写选择器，自动清洗 + 按块分段
 // 浏览器渲染（WAF/验证码/加密 AJAX 站点）：
 const p = await browserOpen(url);   // 自动等 WAF 挑战/验证码人工通过
 p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
@@ -403,7 +478,7 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 
 ### PC（>500px）
 
-- **左栏**：书架/书源/目录（icon+文字纵向排列；同顶栏，不设「首页」）。
+- **左栏**：**返回 / 书架 / 书源 / 目录**（icon+文字纵向排列，**「返回」放最前面** `nav(-1)`；PC 没有手机顶栏，之前只能靠浏览器后退）。
 - **右栏**（靠底）：书籍详情、刷新、朗读、设置（纯 icon 圆钮）。**底距 `bottom: 56px`（`bottom-14`）**——底栏约 33px 高，原来的 12px 会让最下面的设置钮下半截被底栏压住。
 - **底栏**：`上一章 · 章节进度 · 下一章` 居中悬浮。
 
@@ -449,7 +524,8 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 
 ## 11. 定时巡检与书籍编辑
 
-- **定时巡检（后端）**：服务启动后启用后台定时器，每 `UPDATE_INTERVAL_MS`（默认 6×3600×1000，**0 关闭**）遍历全部书籍，逐本重抓目录比对章节数；仅「新增章节」才置 `updatedAt`（影响书架「最近更新」排序），纯检查不动排序时间。复用检查更新的抓取逻辑，按书源限速器限流、两本之间留 800ms 间隔，避免远程浏览器任务相互抢占。日志落 `data/logs`，不阻塞请求。
+- **定时巡检（后端）**：服务启动后启用后台定时器，每 `UPDATE_INTERVAL_MS`（默认 6×3600×1000，**0 关闭**）遍历**书架里的书**（`books join shelf`，预览过但没人收藏的不巡检），逐本重抓目录比对章节数；仅「新增章节」才置 `updatedAt`（影响书架「最近更新」排序），纯检查不动排序时间。复用检查更新的抓取逻辑，按书源限速器限流、两本之间留 800ms 间隔，避免远程浏览器任务相互抢占。日志落 `data/logs`，不阻塞请求。
+- **每日孤儿清理（后端）**：每 `CLEANUP_INTERVAL_MS`（默认 24h，**0 关闭**）扫 `books left join shelf where shelf.book_id is null` 且 `created_at` 早于 `CLEANUP_GRACE_MS`（默认 24h）的书 → 删 chapters / progress / books，并按 `contentKey = sha1(bookUrl)` 释放正文缓存与 cache_jobs（**同一 bookUrl 还有别的书籍行在用就保留**）。随后再扫一遍 `chapter_cache` 的 distinct content_key，清掉「没有任何书引用」的孤儿缓存（换源后的旧地址残留）。启动 2 分钟后先跑一次，之后按周期跑。
 - **用户上传封面受保护**：巡检以源站封面覆盖 `cover`，但若当前 `cover` 以 `data:` 开头（本地上传）则**保留不动**——用户自定义封面不会被源站更新冲掉。
 - **编辑书籍元数据**：`PATCH /api/books/:id`，仅更新传入字段（name/author/intro/latestChapter/cover）。封面校验：以 `data:` 开头须是 `data:image/`（上限 2MB，前端已压缩）；否则须为 http(s) URL；空串即清除。其余字段按长度截断（name≤200/author≤100/intro≤4000/latestChapter≤300）。
 - **前端编辑弹层**：书籍详情页新增「编辑」按钮 → 底部弹层（无背景遮罩色、面板实底），书名/作者/简介/最新章节为文本框；**封面 = URL 输入框 + 上传图片**二选一，上传时 canvas 压缩至最长边 360px 的 JPEG(0.82) 转 dataURL 预览，可「清除封面」。保存走 PATCH，成功 toast + 重新加载详情。
@@ -533,7 +609,7 @@ redirect_stderr=true
 ## 2. 启动顺序（`src/index.ts`）
 
 1. `Bun.serve()` 绑端口 → 打 `listening` 日志（健康检查最先能过）；
-2. 延迟 1s 再做耗时初始化：`materializeScripts()`（脚本源落盘重建）+ 书籍巡检注册。期间请求打到脚本源时由 `ensureScriptFile` 惰性补单个脚本，不依赖全量重建；
+2. 延迟 1s 再做耗时初始化：`materializeScripts()`（脚本源落盘重建）+ 书籍巡检注册 + 孤儿清理注册。期间请求打到脚本源时由 `ensureScriptFile` 惰性补单个脚本，不依赖全量重建；
 3. 端口被占时按 `BIND_RETRIES`（默认 3）每 1s 重试——旧进程刚收 SIGTERM、socket 还差几百毫秒才释放的窗口就这样吃掉；仍失败则打印 `ss -lptn 'sport = :PORT'` / `lsof -i:PORT` 查到的占用者，然后 `exit 1`。
 
 ## 3. 退出顺序

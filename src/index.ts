@@ -3,7 +3,7 @@ import { serveStatic } from "hono/bun";
 import { auth, requireAuth, type AuthEnv } from "./auth";
 import { log, requestLogger } from "./log";
 import { sourceRoutes } from "./routes/sources";
-import { bookRoutes, startBookUpdateScheduler } from "./routes/books";
+import { bookRoutes, startBookUpdateScheduler, startOrphanCleanup } from "./routes/books";
 import { searchRoutes } from "./routes/search";
 import { materializeScripts } from "./source/script";
 import { closeBrowser } from "./source/browser";
@@ -138,4 +138,7 @@ setTimeout(() => {
     .catch((e) => log.warn("boot", `脚本源落盘检查失败：${e?.message ?? e}`));
   // 书籍更新巡检（默认每 6h；UPDATE_INTERVAL_MS=0 关闭；用户上传封面不被覆盖）
   startBookUpdateScheduler();
+  // 孤儿书籍清理（默认每 24h；CLEANUP_INTERVAL_MS=0 关闭）：
+  // 预览即入库会留下大量没人收藏的书，连同章节/进度/正文缓存一起回收
+  startOrphanCleanup();
 }, 1000);

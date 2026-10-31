@@ -1,4 +1,5 @@
 import { normalizeSource } from "./rule";
+import { parseReplaceRules } from "./regex";
 
 // —— 规则书源 → JS 脚本转换器 ——
 // 把规则 JSON 机械翻译成 class 脚本（helper 复用规则引擎求值器，规则字符串原样可用）。
@@ -61,20 +62,23 @@ function headersMember(header: any): string {
   return `  headers = ${JSON.stringify(h, null, 2).replace(/\n/g, "\n  ")};\n\n`;
 }
 
-function replaceMember(rr: any): string {
-  if (!rr) return "";
-  let rule = "";
-  let rep = "";
-  if (typeof rr === "object") {
-    rule = String(rr.regex ?? "");
-    rep = String(rr.replacement ?? "");
-  } else {
-    const parts = String(rr).split("##");
-    rule = parts[0];
-    rep = parts[1] ?? "";
+// 净化规则 → class 成员。两种形态：
+//   · 纯老式正则（正则##替换 / ##正则##）→ replace = [{regex, replacement}, …]（脚本源一直在用的形态）
+//   · 带 line:/re:/map: 前缀的新语法 → replace = "多行原文"，交给 clean.ts 按前缀解析
+//     （转成 {regex} 数组会把 "line:广告" 当成字面量正则，规则就失效了）
+function replaceMember(rc: any): string {
+  const raw = String(rc?.replaceRegex ?? "").trim();
+  let out = "";
+  if (raw) {
+    const newSyntax = raw.split(/\r?\n/).some((l) => /^(line!:|line:|re:|map\?:|map:|\/\/)/.test(l.trim()));
+    out += newSyntax
+      ? `  replace = ${JSON.stringify(raw)};\n\n`
+      : `  replace = ${JSON.stringify(parseReplaceRules(raw), null, 2).replace(/\n/g, "\n  ")};\n\n`;
   }
-  if (!rule) return "";
-  return `  replace = [{ regex: ${q(rule)}, replacement: ${q(rep)} }];\n\n`;
+  const map = rc?.replaceMap;
+  if (map && typeof map === "object" && Object.keys(map).length)
+    out += `  replaceMap = ${JSON.stringify(map, null, 2).replace(/\n/g, "\n  ")};\n\n`;
+  return out;
 }
 
 export function rulesToScript(src: any): string {
@@ -91,7 +95,7 @@ export function rulesToScript(src: any): string {
   out.push(`export default class Source {`);
   out.push(`  base = ${q(s.bookSourceUrl)};\n`);
   out.push(headersMember(s.header));
-  out.push(replaceMember(r.content.replaceRegex));
+  out.push(replaceMember(r.content));
 
   // search：searchUrl 缺省 = 该源不参与搜索（不生成方法）
   if (s.searchUrl) {
@@ -178,7 +182,7 @@ export function rulesToScript(src: any): string {
   out.push(`    const res = await fetchText(url);`);
   out.push(`    if (res.status >= 400) throw new Error("HTTP " + res.status);`);
   out.push(`    const ns = nodes(res.text);`);
-  out.push(`    const text = ruleText(ns, ${q(r.content.content || "")}, res.url);`);
+  out.push(`    const text = ruleContent(ns, ${q(r.content.content || "")}, res.url);`);
   out.push(`    if (!text) throw new Error("正文规则未命中");`);
   if (r.content.nextContentUrl) {
     out.push(

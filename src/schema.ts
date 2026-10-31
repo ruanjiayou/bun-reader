@@ -1,4 +1,4 @@
-import { sqliteTable, text, integer, uniqueIndex, index } from "drizzle-orm/sqlite-core";
+import { sqliteTable, text, integer, uniqueIndex, primaryKey, index } from "drizzle-orm/sqlite-core";
 
 export const users = sqliteTable("users", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -24,13 +24,12 @@ export const sources = sqliteTable("sources", {
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });
 
+// 书籍全局共享（预览即入库）：不挂在用户名下，同一 (book_url, source_id) 只有一行。
+// 「我的书架」是 shelf 关联表；没人收藏的书由每日清理任务回收。
 export const books = sqliteTable(
   "books",
   {
     id: integer("id").primaryKey({ autoIncrement: true }),
-    userId: integer("user_id")
-      .notNull()
-      .references(() => users.id, { onDelete: "cascade" }),
     bookUrl: text("book_url").notNull(),
     sourceId: integer("source_id").references(() => sources.id, { onDelete: "set null" }),
     name: text("name").notNull(),
@@ -43,7 +42,22 @@ export const books = sqliteTable(
     updatedAt: integer("updated_at", { mode: "timestamp" }),
     createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
   },
-  (t) => [uniqueIndex("books_user_book_src").on(t.userId, t.bookUrl, t.sourceId)],
+  (t) => [uniqueIndex("books_url_src").on(t.bookUrl, t.sourceId)],
+);
+
+// 书架：用户 ↔ 书籍的关联（加书架只插这一行，不再动 books）
+export const shelf = sqliteTable(
+  "shelf",
+  {
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    bookId: integer("book_id")
+      .notNull()
+      .references(() => books.id, { onDelete: "cascade" }),
+    createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  },
+  (t) => [primaryKey({ columns: [t.userId, t.bookId] })],
 );
 
 export const chapters = sqliteTable(
@@ -74,16 +88,21 @@ export const chapterCache = sqliteTable(
   (t) => [uniqueIndex("cache_key_idx").on(t.contentKey, t.idx)],
 );
 
+// 阅读进度：按「用户 + 书」存（书是共享的，进度各人各一份）
 export const progress = sqliteTable(
   "progress",
   {
+    userId: integer("user_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
     bookId: integer("book_id")
-      .primaryKey()
+      .notNull()
       .references(() => books.id, { onDelete: "cascade" }),
     chapterIdx: integer("chapter_idx").notNull().default(0),
     scrollPos: integer("scroll_pos").notNull().default(0),
     updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
   },
+  (t) => [primaryKey({ columns: [t.userId, t.bookId] })],
 );
 
 export const settings = sqliteTable(

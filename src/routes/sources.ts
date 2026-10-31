@@ -44,25 +44,27 @@ sourceRoutes.get("/export", async (c) => {
   return c.json(rows.map((r) => JSON.parse(r.json)));
 });
 
-// 探索源列表：启用且 exploreUrl 能解析出分类的规则源（脚本源暂不支持探索）。
+// 探索源列表：全部启用的源都返回（含还没配分类的新源）。
+// 以前这里过滤掉「解析不出分类」的源，导致刚新建/导入的源在探索里直接消失，
+// 用户以为没生效；现在由前端显示「该源未配置分类」，引导去编辑书源 → 分类。
+// 分类来自 exploreUrl；脚本源暂不支持探索（categories 恒为空，前端给提示）。
 // 注意必须注册在 /:id 之前，否则会被当成 id=explore 吃掉
 sourceRoutes.get("/explore", async (c) => {
   const rows = await db
     .select({ id: sources.id, name: sources.name, json: sources.json, type: sources.type })
     .from(sources)
     .where(eq(sources.enabled, true));
-  const list = rows
-    .filter((r) => r.type === "rules")
-    .map((r) => {
-      let categories: { title: string; tpl: string }[] = [];
+  const list = rows.map((r) => {
+    let categories: { title: string; tpl: string }[] = [];
+    if (r.type === "rules") {
       try {
         categories = parseExploreGroups(normalizeSource(JSON.parse(r.json)));
       } catch {
         /* 坏 json 的源没有探索 */
       }
-      return { id: r.id, name: r.name, categories };
-    })
-    .filter((r) => r.categories.length);
+    }
+    return { id: r.id, name: r.name, type: r.type, categories };
+  });
   return c.json(list);
 });
 
@@ -111,10 +113,12 @@ async function saveScriptSource(c: any, existId: number | null) {
   const code = formToCode(form);
   const err = await validateScriptCode(code);
   if (err) return c.json({ error: `脚本校验失败：${err}` }, 400);
+  // 分组由用户填（以前硬编码 "脚本"，自建源在列表里就没有自己的分组可显示）
+  const group = (form.group ?? "").trim() || "默认";
   if (existId === null) {
     const [row] = await db
       .insert(sources)
-      .values({ name, bookUrl: (form.base ?? "").trim(), group: "脚本", json: JSON.stringify(form), type: "script", code })
+      .values({ name, bookUrl: (form.base ?? "").trim(), group, json: JSON.stringify(form), type: "script", code })
       .returning({ id: sources.id });
     saveScriptFile(row.id, code);
     log.info("source", `新建脚本源「${name}」id=${row.id}`);
@@ -122,11 +126,23 @@ async function saveScriptSource(c: any, existId: number | null) {
   }
   const [row] = await db.select().from(sources).where(eq(sources.id, existId));
   if (!row) return c.json({ error: "书源不存在" }, 404);
-  if (row.type !== "script") return c.json({ error: "规则源请编辑规则表单，保存时会自动重新生成脚本" }, 400);
-  await db.update(sources).set({ name, bookUrl: (form.base ?? "").trim(), json: JSON.stringify(form), code }).where(eq(sources.id, existId));
+  // 规则源也可以就地改为脚本源（WAF 站点只能走浏览器时用得上）：保留 id —— 书籍/书架按 source_id
+  // 引用不受影响；规则 JSON 会被脚本表单覆盖（要留规则请先导出）。base 为空时沿用原 book_url 作为身份。
+  const converted = row.type !== "script";
+  await db
+    .update(sources)
+    .set({
+      name,
+      bookUrl: (form.base ?? "").trim() || row.bookUrl,
+      group,
+      json: JSON.stringify(form),
+      code,
+      type: "script",
+    })
+    .where(eq(sources.id, existId));
   saveScriptFile(existId, code);
-  log.info("source", `更新脚本源「${name}」id=${existId}`);
-  return c.json({ ok: true, id: existId });
+  log.info("source", `${converted ? `规则源「${name}」切换为脚本源（规则配置已被脚本表单替换）` : `更新脚本源「${name}」`}id=${existId}`);
+  return c.json({ ok: true, id: existId, converted });
 }
 
 sourceRoutes.post("/script", (c) => saveScriptSource(c, null));
@@ -332,6 +348,14 @@ sourceRoutes.post("/:id/debug", async (c) => {
             const toc = await eng.toc(tocUrl, send, lastChUrl || undefined);
             if (!toc.length) throw new Error("目录为空");
             const content = await eng.content(toc[0].url, send);
+            // 首章正文整段铺进调试流：只看字数没法判断段落有没有被压成一行、广告/拼音残留在哪，
+            // 所以按行逐条推（前端每条一行），空行用「·」占位保留段落间隔，首尾各留一行分隔
+            const lines = content.split("\n");
+            send("ok", "chapter", `首章《${toc[0].title}》正文全文 · ${lines.length} 段`);
+            send("info", "chapter", `首章地址: ${toc[0].url}`);
+            push({ level: "text", step: "正文", msg: "────── 正文开始 ──────" });
+            for (const line of lines) push({ level: "text", step: "正文", msg: line.trim() || "·（空行）" });
+            push({ level: "text", step: "正文", msg: "────── 正文结束 ──────" });
             send("ok", "done", `调试完成：${name} → ${toc.length} 章 → 首章正文 ${content.length} 字`);
           },
         );

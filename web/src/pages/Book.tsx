@@ -14,6 +14,7 @@ interface BookInfo {
   latestChapter: string;
   sourceId?: number | null;
   sourceName?: string; // 由 GET /api/books/:id 联表带出
+  onShelf?: boolean; // 是否在我的书架（预览即入库：书在库里不代表已收藏）
   progress: { chapterIdx: number; scrollPos: number } | null;
 }
 interface Chapter {
@@ -41,6 +42,8 @@ export default function Book() {
   const [page, setPage] = useState(1); // 目录页码（1 起）
   const [msg, setMsg] = useState("");
   const [loadErr, setLoadErr] = useState("");
+  // 后台目录抓取状态（后端 /category 带回）：fetching 才值得等，failed 立刻停并把原因显示出来
+  const [toc, setToc] = useState<{ status: "idle" | "fetching" | "done" | "failed"; error?: string } | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [cache, setCache] = useState<CacheStatus | null>(null);
   const [caching, setCaching] = useState(false);
@@ -51,6 +54,7 @@ export default function Book() {
   const [coverPreview, setCoverPreview] = useState("");
   const [saving, setSaving] = useState(false);
   const pageInit = useRef(0); // 每本书首次拿到目录时，定位到「上次读到」所在页
+  const tocRef = useRef<HTMLDivElement>(null); // 目录滚动容器（翻页后回顶）
 
   // 把所选图片压缩成 dataURL（最长边 360px 的 JPEG）作为封面上传；限 2MB
   const onCoverFile = (file?: File) => {
@@ -117,11 +121,15 @@ export default function Book() {
 
   const load = async () => {
     try {
-      const cat = await api<{ book: BookInfo; chapters: Chapter[]; progress: { chapterIdx: number } | null }>(
-        `/api/books/${bookId}/category`,
-      );
+      const cat = await api<{
+        book: BookInfo;
+        chapters: Chapter[];
+        progress: { chapterIdx: number } | null;
+        toc?: { status: "idle" | "fetching" | "done" | "failed"; error?: string };
+      }>(`/api/books/${bookId}/category`);
       setChapters(cat.chapters);
       setCur(cat.progress?.chapterIdx ?? null);
+      if (cat.toc) setToc(cat.toc);
       const info = await api<BookInfo>(`/api/books/${bookId}`);
       setBook({ ...cat.book, ...info, progress: info.progress });
     } catch (e: any) {
@@ -135,27 +143,47 @@ export default function Book() {
     loadCache();
   }, [bookId]);
 
-  // 目录为空时轮询（加书架时目录是后台异步抓的，就绪后自动出现），最长轮询 2 分钟
+  // 目录为空时的等待：只在后端确实「正在抓」时才轮询，且一次请求结束才发下一次。
+  // 原来是无条件 setInterval 2s + 无脑跑满 2 分钟：后台早失败了页面还在打请求，
+  // 接口一慢还会把请求堆起来（刷新页面又开一轮），表现就是「一直在发请求」。
+  // 间隔逐步放宽（1.5s→3s→5s→8s→10s 封顶）：慢站目录要几分钟，用固定 2s 会白打上百次请求。
   useEffect(() => {
     if (chapters.length || loadErr) return;
+    if (toc && toc.status !== "fetching") return; // idle / done / failed 都不该再等
+    const DELAYS = [1500, 3000, 5000, 8000, 10000];
     let stop = false;
-    const t = setInterval(async () => {
+    let attempt = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const tick = async () => {
+      if (stop) return;
       try {
-        const cat = await api<{ chapters: Chapter[]; progress: { chapterIdx: number } | null }>(`/api/books/${bookId}/category`);
+        const cat = await api<{
+          chapters: Chapter[];
+          progress: { chapterIdx: number } | null;
+          toc?: { status: "idle" | "fetching" | "done" | "failed"; error?: string };
+        }>(`/api/books/${bookId}/category`);
         if (stop) return;
+        if (cat.toc) setToc(cat.toc);
         if (cat.chapters.length) {
           setChapters(cat.chapters);
           setCur((c) => cat.progress?.chapterIdx ?? c);
+          return; // 目录到了，结束轮询（依赖变化也会把 effect 清掉）
         }
-      } catch {}
-    }, 2000);
-    const to = setTimeout(() => (stop = true), 120000);
+        if (cat.toc?.status === "failed") return; // 后台已失败：立刻停，别继续空转
+      } catch {
+        // 单次失败不终止：后端可能正好在重启，下一轮再看状态
+      }
+      const wait = DELAYS[Math.min(attempt++, DELAYS.length - 1)];
+      if (!stop) timer = setTimeout(tick, wait);
+    };
+    timer = setTimeout(tick, DELAYS[0]);
+    const to = setTimeout(() => (stop = true), 300000); // 兜底：最长等 5 分钟（站点慢时单页就要 15s+）
     return () => {
       stop = true;
-      clearInterval(t);
+      if (timer) clearTimeout(timer);
       clearTimeout(to);
     };
-  }, [chapters.length, loadErr, bookId]);
+  }, [chapters.length, loadErr, bookId, toc?.status]);
 
   // 首次拿到目录：把页码定位到「上次读到」的章节所在页
   useEffect(() => {
@@ -215,21 +243,37 @@ export default function Book() {
       setMsg(r.added > 0 ? `更新完成：新增 ${r.added} 章，共 ${r.chapterCount} 章` : `已最新，共 ${r.chapterCount} 章`);
       await load();
     } catch (e: any) {
-      setMsg(e.message);
+      // 后端 502 带的是书源侧的真实原因（超时/内容为空/HTTP 4xx），直接摊在这里，别只说"失败"
+      setMsg(`目录抓取失败：${e.message}`);
+      setToc({ status: "failed", error: e.message });
     } finally {
       setRefreshing(false);
     }
   };
 
-  const remove = async () => {
+  // 移出书架：只删关联（书与缓存还在，没人收藏时由每日清理回收），页面留在详情不跳走
+  const removeFromShelf = async () => {
     const ok = await ask({
       title: `把《${book?.name}》移出书架？`,
-      desc: "只移除书架关联，章节与正文缓存保留；之后可在搜索里重新加入。",
+      desc: "只移除书架关联，章节与正文缓存保留；之后可在搜索/探索里重新加入。",
       okText: "移出",
     });
     if (!ok) return;
-    await api(`/api/books/${bookId}`, { method: "DELETE" });
-    nav("/");
+    await api(`/api/books/${bookId}/shelf`, { method: "DELETE" });
+    setBook((b) => (b ? { ...b, onShelf: false } : b));
+    setMsg("已移出书架");
+  };
+
+  const addToShelf = async () => {
+    try {
+      await api(`/api/books/${bookId}/shelf`, { method: "POST" });
+      setBook((b) => (b ? { ...b, onShelf: true } : b));
+      setMsg("已加入书架");
+      // 目录还空着时后端会顺带再抓一次：拉一遍状态，把「失败/空闲」改回抓取中，轮询才会重新开始
+      if (!chapters.length) await load();
+    } catch (e: any) {
+      setMsg(`加入书架失败：${e.message}`);
+    }
   };
 
   const list = asc ? chapters : [...chapters].reverse();
@@ -238,10 +282,16 @@ export default function Book() {
   const pageItems = list.slice((pageClamped - 1) * PAGE_SIZE, pageClamped * PAGE_SIZE);
   const startIdx = cur ?? 0;
 
+  // 翻页/切排序后目录回到顶部（列表是内部滚动的，不重置会停在上一页的位置）
+  useEffect(() => {
+    tocRef.current?.scrollTo({ top: 0 });
+  }, [pageClamped, asc]);
+
   return (
-    <div className="mx-auto min-h-dvh max-w-3xl p-4">
+    // 整页定高（h-dvh）分三层：头部信息区 flex-none，目录区 min-h-0 flex-1 内部滚动，分页贴底
+    <div className="mx-auto flex h-dvh max-w-3xl flex-col overflow-hidden p-4">
       {confirmUi}
-      <header className="mb-4 flex items-center gap-2">
+      <header className="mb-3 flex flex-none items-center gap-2">
         <Link to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
       </header>
       {msg && (
@@ -251,7 +301,7 @@ export default function Book() {
       )}
 
       {book && (
-        <div className="mb-3 rounded-xl bg-neutral-800 p-4">
+        <div className="mb-3 flex-none rounded-xl bg-neutral-800 p-4">
           {/* 封面在左（垂直居中），标题/作者/简介/进度都在右侧；操作按钮统一放卡片下方一排 */}
           <div className="flex items-center gap-4">
             {book.cover ? (
@@ -285,14 +335,18 @@ export default function Book() {
 
       {/* 操作按钮一排（卡片下方）：全部左对齐、按内容定宽（阅读钮不再 flex-1 拉满） */}
       {book && (
-        <div className="mb-2 flex flex-wrap items-center gap-2">
+        <div className="mb-2 flex flex-none flex-wrap items-center gap-2">
           <button
             onClick={() => nav(`/book/${bookId}/read/${startIdx}`)}
             className="rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 hover:bg-amber-400"
           >
             {cur !== null ? "继续阅读" : "开始阅读"}
           </button>
-          <button onClick={remove} className="rounded-lg bg-neutral-700 px-4 py-2 text-sm text-red-400 hover:bg-red-950">移出书架</button>
+          {book.onShelf ? (
+            <button onClick={removeFromShelf} className="rounded-lg bg-neutral-700 px-4 py-2 text-sm text-red-400 hover:bg-red-950">移出书架</button>
+          ) : (
+            <button onClick={addToShelf} className="rounded-lg bg-neutral-700 px-4 py-2 text-sm text-amber-400 hover:bg-neutral-600">＋ 加入书架</button>
+          )}
           <button
             onClick={refreshToc}
             disabled={refreshing}
@@ -307,7 +361,7 @@ export default function Book() {
       {/* 缓存一排（阅读按钮下方）：左侧标出本书所属书源，右侧缓存信息 + 缓存操作。
           justify-between：一行放得下时缓存组靠右，窄屏换行后整体左对齐，不会吊在右边 */}
       {book && (
-        <div className="mb-4 flex flex-wrap items-center justify-between gap-x-3 gap-y-2 text-xs">
+        <div className="mb-3 flex flex-none flex-wrap items-center justify-between gap-x-3 gap-y-2 text-xs">
           <span className="min-w-0 truncate text-neutral-500">
             书源：
             <span className={book.sourceName ? "text-neutral-300" : "text-amber-500"}>
@@ -400,8 +454,9 @@ export default function Book() {
         </div>
       )}
 
-      <section id="toc">
-        <div className="mb-2 flex items-center">
+      {/* 目录区：占满剩余高度，列表自身滚动（隐藏滚动条），分页条固定在底部不跟着滚 */}
+      <section id="toc" className="flex min-h-0 flex-1 flex-col">
+        <div className="mb-2 flex flex-none items-center">
           <h2 className="text-sm font-bold text-neutral-300">目录</h2>
           <span className="ml-2 text-xs text-neutral-500">共 {chapters.length} 章</span>
           <button
@@ -417,12 +472,12 @@ export default function Book() {
 
         {loading ? (
           // 目录请求中：明确显示加载态，不与「空目录/抓取中」混淆
-          <div className="flex h-40 items-center justify-center rounded-xl bg-neutral-800/50 text-sm text-neutral-500">
+          <div className="flex flex-1 items-center justify-center rounded-xl bg-neutral-800/50 text-sm text-neutral-500">
             <span className="mr-2 inline-block h-4 w-4 animate-spin rounded-full border-2 border-neutral-600 border-t-amber-500" />
             目录加载中…
           </div>
         ) : (
-          <div className="divide-y divide-neutral-800 rounded-xl bg-neutral-800/50">
+          <div ref={tocRef} className="no-scrollbar min-h-0 flex-1 divide-y divide-neutral-800 overflow-y-auto rounded-xl bg-neutral-800/50">
             {pageItems.map((ch) => (
               <Link
                 key={ch.idx}
@@ -434,14 +489,41 @@ export default function Book() {
                 {ch.idx === cur && <span className="ml-2 text-xs text-neutral-500">· 上次读到</span>}
               </Link>
             ))}
-            {!chapters.length && !loadErr && <div className="p-6 text-center text-neutral-600">目录抓取中…（后台生成，就绪后自动显示）</div>}
+            {!chapters.length && !loadErr && toc?.status === "failed" && (
+              <div className="p-6 text-center">
+                <div className="text-sm text-red-400">目录抓取失败</div>
+                <div className="mx-auto mt-1 max-w-xl break-words text-xs leading-5 text-neutral-500">{toc.error}</div>
+                <button
+                  onClick={refreshToc}
+                  disabled={refreshing}
+                  className="mt-3 rounded bg-neutral-800 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
+                >
+                  {refreshing ? "重试中…" : "重试抓目录"}
+                </button>
+              </div>
+            )}
+            {!chapters.length && !loadErr && toc?.status === "fetching" && (
+              <div className="p-6 text-center text-neutral-600">目录抓取中…（后台生成，就绪后自动显示）</div>
+            )}
+            {!chapters.length && !loadErr && toc?.status !== "failed" && toc?.status !== "fetching" && (
+              <div className="p-6 text-center">
+                <div className="text-sm text-neutral-500">这本书还没有目录</div>
+                <button
+                  onClick={refreshToc}
+                  disabled={refreshing}
+                  className="mt-3 rounded bg-neutral-800 px-3 py-1.5 text-xs text-neutral-300 hover:bg-neutral-700 disabled:opacity-50"
+                >
+                  {refreshing ? "抓取中…" : "抓取目录"}
+                </button>
+              </div>
+            )}
             {loadErr && !chapters.length && <div className="p-6 text-center text-neutral-600">{loadErr}</div>}
           </div>
         )}
 
-        {/* 分页：一页 100 章，几千章的目录不再整页渲染 */}
+        {/* 分页：贴底固定，一页 100 章；页码用 select，几千章也能一步跳到最后一页 */}
         {!loading && totalPages > 1 && (
-          <div className="mt-2 flex items-center justify-center gap-3 text-xs text-neutral-400">
+          <div className="mt-2 flex flex-none items-center justify-center gap-3 text-xs text-neutral-400">
             <button
               onClick={() => setPage((p) => Math.max(1, p - 1))}
               disabled={pageClamped <= 1}
@@ -449,9 +531,17 @@ export default function Book() {
             >
               上一页
             </button>
-            <span>
-              第 {pageClamped} / {totalPages} 页
-            </span>
+            <select
+              value={pageClamped}
+              onChange={(e) => setPage(Number(e.target.value))}
+              className="rounded bg-neutral-800 px-2 py-1 text-xs text-neutral-300 outline-none hover:bg-neutral-700"
+            >
+              {Array.from({ length: totalPages }, (_, i) => i + 1).map((n) => (
+                <option key={n} value={n}>
+                  第 {n} / {totalPages} 页
+                </option>
+              ))}
+            </select>
             <button
               onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
               disabled={pageClamped >= totalPages}

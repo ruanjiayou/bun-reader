@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 import type { CheerioAPI } from "cheerio";
 import type { AnyNode } from "domhandler";
+import { compileRuleRegex } from "./regex";
 
 // —— 规则语法 v2（链式调用版）——
 // 规则 = ['CSS选择器'][.链式调用...] + 可选 ##正则##替换##变换 + 可选 || 回退
@@ -24,8 +25,14 @@ import type { AnyNode } from "domhandler";
 // 规则求值上下文：html 节点（cheerio）或 json 值（API 类书源）
 export type Node = { kind: "html"; $: CheerioAPI; el: AnyNode } | { kind: "json"; v: any };
 
+// 文档级清洗：这些标签的文本永远不该出现在任何字段里。
+// 尤其 <script>：cheerio 的 .text() 会把脚本源码原样拼进正文（实测
+// `正文<script>var ad="广告"</script>` → `正文var ad="广告"`），后面再厉害的正则也只能删残渣。
+const DOC_DROP_TAGS = "script,style,iframe,noscript,template,object,embed,svg,canvas,video,audio,source,track,ins";
+
 export function htmlNodes(text: string): Node[] {
   const $ = cheerio.load(text);
+  $(DOC_DROP_TAGS).remove();
   return [{ kind: "html", $, el: $.root().get(0)! }];
 }
 
@@ -297,26 +304,84 @@ function textNodes($: CheerioAPI, el: AnyNode): string {
 
 const BLOCK_SEL = "p,h1,h2,h3,h4,h5,h6,li,blockquote,pre,div,td,th,section,article";
 
+// 隐藏节点：站点常把广告/重复正文藏在 display:none 里，读者看不见但 .text() 照抓
+const HIDDEN_SEL = '[hidden],[aria-hidden="true"],[style*="display:none"],[style*="display: none"],[style*="visibility:hidden"],[style*="visibility: hidden"]';
+const SENTENCE_END = /[。！？…”」』；;，,]$/;
+const JUNK_BLOCK_MAX = 12; // 「最新章节」这类推广块的字符上限
+
+// 源级「额外要删的标签」（ruleContent.dropTags，逗号/空格/中文逗号分隔）。
+// 只接受合法标签名：用户随手写 "</div>"、"#content" 之类会把选择器拼坏，宁可忽略也不要抛错——
+// 这是调试期最容易踩的坑（规则看着生效了，其实整个清洗都在用坏选择器）。
+export function parseDropTags(s?: string): string {
+  if (!s) return "";
+  return s
+    .split(/[,，\s]+/)
+    .map((t) => t.trim().toLowerCase().replace(/^<|>$/g, ""))
+    .filter((t) => /^[a-z][a-z0-9-]*$/.test(t) && !DOC_DROP_TAGS.split(",").includes(t))
+    .join(",");
+}
+
+// 正文容器级清洗（只在 .textBlocks() 上做，不影响标题/目录等字段的取值）：
+//   · 删 script/style/iframe/noscript/ins/svg/video…（DOC_DROP_TAGS，cheerio 的 .text() 会把脚本源码拼进正文）
+//   · 删隐藏节点（display:none / visibility:hidden / [hidden]，读者看不见但 .text() 照抓）
+//   · 删「只含链接 + 短文本 + 不是句子」的块（正文里塞的「最新章节」「下载APP」「点击继续阅读」）
+//   · 删空块；<a> 见下面单独处理
+// 在独立 clone 上做，同一份文档还要取别的字段，不能就地改树。
+// extra：源级追加要删的标签（ruleContent.dropTags），已经过 parseDropTags 规整
+function sanitizeContainer($: CheerioAPI, el: AnyNode, extra = ""): { $: CheerioAPI; el: AnyNode } {
+  const clone = cheerio.load($.html(el) ?? "");
+  const $c = clone;
+  const $root = $c.root();
+  $root.find(DOC_DROP_TAGS).remove();
+  if (extra) $root.find(extra).remove();
+  $root.find(HIDDEN_SEL).remove();
+  $root.find(BLOCK_SEL).each((_, n) => {
+    const $n = $c(n);
+    if ($n.find(BLOCK_SEL).length) return; // 容器块，由子块各自判定
+    const t = $n.text().replace(/[\s\u00a0\u3000]+/g, "");
+    if (!t) {
+      $n.remove();
+      return;
+    }
+    if ($n.find("a").length && t.length <= JUNK_BLOCK_MAX && !SENTENCE_END.test(t)) $n.remove();
+  });
+  // 残留的 <a>：独占一块的短链接（广告词、报错、TOP↑）整个删掉；夹在散文里的只解包保留文字。
+  // 「独占」用父节点纯文本是否等于链接文字判断——正文里只有广告才会被一个链接占满整段，
+  // 而万一站点把整段正文包在 <a> 里（个别反爬站这么干），长文本走解包分支，一个字都不会丢。
+  $root.find("a").each((_, a) => {
+    const $a = $c(a);
+    const t = $a.text().replace(/[\s\u00a0\u3000]+/g, "");
+    const alone = $a.parent().text().replace(/[\s\u00a0\u3000]+/g, "") === t;
+    if (alone && t.length <= JUNK_BLOCK_MAX) $a.remove();
+    else $a.replaceWith($a.contents());
+  });
+  return { $: $c, el: $root.get(0)! };
+}
+
 // 段落级正文提取：取最内层块级元素的文本（内部还嵌套块的容器跳过，避免嵌套 p 重复），<br> 视为换行，按文档序 \n 连接
 // 对比 .text()（全部拼一行无换行）和 .textNodes()（只取直接文本节点）：正文场景两者都不对，这个才是想要的
 // 容器内没有块级子元素（整段正文只用 <br> 分行，如肉书屋/部分手机站）时回退为容器自身文本
-function textBlocks($: CheerioAPI, el: AnyNode): string {
+// sanitize=false 时退回旧行为（源上配 ruleContent.stripTags=false，个别站点正文就藏在隐藏节点里）
+function textBlocks($: CheerioAPI, el: AnyNode, sanitize = true, extraDrop = ""): string {
+  let $c = $;
+  let root = el;
+  if (sanitize) ({ $: $c, el: root } = sanitizeContainer($, el, extraDrop));
   const out: string[] = [];
   const push = (n: AnyNode) => {
-    const c = $(n).clone();
+    const c = $c(n).clone();
     c.find("br").replaceWith("\n");
     for (const line of c.text().split("\n")) {
       const t = line.replace(/[ \t\u00a0\u3000]+/g, " ").trim(); // \u00a0 = &nbsp;，手机站正文首行全靠它缩进
       if (t) out.push(t);
     }
   };
-  $(el)
+  $c(root)
     .find(BLOCK_SEL)
     .each((_, n) => {
-      if ($(n).find(BLOCK_SEL).length) return; // 容器块：子块会各自产出
+      if ($c(n).find(BLOCK_SEL).length) return; // 容器块：子块会各自产出
       push(n);
     });
-  if (!out.length) push(el); // 无块级子元素：回退到容器自身的 <br> 分行文本
+  if (!out.length) push(root); // 无块级子元素：回退到容器自身的 <br> 分行文本
   return out.join("\n");
 }
 
@@ -347,8 +412,41 @@ function parseChain(main: string): { sel: string; calls: Call[] } {
   return { sel: s, calls };
 }
 
+// 规则求值选项（目前只有正文净化相关的开关；默认全开）
+export interface EvalOpts {
+  sanitize?: boolean; // .textBlocks() 是否做容器级清洗（删隐藏节点/短链接块、解包 a）
+  dropTags?: string; // 额外要删的标签（连同内容），逗号分隔；见 parseDropTags
+}
+
+// —— 正文规则默认取值 ——
+// 正文规则的写法就应该是「选择器」：'.articlebody' / '#content' / '.readcontent'。
+// 选到节点之后怎么取文本不该让用户操心：引擎固定走「结构清洗（删 script/a/隐藏节点）→ 按块分段」，
+// 也就是 .textBlocks() 的那一套。用户以前必须写 '.articlebody'.textBlocks()，忘了写就整章压成一行
+// （.text() 的默认语义），排查起来极难看出是规则漏了尾巴。
+// 所以：链上没有任何取值调用时，自动补 .textBlocks()；显式写了 .text()/.html()/.textNodes() 的保持原样。
+const VALUE_CALLS = new Set(["text", "textNodes", "textBlocks", "ownText", "html", "all", "attr", "trim"]);
+
+export function contentRule(rule: string): string {
+  if (!rule || !rule.trim()) return rule;
+  return rule
+    .split("||")
+    .map((part) => {
+      const raw = part.trim();
+      if (!raw) return part;
+      const hash = raw.indexOf("##"); // ##正则## 后处理段不属于选择器，补调用要插在它前面
+      const main = (hash > -1 ? raw.slice(0, hash) : raw).trim();
+      const rest = hash > -1 ? raw.slice(hash) : "";
+      if (!main) return part;
+      if (main.startsWith("$") || /^\{\{/.test(main)) return part; // JsonPath / URL 模板：不是 DOM 选择
+      const { calls } = parseChain(main);
+      if (calls.some((c) => VALUE_CALLS.has(c.name))) return part;
+      return `${main}.textBlocks()${rest}`;
+    })
+    .join("||");
+}
+
 // 链式调用求值：导航调用产出元素，取值调用产出字符串（后续导航调用对字符串无效，自然终止）
-function evalChain(cur: Node[], calls: Call[]): Node[] {
+function evalChain(cur: Node[], calls: Call[], opts?: EvalOpts): Node[] {
   for (const c of calls) {
     const next: Node[] = [];
     switch (c.name) {
@@ -403,7 +501,8 @@ function evalChain(cur: Node[], calls: Call[]): Node[] {
         for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: textNodes(n.$, n.el) });
         break;
       case "textBlocks":
-        for (const n of cur) if (n.kind === "html") next.push({ kind: "json", v: textBlocks(n.$, n.el) });
+        for (const n of cur)
+          if (n.kind === "html") next.push({ kind: "json", v: textBlocks(n.$, n.el, opts?.sanitize !== false, parseDropTags(opts?.dropTags)) });
         break;
       case "attr": {
         const name = unquote(c.arg);
@@ -463,13 +562,13 @@ function applyJsonPath(nodes: Node[], rule: string): Node[] {
 }
 
 // 规则求值主入口：支持 ##regex##replace 后处理、|| 回退；JS 脚本规则不支持（返回空）
-export function applyRule(input: Node[], rule: string, base = ""): Node[] {
+export function applyRule(input: Node[], rule: string, base = "", opts?: EvalOpts): Node[] {
   // 空规则返回空结果：缺失字段应得到 ""，而不是把整个元素文本当值
   if (!rule || !rule.trim()) return [];
   if (isJsRule(rule)) return []; // ponytail: JS 脚本源二期沙箱补
   if (rule.includes("||")) {
     for (const part of rule.split("||")) {
-      const r = applyRule(input, part.trim(), base);
+      const r = applyRule(input, part.trim(), base, opts);
       if (r.length) return r;
     }
     return [];
@@ -482,11 +581,8 @@ export function applyRule(input: Node[], rule: string, base = ""): Node[] {
   if (hash > -1) {
     const parts = main.slice(hash + 2).split("##");
     main = main.slice(0, hash);
-    try {
-      regex = parts[0] ? new RegExp(parts[0], "g") : null;
-    } catch {
-      regex = null;
-    }
+    // 走统一编译：默认不区分大小写，并兼容 Java 的 (?i) 写法（JS 直接 new RegExp("(?i)…") 会抛错）
+    regex = parts[0] ? compileRuleRegex(parts[0]) : null;
     rep = parts[1] ?? "";
     xf = parts[2] ?? ""; // 第三段：变换函数（逗号分隔按序执行）
     // 无正则时（####变换）第二段就是变换函数，避免被当成替换文本
@@ -507,7 +603,7 @@ export function applyRule(input: Node[], rule: string, base = ""): Node[] {
         for (const n of cur) if (n.kind === "html") safeFind(n.$, n.el, sel).forEach((e) => next.push({ kind: "html", $: n.$, el: e }));
         cur = next;
       }
-      cur = evalChain(cur, calls);
+      cur = evalChain(cur, calls, opts);
     }
   }
   if (regex) cur = cur.map((n) => ({ kind: "json", v: nodeText(n).replace(regex!, rep) }));
@@ -540,14 +636,14 @@ export function nodeText(n: Node): string {
 }
 
 // 取字符串：多结果按 Legado 习惯用 \n 连接
-export function ruleStr(nodes: Node[], rule: string, base = ""): string {
-  return applyRule(nodes, rule, base)
+export function ruleStr(nodes: Node[], rule: string, base = "", opts?: EvalOpts): string {
+  return applyRule(nodes, rule, base, opts)
     .map(nodeText)
     .filter(Boolean)
     .join("\n");
 }
 
 // 取列表：保留元素节点（html 元素或 json 对象）
-export function ruleList(nodes: Node[], rule: string, base = ""): Node[] {
-  return applyRule(nodes, rule, base);
+export function ruleList(nodes: Node[], rule: string, base = "", opts?: EvalOpts): Node[] {
+  return applyRule(nodes, rule, base, opts);
 }

@@ -8,7 +8,7 @@ import { log } from "../log";
 // 容器重启后连接失效：getCtx 检测 isConnected 自动重连。
 // 旧的 headed/headless 双模式、profile 锁、UA 覆写全部取消：远程是唯一实例且就是真实 Chrome（navigator.webdriver=false）。
 
-const CDP_URL = process.env.CDP_URL || "http://127.0.0.1:9222";
+const CDP_URL = process.env.CDP_URL || "http://192.168.1.124:9222";
 
 let browserP: Promise<any> | null = null;
 const openPages = new Set<any>(); // 本进程打开的页：退出时清掉，避免容器里越积越多

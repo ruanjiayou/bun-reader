@@ -12,7 +12,8 @@ interface SourceRow {
   type: string; // rules = 规则表单源；script = class 脚本源
 }
 interface DebugEvt {
-  level: "info" | "ok" | "warn" | "err";
+  // text = 调试时逐行铺开的正文原文，单独配色，跟普通 info 区分开
+  level: "info" | "ok" | "warn" | "err" | "text";
   step: string;
   msg: string;
   info?: DebugBookInfo;
@@ -74,6 +75,22 @@ const SECTIONS: { title: string; fields: { path: string; label: string; ph?: str
     ],
   },
   {
+    title: "分类",
+    fields: [
+      {
+        path: "exploreUrl",
+        label: "探索分类（每行一个：分类名::分类地址；地址可含 {{page}}，填了才会出现在「探索」页）",
+        rows: 4,
+        ph: "最新::/list/latest/{{page}}.html\n玄幻::/list/xuanhuan/{{page}}.html\n只写地址也行（自动命名 分类1、分类2…）",
+      },
+      { path: "ruleExplore.bookList", label: "分类页列表规则（留空=复用搜索的列表规则，选元素不是取文本）", rows: 2, ph: "'.bookbox'" },
+      { path: "ruleExplore.name", label: "书名（留空=复用搜索规则）", ph: "'.bookname a'.text()" },
+      { path: "ruleExplore.author", label: "作者（留空=复用搜索规则）", ph: "'.author'.text()" },
+      { path: "ruleExplore.coverUrl", label: "封面（留空=复用搜索规则）", ph: "'img'.attr('src')" },
+      { path: "ruleExplore.bookUrl", label: "详情地址（留空=复用搜索规则）", ph: "'.bookname a'.attr('href')" },
+    ],
+  },
+  {
     title: "详情",
     fields: [
       { path: "ruleBookInfo.name", label: "书名（文本）", ph: "'h1'.text()" },
@@ -96,14 +113,30 @@ const SECTIONS: { title: string; fields: { path: string; label: string; ph?: str
   {
     title: "正文",
     fields: [
-      { path: "ruleContent.content", label: "正文规则（段落换行用 .textBlocks()，多行直文本用 .textNodes()）", rows: 2, ph: "'#content'.textBlocks()（每个 p/div 一行）\n或 '.readcontent'.textBlocks()\n或 '.readcontent'.textNodes()（正文是裸文本节点时）" },
+      { path: "ruleContent.content", label: "正文规则（只写选择器即可；引擎选到节点后自动删 script/a/隐藏节点并按块分段）", rows: 2, ph: "'#content'（推荐，自动按 p/div 分段）\n或 '.articlebody'\n或 '.readcontent'.textNodes()（正文是裸文本节点、没有块级标签时）" },
+      {
+        path: "ruleContent.dropTags",
+        label: "额外删的标签（连同内容，逗号分隔；默认已删 script/style/ins/svg/video 等）",
+        ph: "span,font\n不影响标题/简介/目录，只作用于正文",
+      },
       {
         path: "ruleContent.nextContentUrl",
         label: "章节内翻页（正文分页的下一页链接；取到空即结束）",
         rows: 4,
         ph: "'.bottem a:eq(3)'.attr('href')（下一页）\n或 'a:contains(下一页)'.attr('href')\n或 text.下一页@href（按文字找，Legado 写法）\n分页地址有规律时用 {page} 模板：{{bookUrl}}##_?\\d*\\.html$##_{page}.html",
       },
-      { path: "ruleContent.replaceRegex", label: "替换净化（正则##替换为，替换为留空=删除）", ph: "广告.*?<br>##\n（##广告.*?##  删除匹配内容）" },
+      {
+        path: "ruleContent.replaceRegex",
+        label: "净化规则（一行一条：line:=整行删、re:=行内删/换、// 注释；无前缀=旧写法「正则##替换」）",
+        rows: 5,
+        ph: "// 整行删（删完不留空行；广告行要先删行，行内删会毁掉整行特征）\nline:请记住本站|最新网址|本章未完\nline!:笔趣阁（字面量，不用写转义）\n// 行内删 / 换（默认不区分大小写，(?-i) 可关闭）\nre:##www.*?com##\nre:（本章完）##",
+      },
+      {
+        path: "ruleContent.replaceMap",
+        label: "词表替换（一行一条「原词=新词」；拼音/反义这类污染只能人工维护，引擎不猜）",
+        rows: 4,
+        ph: "de=的\nle=了\nxiang=想",
+      },
     ],
   },
 ];
@@ -115,7 +148,9 @@ const emptyForm = () => ({
   bookSourceComment: "",
   header: "",
   searchUrl: "",
+  exploreUrl: "",
   ruleSearch: {},
+  ruleExplore: {},
   ruleBookInfo: {},
   ruleToc: {},
   ruleContent: {},
@@ -136,6 +171,7 @@ const levelColor: Record<DebugEvt["level"], string> = {
   ok: "text-emerald-400",
   warn: "text-amber-400",
   err: "text-red-400",
+  text: "text-neutral-200",
 };
 
 // 脚本源按表单编辑：每个方法一个表单项，内容是基础模板（留空 = 未实现），保存时合并拼接为 class 文件
@@ -168,6 +204,8 @@ const METHOD_DEFS: { key: "search" | "getDetail" | "getChapters" | "getContent";
     label: "获取正文 getContent(url) → string 或 { text, next? }（翻页引擎拼接）",
     tpl: `async getContent(url) {
   // 此处添加逻辑
+  // 只写选择器就行（自动删 script/a/隐藏节点 + 按块分段）：
+  // const res = await fetchText(url); return ruleContent(nodes(res.text), '#content', res.url)
   // 正文分页：return { text, next } —— next 非空则引擎继续抓下一页并拼接
   // 分页地址有规律时 next 可写模板：return { text, next: url.replace(/\\.html$/, "_{page}.html") }
 }`,
@@ -176,9 +214,12 @@ const METHOD_DEFS: { key: "search" | "getDetail" | "getChapters" | "getContent";
 
 const emptyScriptForm = () => ({
   name: "",
+  group: "",
   base: "",
   headersText: "", // headers 成员（JSON 文本）
-  replaceText: "", // replace 成员（每行 正则##替换为）
+  replaceText: "", // replace 成员（净化规则原文：line:/re:/map: 或旧写法 正则##替换为）
+  mapText: "", // replaceMap 成员（词表，一行一条「原词=新词」）
+  dropText: "", // dropTags 成员（正文额外要删的标签，逗号分隔）
   enabled: true,
   methods: { search: "", getDetail: "", getChapters: "", getContent: "" } as Record<string, string>,
 });
@@ -234,7 +275,7 @@ export default function Sources() {
   // 表单 → JSON 文本（去掉空规则对象）
   const formJson = (f: any) => {
     const clean = structuredClone(f);
-    for (const k of ["ruleSearch", "ruleBookInfo", "ruleToc", "ruleContent"])
+    for (const k of ["ruleSearch", "ruleExplore", "ruleBookInfo", "ruleToc", "ruleContent"])
       if (!Object.keys(clean[k] ?? {}).length) delete clean[k];
     return JSON.stringify(clean, null, 2);
   };
@@ -264,7 +305,7 @@ export default function Sources() {
       return;
     }
     try {
-      const row = await api<{ id: number; name?: string; json: string; type: string; enabled: boolean }>(`/api/sources/${id}`);
+      const row = await api<{ id: number; name?: string; group?: string; json: string; type: string; enabled: boolean }>(`/api/sources/${id}`);
       setEditId(id);
       setSrcType(row.type === "script" ? "script" : "rules");
       if (row.type === "script") {
@@ -281,9 +322,18 @@ export default function Sources() {
         }
         setScriptForm({
           name: f.name ?? row.name ?? "",
+          group: f.group ?? row.group ?? "",
           base: f.base ?? "",
           headersText: h && Object.keys(h).length ? JSON.stringify(h, null, 2) : "",
-          replaceText: (f.replace ?? []).map((r: any) => `${r.regex}##${r.replacement ?? ""}`).join("\n"),
+          // replace 可能是字符串原文（新语法 line:/re:/map:）或 {regex, replacement} 数组（旧数据）
+          replaceText:
+            typeof f.replace === "string"
+              ? f.replace
+              : (f.replace ?? []).map((r: any) => (r?.replacement ? `${r.regex}##${r.replacement}` : `##${r.regex}##`)).join("\n"),
+          mapText: Object.entries(f.replaceMap ?? {})
+            .map(([k, v]) => `${k}=${v}`)
+            .join("\n"),
+          dropText: f.dropTags ?? "",
           enabled: row.enabled !== false,
           methods: {
             search: f.methods?.search ?? "",
@@ -375,17 +425,29 @@ export default function Sources() {
             return null;
           }
         }
-        const replace = scriptForm.replaceText
-          .split("\n")
-          .map((l) => l.trim())
-          .filter(Boolean)
-          .map((l) => {
-            const i = l.indexOf("##");
-            return i === -1 ? { regex: l, replacement: "" } : { regex: l.slice(0, i), replacement: l.slice(i + 2) };
-          });
+        // 净化规则整段原文发给后端：line:/re:/map: 这些前缀要靠引擎解析，
+        // 前端拆成 {regex, replacement} 会把 "line:广告" 变成字面量正则而失效
+        const replace = scriptForm.replaceText.trim();
+        const replaceMap: Record<string, string> = {};
+        for (const line of scriptForm.mapText.split("\n")) {
+          const s = line.trim();
+          if (!s || s.startsWith("//")) continue;
+          const i = s.indexOf("=");
+          if (i <= 0) continue;
+          replaceMap[s.slice(0, i).trim()] = s.slice(i + 1);
+        }
         const methods: Record<string, string> = {};
         for (const k of ["search", "getDetail", "getChapters", "getContent"]) if (scriptForm.methods[k]?.trim()) methods[k] = scriptForm.methods[k];
-        const body = { name: scriptForm.name.trim(), base: scriptForm.base.trim(), headers, replace, methods };
+        const body = {
+          name: scriptForm.name.trim(),
+          group: scriptForm.group.trim(),
+          base: scriptForm.base.trim(),
+          headers,
+          replace: replace || undefined,
+          replaceMap: Object.keys(replaceMap).length ? replaceMap : undefined,
+          dropTags: scriptForm.dropText.trim() || undefined,
+          methods,
+        };
         if (editId === null) {
           const r = await api<{ id: number }>("/api/sources/script", { method: "POST", body: JSON.stringify(body) });
           setEditId(r.id);
@@ -528,11 +590,12 @@ export default function Sources() {
     if (!dbgBook || editId === null) return;
     setAddingBook(true);
     try {
-      const r = await api<{ id: number }>("/api/books", {
+      const r = await api<{ id: number }>("/api/books/import", {
         method: "POST",
         body: JSON.stringify({
           bookUrl: dbgBook.bookUrl,
           sourceId: editId,
+          onShelf: true, // 调试页「加入书架」：入库 + 建关联一步到位
           info: { name: dbgBook.name, author: dbgBook.author, cover: dbgBook.cover, intro: dbgBook.intro, latestChapter: dbgBook.latestChapter },
         }),
       });
@@ -612,6 +675,19 @@ export default function Sources() {
                     />
                   </label>
                   <label className="block">
+                    <span className="mb-0.5 block text-xs text-neutral-400">源分组（书源列表里的分类标签，留空=默认）</span>
+                    <input
+                      className={inpMono}
+                      placeholder="默认"
+                      value={scriptForm.group}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setScriptForm((f) => ({ ...f, group: v }));
+                        setDirty(true);
+                      }}
+                    />
+                  </label>
+                  <label className="block">
                     <span className="mb-0.5 block text-xs text-neutral-400">源域名 base（相对地址补全，等价类成员 base）</span>
                     <input
                       className={inpMono}
@@ -639,15 +715,48 @@ export default function Sources() {
                     />
                   </label>
                   <label className="block">
-                    <span className="mb-0.5 block text-xs text-neutral-400">替换净化 replace（每行：正则##替换为，替换为留空=删除）</span>
+                    <span className="mb-0.5 block text-xs text-neutral-400">
+                      净化规则 replace（一行一条：line:=整行删、re:=行内删/换、// 注释；无前缀=旧写法「正则##替换」）
+                    </span>
                     <textarea
-                      rows={2}
+                      rows={4}
                       className={inpMono}
-                      placeholder={"广告.*?##\n（本章完）##"}
+                      placeholder={"// 整行删（广告行要先删行，行内删会毁掉整行特征）\nline:请记住本站|本章未完\n// 行内删 / 换\nre:（本章完）##"}
                       value={scriptForm.replaceText}
                       onChange={(e) => {
                         const v = e.target.value;
                         setScriptForm((f) => ({ ...f, replaceText: v }));
+                        setDirty(true);
+                      }}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="mb-0.5 block text-xs text-neutral-400">
+                      词表 replaceMap（一行一条「原词=新词」；拼音/反义这类污染只能人工维护）
+                    </span>
+                    <textarea
+                      rows={3}
+                      className={inpMono}
+                      placeholder={"de=的\nle=了"}
+                      value={scriptForm.mapText}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setScriptForm((f) => ({ ...f, mapText: v }));
+                        setDirty(true);
+                      }}
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="mb-0.5 block text-xs text-neutral-400">
+                      额外删的标签 dropTags（连同内容，逗号分隔；只作用于正文）
+                    </span>
+                    <input
+                      className={inpMono}
+                      placeholder="span,font"
+                      value={scriptForm.dropText}
+                      onChange={(e) => {
+                        const v = e.target.value;
+                        setScriptForm((f) => ({ ...f, dropText: v }));
                         setDirty(true);
                       }}
                     />
@@ -678,7 +787,8 @@ export default function Sources() {
                   ))}
                   <div className="pt-1 text-xs leading-5 text-neutral-500">
                     可用 API：fetchText(url, opts?) → {"{status, text, url}"}；parse(html) → cheerio $；abs(u, base?) 相对转绝对；log(msg)；
-                    nodes(html) / ruleText(ns, 规则) / ruleSel(ns, 规则)（规则语法兼容，正文换行推荐 .textBlocks()）。this.base / this.headers / this.replace 为类成员。
+                    nodes(html) / ruleText(ns, 规则) / ruleSel(ns, 规则)（规则语法兼容）/ ruleContent(ns, 规则)（正文专用：选择器即可，
+                    自动删 script/a/隐藏节点并按块分段）。this.base / this.headers / this.replace 为类成员。
                   </div>
                 </div>
               </fieldset>
@@ -905,11 +1015,12 @@ export default function Sources() {
                   </div>
                 </div>
               )}
-              {/* 日志：两种模式共用，SSE 逐步追加 */}
+              {/* 日志：两种模式共用，SSE 逐步追加。正文行不打 [step] 前缀，几百行铺开时才像读文章 */}
               <div ref={logBox} className="min-h-24 flex-1 overflow-y-auto rounded-lg bg-neutral-900 p-3 font-mono text-xs leading-5">
                 {logs.map((l, i) => (
-                  <div key={i} className={levelColor[l.level]}>
-                    <span className="text-neutral-600">[{l.step}]</span> {l.msg}
+                  <div key={i} className={`whitespace-pre-wrap break-words ${levelColor[l.level]}`}>
+                    {l.step !== "正文" && <span className="text-neutral-600">[{l.step}] </span>}
+                    {l.msg}
                   </div>
                 ))}
                 {debugging && (

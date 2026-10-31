@@ -205,6 +205,9 @@ export default function SourceList() {
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-1.5">
                 <span className="truncate text-sm font-medium text-neutral-100">{r.name}</span>
+                {/* 分组标签：导入的 Legado 源自带 bookSourceGroup（常见「自制」「网络文学」），
+                    自建源默认「默认」。以前只在非默认时才显示，看起来像「导入的有、自己写的没有」，现在统一显示 */}
+                <span className="flex-none rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] text-neutral-300">{r.group || "默认"}</span>
                 {r.type === "script" && (
                   <span className="flex-none rounded bg-neutral-700 px-1.5 py-0.5 text-[10px] text-amber-400">脚本</span>
                 )}
@@ -218,7 +221,6 @@ export default function SourceList() {
                 ) : (
                   <span>暂无书籍</span>
                 )}
-                {r.group && r.group !== "默认" && <span> · {r.group}</span>}
                 {r.bookUrl && <span className="ml-1 font-mono opacity-70"> · {r.bookUrl}</span>}
               </div>
             </div>

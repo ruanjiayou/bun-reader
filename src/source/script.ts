@@ -3,6 +3,7 @@ import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { runWithInst } from "./runtime";
 import { isPlaceholder, type BookItem, type ChapterItem, type Log } from "./engine";
+import { cleanChapter } from "./clean";
 import { log } from "../log";
 
 // —— 脚本书源引擎 ——
@@ -52,7 +53,7 @@ export function saveScriptFile(id: number, code: string) {
   mkdirSync(SOURCES_DIR, { recursive: true });
   const scaffold =
     `// AUTO SCAFFOLD —— 由引擎生成，请勿修改本段\n` +
-    `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel, browserOpen, browserText } from "${RUNTIME_SPEC}";\n\n`;
+    `import { fetchText, parse, abs, log, nodes, ruleText, ruleContent, ruleSel, browserOpen, browserText } from "${RUNTIME_SPEC}";\n\n`;
   writeFileSync(`${SOURCES_DIR}/${id}.js`, scaffold + code.trim() + "\n");
 }
 
@@ -108,9 +109,15 @@ export async function materializeScripts(): Promise<{ total: number; generated: 
 
 export interface ScriptForm {
   name?: string;
+  group?: string; // 书源分组（列表/筛选用，不参与生成的脚本）
   base?: string;
   headers?: Record<string, string>;
-  replace?: { regex: string; replacement: string }[];
+  // 净化规则：可以是多行原文（line:/re:/map: 新语法）或 {regex, replacement} 数组（旧数据/转换器产物）
+  replace?: string | { regex: string; replacement: string }[];
+  // 词表替换：词 → 替换。拼音还原、反义词还原都靠它（站点专用，人工维护，引擎不自动猜）
+  replaceMap?: Record<string, string>;
+  // 正文额外要删的标签（连同内容），逗号分隔：span,font,section。只作用于正文（ruleText/ruleContent）
+  dropTags?: string;
   methods?: Partial<Record<"search" | "getDetail" | "getChapters" | "getContent", string>>;
 }
 
@@ -148,7 +155,13 @@ export function formToCode(form: ScriptForm): string {
   if (form.base?.trim()) lines.push(`  base = ${JSON.stringify(form.base.trim())};`);
   const headers = normalizeHeaders((form as any).headers);
   if (headers && Object.keys(headers).length) lines.push(`  headers = ${JSON.stringify(headers)};`);
-  if (form.replace?.length) lines.push(`  replace = ${JSON.stringify(form.replace)};`);
+  const rep = form.replace;
+  const repValue = typeof rep === "string" ? (rep.trim() ? rep.trim() : null) : Array.isArray(rep) && rep.length ? rep : null;
+  if (repValue) lines.push(`  replace = ${JSON.stringify(repValue)};`);
+  const map = form.replaceMap ?? {};
+  if (Object.keys(map).length) lines.push(`  replaceMap = ${JSON.stringify(map)};`);
+  const drop = (form.dropTags ?? "").trim();
+  if (drop) lines.push(`  dropTags = ${JSON.stringify(drop)};`);
   for (const m of METHOD_NAMES) {
     const body = (form.methods?.[m] ?? "").trim();
     if (!body || !hasMethodImpl(m, body)) continue;
@@ -160,7 +173,7 @@ export function formToCode(form: ScriptForm): string {
 
 // 保存前校验：scaffold + 生成代码可解析且 default 导出为 class
 export async function validateScriptCode(code: string): Promise<string | null> {
-  const scaffold = `import { fetchText, parse, abs, log, nodes, ruleText, ruleSel, browserOpen, browserText } from ${JSON.stringify(RUNTIME_SPEC)};\n\n`;
+  const scaffold = `import { fetchText, parse, abs, log, nodes, ruleText, ruleContent, ruleSel, browserOpen, browserText } from ${JSON.stringify(RUNTIME_SPEC)};\n\n`;
   try {
     const mod = await import(`data:text/javascript;base64,${Buffer.from(withRuntime(scaffold + code)).toString("base64")}`);
     if (typeof mod.default !== "function") return "必须导出 export default class Source";
@@ -224,28 +237,15 @@ const abs2 = (u: string, base = ""): string => {
   }
 };
 
-// 正文净化：先应用实例 replace 成员（{regex, replacement} 数组），再做通用清理（与规则引擎尾部一致）
-function polish(text: string, inst: any): string {
-  let t = text;
-  const rr = inst?.replace;
-  if (Array.isArray(rr)) {
-    for (const r of rr) {
-      if (typeof r?.regex !== "string" || !r.regex) continue;
-      try {
-        t = t.replace(new RegExp(r.regex, "g"), String(r.replacement ?? ""));
-      } catch {
-        // ponytail: 源里正则写坏了跳过不炸
-      }
-    }
-  }
-  return t
-    .replace(/\\r\\n/g, "\n")
-    .replace(/\\n/g, "\n")
-    .split("\n")
-    .map((l) => l.trim())
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+// 正文净化：与规则源走同一条管线（clean.ts）——源上配 replace（正则）与 replaceMap（词表，
+// 人工维护），整章合并后一次净化。以前这里只跑 replace、自己再拼一遍空白处理，
+// 两边规则语法稍有差异就会「规则源能删、脚本源不删」。
+function polish(text: string, inst: any, log?: Log): string {
+  const { text: out, hits, warnings } = cleanChapter(text, inst?.replace, inst?.replaceMap);
+  const stat = hits.filter((h) => h.count > 0).map((h) => `${h.rule.length > 24 ? h.rule.slice(0, 24) + "…" : h.rule}×${h.count}`);
+  if (stat.length) log?.("info", "content", `净化命中 ${stat.length}/${hits.length} 条：${stat.join(" · ")}`);
+  for (const w of warnings) log?.("warn", "content", w);
+  return out;
 }
 
 export async function scriptSearch(row: ScriptRow, key: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<BookItem[]> {
@@ -336,6 +336,21 @@ export async function scriptToc(row: ScriptRow, tocUrl: string, log?: Log, timeo
 // 正文：源返回 string（单页）或 {text, next}（章节内翻页），引擎循环拼接后统一净化。
 // next 里带 {page} 时视为分页模板（页内没有可跟的链接、但地址有规律），从第 2 页起按页码展开。
 export async function scriptContent(row: ScriptRow, chapterUrl: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<string> {
+  const raw = await scriptContentRaw(row, chapterUrl, log, timeoutMs);
+  const merged = await scriptClean(row, raw, log);
+  const ph = isPlaceholder(merged);
+  log?.("ok", "content", `脚本源正文 ${merged.length} 字${ph ? " · ⚠️疑似占位内容" : ""}`);
+  return merged;
+}
+
+// 按当前源的 replace / replaceMap 净化任意原文（缓存命中时走这里：改规则立即生效）
+export async function scriptClean(row: ScriptRow, raw: string, log?: Log): Promise<string> {
+  const inst = await loadInst(row.id, row.code);
+  return polish(raw, inst, log);
+}
+
+// 未净化的整章原文（缓存层存这份，读的时候按当前规则净化 → 改规则立即生效）
+export async function scriptContentRaw(row: ScriptRow, chapterUrl: string, log?: Log, timeoutMs = DEFAULT_TIMEOUT): Promise<string> {
   const inst = await loadInst(row.id, row.code);
   if (typeof inst.getContent !== "function") throw new Error("该源未实现 getContent");
   const parts: string[] = [];
@@ -396,8 +411,6 @@ export async function scriptContent(row: ScriptRow, chapterUrl: string, log?: Lo
       if (!url) log?.("info", "content", page === 1 ? "正文无翻页：源未返回 next（按单页处理）" : `正文翻页结束：第 ${page} 页源未返回 next`);
     }
   }
-  const merged = polish(parts.join("\n"), inst);
-  const ph = isPlaceholder(merged);
-  log?.("ok", "content", `脚本源正文 ${merged.length} 字${page > 1 ? ` · ${page} 页` : ""}${ph ? " · ⚠️疑似占位内容" : ""}`);
-  return merged;
+  if (page > 1) log?.("ok", "content", `分页合并完成：${page} 页`);
+  return parts.join("\n");
 }

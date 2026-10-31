@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import * as cheerio from "cheerio";
 import { httpText, type FetchOpts } from "./fetcher";
-import { ruleStr, ruleList, guessNodes, legadoToOurs, type Node } from "./rule";
+import { contentRule, ruleStr, ruleList, guessNodes, legadoToOurs, type Node } from "./rule";
 import { log as fileLog } from "../log";
 
 // 浏览器抓取（WAF/验证码/加密 AJAX 站点）：透传给脚本书源使用
@@ -13,7 +13,7 @@ export { browserCookieHeader, browserOpen, browserText, type BrowserPage };
 // 源内可用：fetchText / parse / abs / log / ruleText / ruleSel
 // 引擎在调用源方法前用 runWithInst 绑定实例上下文（base/headers），fetchText 自动带 Cookie。
 
-const als = new AsyncLocalStorage<{ base?: string; headers?: Record<string, string> }>();
+const als = new AsyncLocalStorage<{ base?: string; headers?: Record<string, string>; dropTags?: string }>();
 
 // 实例 headers 容错：字符串形态（规则源 header 带过来的旧数据）解析成对象，避免 spread 字符串变成字符索引
 function instHeaders(h: unknown): Record<string, string> {
@@ -30,7 +30,7 @@ function instHeaders(h: unknown): Record<string, string> {
 }
 
 export function runWithInst(inst: any, fn: () => Promise<any>): Promise<any> {
-  return als.run({ base: inst?.base, headers: instHeaders(inst?.headers) }, fn);
+  return als.run({ base: inst?.base, headers: instHeaders(inst?.headers), dropTags: inst?.dropTags }, fn);
 }
 
 export async function fetchText(url: string, opts: Omit<FetchOpts, "headers"> & { headers?: Record<string, string> } = {}) {
@@ -80,9 +80,15 @@ export function log(msg: string) {
 // 规则字符串统一先过 Legado 关键字转换（幂等，v2 语法原样返回）：与规则源的 normalizeSource 对齐，
 // 也顺带修好旧版本生成/手写在脚本里的 "text.xxx.attr('href')"（老转换器不会转换 text.）
 export function ruleText(nodes: Node[], rule: string, base?: string): string {
-  return ruleStr(nodes, legadoToOurs(rule), base ?? als.getStore()?.base ?? "");
+  return ruleStr(nodes, legadoToOurs(rule), base ?? als.getStore()?.base ?? "", { dropTags: als.getStore()?.dropTags });
 }
 
 export function ruleSel(nodes: Node[], rule: string, base?: string): Node[] {
   return ruleList(nodes, legadoToOurs(rule), base ?? als.getStore()?.base ?? "");
+}
+
+// 正文专用：规则只写选择器就够了，引擎补 .textBlocks()（结构清洗 + 按块分段）；
+// 已经写了 .textBlocks()/.text() 等取值调用的规则原样生效，所以新旧写法可以混用。
+export function ruleContent(nodes: Node[], rule: string, base?: string): string {
+  return ruleStr(nodes, contentRule(legadoToOurs(rule)), base ?? als.getStore()?.base ?? "", { dropTags: als.getStore()?.dropTags });
 }

@@ -105,10 +105,39 @@ export default function Search() {
     }
   };
 
+  // 点卡片：预览即入库（幂等），拿到 id 直接进详情页；目录由后端后台补
+  const openBook = async (g: Group, f: Group["from"][number]) => {
+    if (adding) return;
+    setAdding(g.key);
+    try {
+      const r = await api<{ id: number }>("/api/books/import", {
+        method: "POST",
+        body: JSON.stringify({
+          sourceId: f.sourceId,
+          bookUrl: f.bookUrl,
+          info: { name: g.name, author: g.author, cover: g.cover, intro: g.intro, latestChapter: g.latestChapter },
+        }),
+      });
+      nav(`/book/${r.id}`);
+    } catch (e: any) {
+      setMsg(`入库失败：${e.message}`);
+      setAdding(null);
+    }
+  };
+
+  // 来源小标签：入库同时加书架（搜索页原来的「一键加书架」入口）
   const addToShelf = async (g: Group, f: Group["from"][number]) => {
     setAdding(g.key);
     try {
-      const r = await api<{ id: number }>("/api/books", { method: "POST", body: JSON.stringify({ bookUrl: f.bookUrl, sourceId: f.sourceId }) });
+      const r = await api<{ id: number }>("/api/books/import", {
+        method: "POST",
+        body: JSON.stringify({
+          sourceId: f.sourceId,
+          bookUrl: f.bookUrl,
+          onShelf: true,
+          info: { name: g.name, author: g.author, cover: g.cover, intro: g.intro, latestChapter: g.latestChapter },
+        }),
+      });
       setMsg(`《${g.name}》已加入书架`);
       nav(`/book/${r.id}`);
     } catch (e: any) {
@@ -120,31 +149,37 @@ export default function Search() {
 
   return (
     <div className="mx-auto min-h-dvh max-w-3xl p-4">
-      <header className="mb-4 flex items-center gap-2">
-        {/* 返回在左侧；输入框 16px（text-base）——iOS 聚焦字号 <16px 的输入框会强制放大页面 */}
-        <Link to="/" className="flex-none text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
-        <div className="relative min-w-0 flex-1">
-          <input
-            autoFocus
-            className="w-full rounded-lg bg-neutral-800 px-3 py-2 pr-9 text-base"
-            placeholder="书名 / 作者"
-            value={q}
-            onChange={(e) => setQ(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && run()}
-          />
-          {q && (
-            <button
-              onClick={() => setQ("")}
-              title="清空"
-              className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full bg-neutral-700 text-xs text-neutral-300 hover:bg-neutral-600"
-            >
-              ×
-            </button>
-          )}
+      {/* 顶部两行：①返回书架独占一行 ②输入框 + 搜索按钮（与探索页同一套顶栏节奏） */}
+      <header className="mb-4 flex-none">
+        <div className="mb-2 flex items-center gap-2">
+          <Link to="/" className="flex-none text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
+          <h1 className="text-base font-bold">搜索</h1>
         </div>
-        <button onClick={run} disabled={running || !q.trim()} className="flex-none rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 disabled:opacity-50">
-          {running ? "搜索中…" : "搜索"}
-        </button>
+        <div className="flex items-center gap-2">
+          {/* 输入框 16px（text-base）——iOS 聚焦字号 <16px 的输入框会强制放大页面 */}
+          <div className="relative min-w-0 flex-1">
+            <input
+              autoFocus
+              className="w-full rounded-lg bg-neutral-800 px-3 py-2 pr-9 text-base"
+              placeholder="书名 / 作者"
+              value={q}
+              onChange={(e) => setQ(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && run()}
+            />
+            {q && (
+              <button
+                onClick={() => setQ("")}
+                title="清空"
+                className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full bg-neutral-700 text-xs text-neutral-300 hover:bg-neutral-600"
+              >
+                ×
+              </button>
+            )}
+          </div>
+          <button onClick={run} disabled={running || !q.trim()} className="flex-none rounded-lg bg-amber-500 px-4 py-2 text-sm font-medium text-neutral-900 disabled:opacity-50">
+            {running ? "搜索中…" : "搜索"}
+          </button>
+        </div>
       </header>
       {prog && (
         <div className="mb-3 text-xs text-neutral-500">
@@ -171,12 +206,8 @@ export default function Search() {
         {groups.map((g) => (
           <div
             key={g.key}
-            onClick={() =>
-              nav(`/preview?sourceId=${g.from[0].sourceId}&bookUrl=${encodeURIComponent(g.from[0].bookUrl)}`, {
-                state: { name: g.name, author: g.author, cover: g.cover, intro: g.intro, latestChapter: g.latestChapter, from: g.from },
-              })
-            }
-            className="cursor-pointer rounded-xl bg-neutral-800 p-3 transition-colors hover:bg-neutral-700"
+            onClick={() => openBook(g, g.from[0])}
+            className={`cursor-pointer rounded-xl bg-neutral-800 p-3 transition-colors hover:bg-neutral-700 ${adding === g.key ? "opacity-60" : ""}`}
           >
             <div className="flex gap-3">
               {g.cover ? (

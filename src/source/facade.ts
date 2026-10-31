@@ -1,6 +1,6 @@
-import { getBookInfo, getContent, getToc, searchSource, type BookItem, type ChapterItem, type Log } from "./engine";
+import { cleanForSource, getBookInfo, getContent, getContentRaw, getToc, searchSource, type BookItem, type ChapterItem, type Log } from "./engine";
 import { normalizeSource } from "./rule";
-import { scriptBookInfo, scriptContent, scriptSearch, scriptToc } from "./script";
+import { scriptBookInfo, scriptClean, scriptContent, scriptContentRaw, scriptSearch, scriptToc } from "./script";
 
 // —— 书源引擎门面 ——
 // 按 sources.type 分流：rules → 规则引擎（存量/导入源），script → class 脚本引擎。
@@ -23,6 +23,9 @@ export interface Engine {
   bookInfo(url: string, log?: Log): Promise<BookInfoResult>;
   toc(url: string, log?: Log, lastChapterUrl?: string): Promise<ChapterItem[]>;
   content(url: string, log?: Log): Promise<string>;
+  // 缓存层用：存未净化的整章原文，读的时候再按当前规则 cleanText（改规则立即生效，不用重抓）
+  contentRaw(url: string, log?: Log): Promise<string>;
+  cleanText(raw: string, log?: Log): Promise<string>;
 }
 
 export function rulesEngine(json: string): Engine {
@@ -34,6 +37,8 @@ export function rulesEngine(json: string): Engine {
     bookInfo: (url, log) => getBookInfo(src, url, log),
     toc: (url, log, lastChapterUrl) => getToc(src, url, log, lastChapterUrl),
     content: (url, log) => getContent(src, url, log),
+    contentRaw: (url, log) => getContentRaw(src, url, log),
+    cleanText: async (raw, log) => cleanForSource(src, raw, log),
   };
 }
 
@@ -45,6 +50,8 @@ export function scriptEngine(row: { id: number; name?: string; code?: string | n
     bookInfo: (url, log) => scriptBookInfo(row, url, log),
     toc: (url, log) => scriptToc(row, url, log),
     content: (url, log) => scriptContent(row, url, log),
+    contentRaw: (url, log) => scriptContentRaw(row, url, log),
+    cleanText: (raw, log) => scriptClean(row, raw, log),
   };
 }
 

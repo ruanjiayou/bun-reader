@@ -743,9 +743,11 @@ export default function Reader() {
         </div>
       )}
 
-      {/* PC 左栏：≥900px 时紧贴正文左缘（留 12px 间隙），窄视口退回贴窗口边 */}
+      {/* PC 左栏：≥900px 时紧贴正文左缘（留 12px 间隙），窄视口退回贴窗口边。
+          返回放最前面：PC 没有手机那样的顶栏，之前左栏只有书架/书源/目录，回上一页得靠浏览器 */}
       {chrome && (
         <div className="absolute left-1 top-3 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2 min-[900px]:left-[calc(50%-320px)] min-[900px]:-translate-x-[calc(100%+12px)]">
+          <NavItem icon="back" label="返回" onClick={() => nav(-1)} />
           <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
           <NavItem icon="globe" label="书源" onClick={openSources} />
           <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
