@@ -100,6 +100,33 @@ function migrateToSharedBooks() {
 }
 migrateToSharedBooks();
 
+// —— 迁移 v2→v3：books.finished（布尔）→ status（整数枚举，0 连载/1 完结/2 太监断更/3 下架）——
+// finished=1 平移成 status=1，finished=0 平移成 0，语义不丢；以后加状态只扩常量、不动表结构。
+// RENAME COLUMN 要求 SQLite ≥3.25（Bun 内置版本满足）；幂等：hasColumn 判存在，新库走下面的 CREATE 已有列。
+if (tableExists("books")) {
+  if (hasColumn("books", "finished") && !hasColumn("books", "status")) {
+    sqlite.exec("ALTER TABLE books RENAME COLUMN finished TO status");
+    log.info("db", "迁移：books.finished → status（值平移 0/1）");
+  } else if (!hasColumn("books", "status")) {
+    sqlite.exec("ALTER TABLE books ADD COLUMN status INTEGER NOT NULL DEFAULT 0");
+    log.info("db", "迁移：books 加 status 列");
+  }
+}
+
+// —— 迁移 v4：shelf.group（书架分组，用户级）——
+// 书源分组只作默认值；分组是「我的书架」的属性（books 全局共享，一个用户改不能影响别人）。
+// 存量行回填成各自书源的分组，源已删/未绑定则归「默认」；只在首次加列时执行，不会覆盖之后用户手改的值。
+if (tableExists("shelf") && !hasColumn("shelf", "group")) {
+  sqlite.exec(`ALTER TABLE shelf ADD COLUMN "group" TEXT NOT NULL DEFAULT '默认'`);
+  sqlite.exec(`
+    UPDATE shelf SET "group" = COALESCE(
+      (SELECT s."group" FROM books b JOIN sources s ON s.id = b.source_id WHERE b.id = shelf.book_id),
+      '默认'
+    )
+  `);
+  log.info("db", "迁移：shelf 加 group 列，并按书源分组回填存量书架");
+}
+
 // ponytail: drizzle-kit 在 Windows 下 push 需要原生驱动，改为启动时幂等建表；
 // 表结构为唯一事实来源——加列直接改下面的 CREATE TABLE（存量库靠上面的迁移推进版本）。
 sqlite.exec(`
@@ -132,6 +159,7 @@ CREATE TABLE IF NOT EXISTS books (
   cover TEXT NOT NULL DEFAULT '',
   intro TEXT NOT NULL DEFAULT '',
   latest_chapter TEXT NOT NULL DEFAULT '',
+  status INTEGER NOT NULL DEFAULT 0,
   last_check_at INTEGER,
   updated_at INTEGER,
   created_at INTEGER NOT NULL
@@ -140,6 +168,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS books_url_src ON books(book_url, source_id);
 CREATE TABLE IF NOT EXISTS shelf (
   user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+  "group" TEXT NOT NULL DEFAULT '默认',
   created_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, book_id)
 );

@@ -72,6 +72,7 @@ const SECTIONS: { title: string; fields: { path: string; label: string; ph?: str
       { path: "ruleSearch.intro", label: "简介（文本）", ph: "'.update'.text()" },
       { path: "ruleSearch.coverUrl", label: "封面（图片，用 attr('src')）", ph: "'img'.attr('src') 或 '.thumbnail img'.attr('src')" },
       { path: "ruleSearch.bookUrl", label: "详情地址（链接 attr('href')，必填）", ph: "'.bookname a'.attr('href')" },
+      { path: "ruleSearch.status", label: "书籍状态（文本：连载=0/完结=1/太监断更=2/下架=3，留空不判定）", ph: "'.tag span'.text()" },
     ],
   },
   {
@@ -99,6 +100,7 @@ const SECTIONS: { title: string; fields: { path: string; label: string; ph?: str
       { path: "ruleBookInfo.intro", label: "简介（文本）", ph: "'.bookintro'.text()" },
       { path: "ruleBookInfo.coverUrl", label: "封面（图片，用 attr('src')）", ph: "'.thumbnail img'.attr('src')" },
       { path: "ruleBookInfo.tocUrl", label: "目录地址（链接 attr('href')，与详情页相同可留空）", ph: "'#allchapter a:eq(-1)'.attr('href')" },
+      { path: "ruleBookInfo.status", label: "书籍状态（文本：连载=0/完结=1/太监断更=2/下架=3；未命中不动已有状态）", ph: "'.booktag span:eq(1)'.text()" },
     ],
   },
   {

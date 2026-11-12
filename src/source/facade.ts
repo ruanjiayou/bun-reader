@@ -1,4 +1,4 @@
-import { cleanForSource, getBookInfo, getContent, getContentRaw, getToc, searchSource, type BookItem, type ChapterItem, type Log } from "./engine";
+import { cleanForSource, getBookInfo, getContent, getContentRaw, getToc, searchSource, type BookItem, type BookStatus, type ChapterItem, type Log } from "./engine";
 import { normalizeSource } from "./rule";
 import { scriptBookInfo, scriptClean, scriptContent, scriptContentRaw, scriptSearch, scriptToc } from "./script";
 
@@ -14,6 +14,8 @@ export interface BookInfoResult {
   latestChapter: string;
   latestChapterUrl: string;
   tocUrl: string;
+  // 书籍状态：规则未配/未命中 = undefined（入库时不动已有值）；脚本源可返回 status 数字或旧 finished 布尔
+  status?: BookStatus;
 }
 
 export interface Engine {

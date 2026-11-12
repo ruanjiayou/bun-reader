@@ -14,6 +14,45 @@ export interface BookItem {
   cover: string;
   intro: string;
   latestChapter: string;
+  status: BookStatus;
+}
+
+// 书籍状态：整数枚举，以后加状态只扩常量、不动表结构。0 是唯一「还会更新」的状态，巡检只跑它。
+export const BookStatus = {
+  Ongoing: 0, // 连载中
+  Completed: 1, // 已完结
+  Dropped: 2, // 太监 / 断更
+  Removed: 3, // 已下架 / 失效
+} as const;
+export type BookStatus = (typeof BookStatus)[keyof typeof BookStatus];
+export const STATUS_LABELS: Record<number, string> = {
+  [BookStatus.Ongoing]: "连载中",
+  [BookStatus.Completed]: "已完结",
+  [BookStatus.Dropped]: "太监/断更",
+  [BookStatus.Removed]: "已下架",
+};
+export const isActiveStatus = (s: number) => s === BookStatus.Ongoing;
+
+// 状态判定：源站文案五花八门（连载中/已完结/太监…），按关键词近似。
+// 顺序有讲究：「太监/断更」「下架」先判，「连载/未完」先于「完结」（防「未完结」被误判完结）；
+// 都匹配不上返回 undefined = 不判定，入库时不动已有 status（保护编辑书籍时的手动标记）
+export function parseStatus(s: string): BookStatus | undefined {
+  const t = s.trim();
+  if (!t) return undefined;
+  if (/太监|斷更|断更|停更|弃坑|腰斩|中止/.test(t)) return BookStatus.Dropped;
+  if (/下架|失效|已删除|已封/.test(t)) return BookStatus.Removed;
+  if (/连载|連載|未完|更新中/.test(t)) return BookStatus.Ongoing;
+  if (/完[结結]|完本|已完|全集|大結局|大结局/.test(t)) return BookStatus.Completed;
+  return undefined;
+}
+
+// 脚本源 / API 传来的状态值归一：数字枚举、旧 finished 布尔、状态文案都吃（undefined = 不判定）
+export function statusFromValue(v: unknown): BookStatus | undefined {
+  if (typeof v === "number" && Number.isInteger(v) && v >= 0 && v <= 3) return v as BookStatus;
+  if (v === true) return BookStatus.Completed;
+  if (v === false) return BookStatus.Ongoing;
+  if (typeof v === "string") return parseStatus(v);
+  return undefined;
 }
 
 export interface ChapterItem {
@@ -106,6 +145,7 @@ function mapBooks(items: any[], r: any, baseUrl: string): BookItem[] {
       cover: ruleStr([el], r.coverUrl || "", baseUrl).split(/\s+/)[0] ?? "", // 封面取第一个 URL
       intro: ruleStr([el], r.intro || "", baseUrl),
       latestChapter: ruleStr([el], r.lastChapter || "", baseUrl),
+      status: parseStatus(ruleStr([el], r.status ?? r.finished ?? "", baseUrl)) ?? BookStatus.Ongoing, // 兼容旧字段 finished
     }))
     .filter((b) => b.name && b.bookUrl)
     .map((b) => ({ ...b, bookUrl: ensureAbs(b.bookUrl, baseUrl), cover: ensureAbs(b.cover, baseUrl) }));
@@ -191,6 +231,7 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
   const nodes = guessNodes(res.text);
   const r = src.ruleBookInfo ?? {};
   const lc = splitLatestChapter(nodes, String(r.lastChapter ?? ""), res.url);
+  const stRule = r.status ?? r.finished; // 兼容旧书源字段 finished
   const info = {
     name: ruleStr(nodes, r.name || "", res.url),
     author: ruleStr(nodes, r.author || "", res.url),
@@ -199,6 +240,8 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
     latestChapter: lc.title,
     latestChapterUrl: lc.url,
     tocUrl: ruleStr(nodes, r.tocUrl || "", res.url) || bookUrl,
+    // status 规则未配或未命中 = undefined：入库时不动已有值（保护手动标记）
+    status: stRule ? parseStatus(ruleStr(nodes, stRule, res.url)) : undefined,
   };
   // tocUrl 规则命中多个时（多行）取最后一个——目录页通常在末尾，且避免多行拼接成垃圾 URL
   const lines = info.tocUrl.split(/\s+/).filter(Boolean);
@@ -214,6 +257,8 @@ export async function getBookInfo(src: BookSource, bookUrl: string, log?: Log) {
   log?.("ok", "book", `封面: ${miss(info.cover)}`);
   log?.("info", "book", `简介: ${info.intro ? info.intro.replace(/\s+/g, " ").slice(0, 60) + (info.intro.length > 60 ? "…" : "") : "⚠️未取到"}`);
   log?.("ok", "book", `最新章节: ${miss(info.latestChapter)}`);
+  if (info.status !== undefined) log?.("info", "book", `书籍状态: ${STATUS_LABELS[info.status]}`);
+  else if (stRule) log?.("warn", "book", `状态规则未命中（留空则不动已有状态）`);
   if (info.latestChapterUrl && info.latestChapterUrl !== info.latestChapter)
     log?.("info", "book", `最新章节链接（供 {page} 推最大页码）: ${info.latestChapterUrl}`);
   log?.("ok", "book", `目录地址: ${info.tocUrl}`);

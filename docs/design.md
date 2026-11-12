@@ -67,17 +67,19 @@ SQLite 表 + 磁盘文件：
 | `users` | id, username, password_hash, nickname, avatar, created_at | 多用户；nickname/avatar 为可选资料（avatar=128px dataURL） |
 | `sources` | id, name, enabled, "group", json, type, code, last_use_at | **全局共享**；json 存源定义（rules=规则原文 / script=表单数据），code 存生成脚本 |
 | `rate_states` | source_id, cap, high, window_ms, last_fail_at | 缓存自适应限速频率（按书源持久化） |
-| `books` | id, book_url, source_id, name, author, cover, intro, latest_chapter, last_check_at, updated_at | **全局共享**（预览即入库）：唯一约束 (book_url, source_id)，同一本书全站一行；updated_at = 最近「发现新章节」时间（书架「最近更新」排序） |
-| `shelf` | user_id, book_id, created_at | 书架 = 用户↔书籍关联；**加书架只插这一行**，created_at 即「加入书架时间」（书架按它排序） |
+| `books` | id, book_url, source_id, name, author, cover, intro, latest_chapter, **status**, last_check_at, updated_at | **全局共享**（预览即入库）：唯一约束 (book_url, source_id)，同一本书全站一行；updated_at = 最近「发现新章节」时间（书架「最近更新」排序）；**status = 书籍状态枚举**（0 连载中 / 1 已完结 / 2 太监断更 / 3 已下架；规则判定或编辑书籍手动改），仅 0 参与定时巡检 |
+| `shelf` | user_id, book_id, **"group"**, created_at | 书架 = 用户↔书籍关联；**加书架只插这一行**，created_at 即「加入书架时间」（书架按它排序）；**group = 我的书架分组（用户级）**：创建时默认取 `sources.group`，之后每人可改自己那行，空串 = 未分组 |
 | `chapters` | id, book_id, idx, title, url | 目录快照，入库时后台抓取，按需刷新 |
 | `chapter_cache` | content_key(sha1(book_url)), idx, file_path, size, is_placeholder, fetched_at | 正文索引；文件在 `data/cache/` |
 | `cache_jobs` | content_key, total, done, failed, status, updated_at | 全本缓存后台任务进度（多用户共享） |
 | `progress` | user_id, book_id, chapter_idx, scroll_pos, updated_at | 主键 (user_id, book_id)：书共享，进度各人一份 |
 | `settings` | user_id, key, value | 阅读偏好 |
 
-**建表与加列**：`db.ts` 启动时 `CREATE TABLE IF NOT EXISTS` 幂等建表，**表结构以 CREATE 语句为唯一事实来源**——加列直接改 CREATE；存量库靠 `PRAGMA user_version` 标记的迁移块推进（目前 v1：books 去掉 user_id 全局化 + 新增 shelf + progress 主键改 (user_id, book_id)；按 (book_url, source_id) 合并重复书籍，然后把旧行里的书架/进度迁过去，全程一个事务，`foreign_keys` 临时关闭）。
+**建表与加列**：`db.ts` 启动时 `CREATE TABLE IF NOT EXISTS` 幂等建表，**表结构以 CREATE 语句为唯一事实来源**——加列直接改 CREATE；存量库靠 `PRAGMA user_version` 标记的迁移块推进（目前 v1：books 去掉 user_id 全局化 + 新增 shelf + progress 主键改 (user_id, book_id)；按 (book_url, source_id) 合并重复书籍，然后把旧行里的书架/进度迁过去，全程一个事务，`foreign_keys` 临时关闭）。轻量加列/改名（v2 加 `books.finished`；v3 用 `ALTER TABLE RENAME COLUMN` 改成 `status` 整数枚举、0/1 原值平移；v4 给 `shelf` 加 `"group"` 并按各自书源分组回填存量行）用 `hasColumn` 幂等判断后 `ALTER TABLE ADD/RENAME COLUMN`。
 
 **预览即入库（为什么 books 不带 user_id）**：搜索/探索/调试页点开一本书，先把 books + 目录写进库再进详情页，于是详情页同时也是「预览页」——未收藏时按钮显示「＋ 加入书架」，收藏后变「移出书架」。代价是库里会堆很多只看过一次的书，所以有**每日清理**（见 §9 定时任务）：删除「没有任何 shelf 引用」且入库超过 24h 的书，连同 chapters / progress / 正文缓存 / cache_jobs 一起回收，并顺手清掉「没有书引用」的缓存目录（换源后的旧地址残留）。宽限期与周期都可用 `CLEANUP_GRACE_MS` / `CLEANUP_INTERVAL_MS` 调（置 0 关闭）。
+
+**分组两层模型**：`sources."group"` 是**书源级**（全局，编辑书源时设）；`shelf."group"` 是**书籍级 / 用户级**。`POST /books/import`（`onShelf:true`）与 `POST /books/:id/shelf` 创建关联时，把当时的书源分组写进 `shelf` 作为**快照默认值**——之后改书源分组不会重刷已有书架；用户在书籍详情页的编辑弹层里可手动改（含清空 = 未分组，trim + ≤50 字），只更新 `(uid, bookId)` 这一行，不影响其他用户。分组**不能放 `books`**（那张表全局共享，一个人改会影响所有人）；书架过滤 chips 用 `shelf.group`，`sourceGroup` 仅作参考不再作为过滤依据。换源合并两本书时会带上各自 `shelf.group`。
 
 **换源语义**：`PUT /books/:id/source` 是**原地改这一行**的 source_id + book_url 再重抓目录，书架关联、阅读进度、书籍 id 全部不变（阅读器换源后不用跳转，进度按章节序号延续）。若目标 (book_url, source_id) 已经被别人预览入库，会先把那本书的 shelf / progress 合并到当前书上再删掉它，避免撞 `books_url_src` 唯一索引。注意：换源后 `contentKey = sha1(newBookUrl)` 变了，旧源的正文缓存成为孤儿，由每日清理回收（新源若已有缓存则直接复用）。
 
@@ -97,7 +99,7 @@ SQLite 表 + 磁盘文件：
 - **书源**：`GET/POST/DELETE /sources`（URL 批量导入 / 粘贴 JSON / 文件上传；列表额外返回 `bookCount` = 该源下书籍数，按 `bookUrl` 去重）、`POST /sources/:id/test`（体检）、`POST /sources/:id/debug`（SSE 调试日志，`{bookUrl}` 调书籍 / `{mode:"search",key}` 调搜索）
   - **脚本源保存**：`POST /sources/script`（新建）、`PUT /sources/script/:id`（更新）。`PUT` **允许把已有的规则源就地切成脚本源**（`type` 改 `script`、`json` 换成脚本表单、`code` 重新生成），**id 不变**——书籍/书架按 `source_id` 引用，改类型不会连带失效；规则 JSON 会被脚本表单覆盖（要留规则请先导出）。返回 `{ok, id, converted}`，`converted=true` 表示这次发生了类型切换。典型场景：WAF 站点（如 69shuba）规则源的普通 fetch 恒 403，只能整源改成走浏览器的脚本源
 - **搜索**：`GET /search?q=` — 并发扇出全部启用源（每源并发 1、间隔 300ms、总超时 15s），**SSE 流式返回**；前端按书名+作者聚合去重，并可查看逐源失败原因
-- **书架**：`GET /books`（join shelf，`createdAt` 取加入书架时间）、`POST /books/import`（**预览即入库**：按 (bookUrl, sourceId) 幂等写 books，目录后台补；`onShelf:true` 顺带加书架；返回 id 供前端直接进详情）、`POST /books/:id/shelf`（加入书架）、`DELETE /books/:id/shelf`（移出书架，书与缓存保留）、`GET /books/:id` 返回书籍详情 + `onShelf` 并**联表带出 `sourceName`**
+- **书架**：`GET /books`（join shelf，`createdAt` 取加入书架时间）、`POST /books/import`（**预览即入库**：按 (bookUrl, sourceId) 幂等写 books，目录后台补；`onShelf:true` 顺带加书架；返回 id 供前端直接进详情）、`GET /books`（每条带 `group` = 我的书架分组，`sourceGroup` 仅参考）、`POST /books/:id/shelf`（加入书架，分组默认取书源）、`GET /books/groups`（分组候选 = 我用过的 + 启用书源的，去重排序）、`PATCH /books/:id/shelf`（改我的分组，未收藏 404）、`DELETE /books/:id/shelf`（移出书架，书与缓存保留）、`GET /books/:id` 返回书籍详情 + `onShelf` + `myGroup` 并**联表带出 `sourceName`**
 - **读接口不再按用户过滤**：books 全局共享，未加入书架也能看详情/目录/正文/缓存；只有 `GET /books`（书架列表）和 `progress` 是用户维度的
 - **目录**：`GET /books/:id/category`（`?refresh=1` 强制刷新）
 - **正文**：`GET /books/:id/content/:idx`（`?refresh=1` 绕过缓存重抓）
@@ -112,7 +114,9 @@ SQLite 表 + 磁盘文件：
 
 限流：搜索每源串行 + 300ms 间隔，超时取 `httpText` 默认 20s，失败不阻塞其他源。
 
-**探索（分类浏览）**：书源 `exploreUrl` 每行一个分类，`parseExploreGroups` 解析「标题::模板」（Legado 标准）、旧式「标题,http…」（后段以 `http(s)://` 或 `/` 开头才算分隔，避免切到模板自带的 `,{json 选项}`）与裸模板行（标题自动编号）；`<js>`/`@js:` 生成的静态解析不了，视为无分类。`exploreSource(src, tpl, page)` 复用 `buildReq`（替换 `{{page}}` + 请求选项）与搜索同一套 bookList 映射（`mapBooks`，搜索/探索共用）；规则缺省 `ruleExplore` 回退 `ruleSearch`（同 Legado）。页码 clamp 1..200。脚本源暂不支持探索。**探索源清单不做过滤**：所有启用的源都返回，没配 exploreUrl 的由前端提示去「分类」区块补（以前按「解析出分类」过滤，新加的源直接消失，看起来像没保存成功）。
+**探索（分类浏览）**：书源 `exploreUrl` 每行一个分类，`parseExploreGroups` 解析「标题::模板」（Legado 标准）、旧式「标题,http…」（后段以 `http(s)://` 或 `/` 开头才算分隔，避免切到模板自带的 `,{json 选项}`）与裸模板行（标题自动编号）；`<js>`/`@js:` 生成的静态解析不了，视为无分类。`exploreSource(src, tpl, page)` 复用 `buildReq`（替换 `{{page}}` + 请求选项）与搜索同一套 bookList 映射（`mapBooks`，搜索/探索共用）；规则缺省 `ruleExplore` 回退 `ruleSearch`（同 Legado）。页码 clamp 1..200。脚本源暂不支持探索。
+
+**书籍状态（status，可扩展整数枚举）**：`0 连载中 / 1 已完结 / 2 太监断更 / 3 已下架`（常量 `BookStatus` + `STATUS_LABELS`，加状态只扩常量、不动表结构；`isActiveStatus(0)` 才巡检）。规则字段 `ruleSearch.status` / `ruleBookInfo.status`（旧字段 `finished` 在 `normalizeSource` 里自动改名兼容，存量书源不用手改），取文本按关键词判定：太监/断更/停更→2、下架/失效→3、连载/未完/更新中→0（优先于完结，防「未完结」误判）、完结/完本/已完/全集/大结局→1，都匹配不上 = undefined（**入库时不动已有值，保护手动标记**）。`parseStatus` / `statusFromValue`（兼容数字、旧 finished 布尔、状态文案）导出，搜索/探索共用 `mapBooks` 带出 `status`；详情入库/检查更新/换源/巡检四处统一「number 才覆盖，undefined 保留」；书架「按分组过滤」的分组来自用户级 `shelf.group`（书源 `sources.group` 只作加入书架时的默认值）。**探索源清单不做过滤**：所有启用的源都返回，没配 exploreUrl 的由前端提示去「分类」区块补（以前按「解析出分类」过滤，新加的源直接消失，看起来像没保存成功）。
 
 **抓取层容错（`fetcher.ts`）**——站点换域名导致「搜索 500、详情正常」的根治点：
 
@@ -146,7 +150,7 @@ SQLite 表 + 磁盘文件：
 
 | 路由 | 页面 | 要点 |
 |---|---|---|
-| `/` | 书架 | 手机 3 列网格 / 桌面列表；排序 tab（默认「最近阅读」，可切「最近更新」）。**右上角账号区**：未登录=登录按钮；已登录=头像圆钮（无头像显示首字）→ 下拉（昵称 / 设置 / 退出登录）。**移出书架 = 右键或长按 500ms**（移动端没有右键），长按触发后吞掉同一次 click 不进详情。列表有**加载中状态**（转圈 + 「书架加载中…」），请求未回不显示「空书架」 |
+| `/` | 书架 | 手机 3 列网格 / 桌面列表；排序 tab（默认「最近阅读」，可切「最近更新」）**+ 分组过滤 chips（tab 行右侧水平排列，`flex-1 min-w-0 overflow-x-auto no-scrollbar`：可横滚但隐藏滚动条，不新增页面高度）**：按**我的书架分组**（`shelf.group`，接口带出 `group`；加入书架时默认取书源分组、之后可手动改）过滤，「全部」+「未分组」+ 各分组按钮，选中 amber、按钮 `flex-none whitespace-nowrap`；过滤状态 `null`=全部、空串=未分组（不可用 `""` 兼作「全部」，否则筛不出未分组的书），分组 ≤1 时不显示；**封面右下角显示当前分组小标**（与左上状态标、右上进度标不冲突）；**封面左上角按状态显示角标**（1 完结绿 / 2 太监断更橙 / 3 下架红，0 连载不显示；配色类名写死）。**右上角账号区**：未登录=登录按钮；已登录=头像圆钮（无头像显示首字）→ 下拉（昵称 / 设置 / 退出登录）。**移出书架 = 右键或长按 500ms**（移动端没有右键），长按触发后吞掉同一次 click 不进详情。列表有**加载中状态**（转圈 + 「书架加载中…」），请求未回不显示「空书架」 |
 | `/search` | 搜索 | SSE 实时追加结果卡片，聚合去重；搜索进度随新一轮搜索重置，失败书源及错误原因可展开查看。布局：`← 书架` 在左，输入框中间（**16px 字号防 iOS 聚焦缩放**，框内有 × 清空），搜索按钮在右。登录/设置页输入框同为 16px |
 | `/explore` | 探索（分类浏览） | **上下结构 + `flex h-dvh flex-col`**：顶部**两行**——①`← 书架`（+ 页面标题）独占一行 ②书源 select（`text-base`，同 16px 规则，`max-w-40 flex-none`）+ 分类按钮（`flex-1 overflow-x-auto no-scrollbar` 单行横向滚动、**隐藏滚动条**，按钮 `flex-none`，选中 amber）；列表区 `min-h-0 flex-1 overflow-y-auto`（**flex 子元素滚动必须 `min-h-0`**），换源/换分类/换页自动回顶；底部翻页条（上一页/第 N 页/下一页）。下一页可用性看本页结果（空页=到底，显「没有更多了」）。点卡片 = `POST /api/books/import` 入库后直接进 `/book/:id`（不再是独立的预览页）。后端 `GET /api/sources/explore`（**全部启用的源**，含还没配分类的新源——前端显示「还没有探索分类」并指引去编辑书源 →「分类」；脚本源 categories 恒为空、提示不支持）与 `GET /api/sources/:id/explore?url=分类模板&page=N`；模板原样透传给引擎替换 `{{page}}`。默认选中的是**第一个配了分类的源** |
 | `/book/:id` | 书籍详情（兼预览） | **预览与详情共用这一个页面**：进页面时书与目录已在库中（来源：搜索/探索/调试页入库），只是用户还没加入书架。封面左（垂直居中）、信息右；**操作按钮一排在卡片下方**：开始阅读/继续阅读（主按钮，按内容定宽、不 `flex-1` 拉满）、**加入书架 ⇄ 移出书架**（`onShelf` 切换；移出后停留在本页不跳走）、检查更新、编辑，**全部左对齐**；**缓存一排紧跟其后**：左侧「书源：xxx」（源被删显示「无（源已删除）」，只有 id 时显示 `#id`），右侧缓存信息 + 缓存全本/停止/释放。**整页定高 `flex h-dvh flex-col overflow-hidden`**：头部信息/按钮/缓存 `flex-none`，目录区 `flex min-h-0 flex-1 flex-col`——列表 `min-h-0 flex-1 overflow-y-auto no-scrollbar`（**目录自己滚、隐藏滚动条**，翻页/切排序回顶），**分页条 `flex-none` 贴底不跟着滚**。目录**分页每页 100 章**（正/倒序先排序再切片，首次载入定位到「上次读到」所在页），**页码是 select 可直接跳到最后一页**，目录有加载中状态 |
@@ -524,11 +528,11 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 
 ## 11. 定时巡检与书籍编辑
 
-- **定时巡检（后端）**：服务启动后启用后台定时器，每 `UPDATE_INTERVAL_MS`（默认 6×3600×1000，**0 关闭**）遍历**书架里的书**（`books join shelf`，预览过但没人收藏的不巡检），逐本重抓目录比对章节数；仅「新增章节」才置 `updatedAt`（影响书架「最近更新」排序），纯检查不动排序时间。复用检查更新的抓取逻辑，按书源限速器限流、两本之间留 800ms 间隔，避免远程浏览器任务相互抢占。日志落 `data/logs`，不阻塞请求。
+- **定时巡检（后端）**：服务启动后启用后台定时器，每 `UPDATE_INTERVAL_MS`（默认 6×3600×1000，**0 关闭**）遍历**书架里的书**（`books join shelf`，预览过但没人收藏的不巡检），逐本重抓目录比对章节数；仅「新增章节」才置 `updatedAt`（影响书架「最近更新」排序），纯检查不动排序时间。**仅 status=0（连载中）参与巡检**，完结/太监断更/下架一律跳过（`isActiveStatus`，日志汇总显示「跳过非连载 N 本」）。复用检查更新的抓取逻辑，按书源限速器限流、两本之间留 800ms 间隔，避免远程浏览器任务相互抢占。日志落 `data/logs`，不阻塞请求。
 - **每日孤儿清理（后端）**：每 `CLEANUP_INTERVAL_MS`（默认 24h，**0 关闭**）扫 `books left join shelf where shelf.book_id is null` 且 `created_at` 早于 `CLEANUP_GRACE_MS`（默认 24h）的书 → 删 chapters / progress / books，并按 `contentKey = sha1(bookUrl)` 释放正文缓存与 cache_jobs（**同一 bookUrl 还有别的书籍行在用就保留**）。随后再扫一遍 `chapter_cache` 的 distinct content_key，清掉「没有任何书引用」的孤儿缓存（换源后的旧地址残留）。启动 2 分钟后先跑一次，之后按周期跑。
 - **用户上传封面受保护**：巡检以源站封面覆盖 `cover`，但若当前 `cover` 以 `data:` 开头（本地上传）则**保留不动**——用户自定义封面不会被源站更新冲掉。
-- **编辑书籍元数据**：`PATCH /api/books/:id`，仅更新传入字段（name/author/intro/latestChapter/cover）。封面校验：以 `data:` 开头须是 `data:image/`（上限 2MB，前端已压缩）；否则须为 http(s) URL；空串即清除。其余字段按长度截断（name≤200/author≤100/intro≤4000/latestChapter≤300）。
-- **前端编辑弹层**：书籍详情页新增「编辑」按钮 → 底部弹层（无背景遮罩色、面板实底），书名/作者/简介/最新章节为文本框；**封面 = URL 输入框 + 上传图片**二选一，上传时 canvas 压缩至最长边 360px 的 JPEG(0.82) 转 dataURL 预览，可「清除封面」。保存走 PATCH，成功 toast + 重新加载详情。
+- **编辑书籍元数据**：`PATCH /api/books/:id`，仅更新传入字段（name/author/intro/latestChapter/cover/status）。封面校验：以 `data:` 开头须是 `data:image/`（上限 2MB，前端已压缩）；否则须为 http(s) URL；空串即清除。其余字段按长度截断（name≤200/author≤100/intro≤4000/latestChapter≤300）；status 只接受 0..3 整数（`statusFromValue` 归一，兼容旧前端仍传 finished 布尔）。
+- **前端编辑弹层**：书籍详情页新增「编辑」按钮 → 底部弹层（无背景遮罩色、面板实底），书名/作者/简介/最新章节为文本框；**书籍状态下拉**（连载中/已完结/太监断更/已下架，`text-base` 16px 防 iOS 缩放；仅「连载中」参与巡检，规则配了 status 时仍以源站判定覆盖）；**书架分组输入框**（`text-base` 16px + `datalist`，候选来自 `GET /books/groups`，可直接输入新分组；留空 = 未分组，未加入书架时禁用；保存时单独 `PATCH /books/:id/shelf`，只改自己的 shelf 行）；**封面 = URL 输入框 + 上传图片**二选一，上传时 canvas 压缩至最长边 360px 的 JPEG(0.82) 转 dataURL 预览，可「清除封面」。保存走 PATCH，成功 toast + 重新加载详情。
 - **引擎假死自愈**（症状：点朗读一直没声音，刷新页面无效，重启浏览器才恢复——Web Speech 引擎进入坏状态）：
   - **先 `resume()` 再 `cancel()`**：对 paused 状态的队列直接 cancel 无效，是假死最常见成因；所有打断/复位走统一的 `resetTts()`；
   - **持有当前 Utterance 引用**（`curUtter`）：Chrome 曾有 utterance 被提前 GC 导致无声且 onend 永不触发的 bug；

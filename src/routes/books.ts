@@ -4,7 +4,7 @@ import { access, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { and, count, eq, inArray, isNull, lt } from "drizzle-orm";
 import { db, sqlite } from "../db";
 import { books, chapters, chapterCache, progress, shelf, sources } from "../schema";
-import { isPlaceholder, type LogLevel } from "../source/engine";
+import { BookStatus, isActiveStatus, isPlaceholder, statusFromValue, type LogLevel } from "../source/engine";
 import { engineFor, type Engine } from "../source/facade";
 import { limiterFor } from "../source/rate";
 import { log } from "../log";
@@ -31,6 +31,17 @@ const tocStateOf = (bookId: number, chapterCount: number): TocState =>
 async function loadBook(bookId: number) {
   const [b] = await db.select().from(books).where(eq(books.id, bookId));
   return b ?? null;
+}
+
+// 书架分组：用户级（shelf.group），加入书架时默认取书源分组，之后每人可改自己那一行。
+// 不能放 books——那张表全局共享，一个用户改分组会影响所有人。空串 = 未分组。
+const DEFAULT_GROUP = "默认";
+const normGroup = (v: unknown) => (typeof v === "string" ? v.trim().slice(0, 50) : "");
+
+async function defaultShelfGroup(sourceId: number | null): Promise<string> {
+  if (sourceId == null) return DEFAULT_GROUP;
+  const [s] = await db.select({ group: sources.group }).from(sources).where(eq(sources.id, sourceId));
+  return normGroup(s?.group) || DEFAULT_GROUP;
 }
 
 async function isOnShelf(uid: number, bookId: number) {
@@ -271,6 +282,8 @@ async function fillToc(bookId: number, eng: any, bookUrl: string) {
         cover: info.cover || b.cover,
         intro: info.intro || b.intro,
         latestChapter: info.latestChapter || info.latestChapterUrl || b.latestChapter, // 标题优先入库；取不到标题存 URL（前端兜底显示页码）
+        // 规则判定出完结状态才覆盖（undefined = 规则未配/未命中），否则保留手动标记
+        status: typeof info.status === "number" ? info.status : b.status,
         lastCheckAt: new Date(),
         updatedAt: new Date(), // 首次建目录视为书籍更新
       })
@@ -300,7 +313,7 @@ bookRoutes.post("/import", async (c) => {
       bookUrl?: string;
       sourceId?: number;
       onShelf?: boolean;
-      info?: { name?: string; author?: string; cover?: string; intro?: string; latestChapter?: string };
+      info?: { name?: string; author?: string; cover?: string; intro?: string; latestChapter?: string; status?: number; finished?: boolean };
     }>()
     .catch(() => ({}) as any);
   const { bookUrl, sourceId, info, onShelf } = body;
@@ -325,6 +338,7 @@ bookRoutes.post("/import", async (c) => {
         cover: info?.cover ?? "",
         intro: info?.intro ?? "",
         latestChapter: info?.latestChapter ?? "",
+        status: statusFromValue(info?.status ?? info?.finished) ?? BookStatus.Ongoing,
         lastCheckAt: new Date(),
         updatedAt: new Date(),
       })
@@ -342,7 +356,7 @@ bookRoutes.post("/import", async (c) => {
 
   let onShelfNow = await isOnShelf(uid, book.id);
   if (onShelf && !onShelfNow) {
-    await db.insert(shelf).values({ userId: uid, bookId: book.id }).onConflictDoNothing();
+    await db.insert(shelf).values({ userId: uid, bookId: book.id, group: await defaultShelfGroup(book.sourceId) }).onConflictDoNothing();
     onShelfNow = true;
   }
   return c.json({ id: book.id, name: book.name, author: book.author, chapterCount: n, ready: n > 0, onShelf: onShelfNow, toc: tocStateOf(book.id, n) });
@@ -354,7 +368,7 @@ bookRoutes.post("/:id/shelf", async (c) => {
   const bookId = Number(c.req.param("id"));
   const book = await loadBook(bookId);
   if (!book) return c.json({ error: "书籍不存在" }, 404);
-  await db.insert(shelf).values({ userId: uid, bookId }).onConflictDoNothing();
+  await db.insert(shelf).values({ userId: uid, bookId, group: await defaultShelfGroup(book.sourceId) }).onConflictDoNothing();
   // 目录还空着（上次后台抓取失败/书源临时不可用）就再补一次
   if (!(await chapterCount(bookId)) && book.sourceId) {
     const eng = await loadEngine(book.sourceId).catch(() => null);
@@ -380,13 +394,44 @@ bookRoutes.delete("/:id", async (c) => {
   return c.json({ ok: true, onShelf: false });
 });
 
-// 书架列表：shelf 关联 + 书籍 + 我的进度 + 章节数（没有的书不出现）
+// 分组候选：我书架里用过的分组 + 启用书源的分组（编辑弹层 datalist 用，可复用也可新建）
+bookRoutes.get("/groups", async (c) => {
+  const uid = c.get("uid");
+  const mine = await db.select({ group: shelf.group }).from(shelf).where(eq(shelf.userId, uid));
+  const srcs = await db.select({ group: sources.group }).from(sources).where(eq(sources.enabled, true));
+  const set = new Set<string>();
+  for (const r of [...mine, ...srcs]) {
+    const g = normGroup(r.group);
+    if (g) set.add(g);
+  }
+  if (!set.size) set.add(DEFAULT_GROUP);
+  return c.json([...set].sort());
+});
+
+// 改我的书架分组：只更新当前用户这一行；不在书架里则拒绝（避免编辑分组顺带把书加进书架）
+bookRoutes.patch("/:id/shelf", async (c) => {
+  const uid = c.get("uid");
+  const bookId = Number(c.req.param("id"));
+  const body = await c.req.json<{ group?: string }>().catch(() => ({}) as any);
+  if (typeof body.group !== "string") return c.json({ error: "缺少 group" }, 400);
+  const g = normGroup(body.group); // 空串 = 未分组
+  const [mine] = await db
+    .select({ bookId: shelf.bookId })
+    .from(shelf)
+    .where(and(eq(shelf.userId, uid), eq(shelf.bookId, bookId)));
+  if (!mine) return c.json({ error: "这本书不在你的书架" }, 404);
+  await db.update(shelf).set({ group: g }).where(and(eq(shelf.userId, uid), eq(shelf.bookId, bookId)));
+  return c.json({ ok: true, group: g });
+});
+
+// 书架列表：shelf 关联 + 书籍 + 我的进度 + 章节数 + 分组（书架「按分组过滤」用；没有的书不出现）
 bookRoutes.get("/", async (c) => {
   const uid = c.get("uid");
   const rows = await db
-    .select({ book: books, addedAt: shelf.createdAt })
+    .select({ book: books, addedAt: shelf.createdAt, bookGroup: shelf.group, sourceGroup: sources.group })
     .from(shelf)
     .innerJoin(books, eq(books.id, shelf.bookId))
+    .leftJoin(sources, eq(sources.id, books.sourceId))
     .where(eq(shelf.userId, uid));
   if (!rows.length) return c.json([]);
   const ids = rows.map((r) => r.book.id);
@@ -400,9 +445,11 @@ bookRoutes.get("/", async (c) => {
     .groupBy(chapters.bookId);
   for (const r of counts) countMap.set(r.bookId, r.count);
   return c.json(
-    rows.map(({ book: b, addedAt }) => ({
+    rows.map(({ book: b, addedAt, bookGroup, sourceGroup }) => ({
       ...b,
       createdAt: addedAt, // 书架排序用「加入书架时间」，不是全站首次入库时间
+      group: bookGroup ?? DEFAULT_GROUP, // 书架分组（用户级）：默认取书源分组，可手动改
+      sourceGroup: sourceGroup ?? "", // 书源当前分组，仅作参考（不作为过滤依据）
       chapterCount: countMap.get(b.id) ?? 0,
       progress: progMap.get(b.id) ? { chapterIdx: progMap.get(b.id)!.chapterIdx, updatedAt: progMap.get(b.id)!.updatedAt } : null,
     })),
@@ -439,6 +486,7 @@ bookRoutes.put("/:id/refresh", async (c) => {
       cover: info.cover,
       intro: info.intro,
       latestChapter: info.latestChapter || info.latestChapterUrl || book.latestChapter,
+      status: typeof info.status === "number" ? info.status : book.status,
       lastCheckAt: new Date(),
       // 只有真的新增章节才算「书籍更新」，单纯检查不动排序时间
       ...(added > 0 ? { updatedAt: new Date() } : {}),
@@ -506,7 +554,7 @@ bookRoutes.put("/:id/source", async (c) => {
     // 目标书已存在：把它的书架与进度挪到当前书上（当前书保留原 id，阅读器无感）
     const targetShelf = await db.select().from(shelf).where(eq(shelf.bookId, target.id));
     for (const s of targetShelf) {
-      await db.insert(shelf).values({ userId: s.userId, bookId, createdAt: s.createdAt }).onConflictDoNothing();
+      await db.insert(shelf).values({ userId: s.userId, bookId, group: s.group, createdAt: s.createdAt }).onConflictDoNothing();
     }
     await db.delete(shelf).where(eq(shelf.bookId, target.id));
     sqlite.query("UPDATE OR REPLACE progress SET book_id = ? WHERE book_id = ?").run(bookId, target.id);
@@ -527,6 +575,7 @@ bookRoutes.put("/:id/source", async (c) => {
       cover: info.cover,
       intro: info.intro,
       latestChapter: info.latestChapter || info.latestChapterUrl || book.latestChapter,
+      status: typeof info.status === "number" ? info.status : book.status,
       lastCheckAt: new Date(),
     })
     .where(eq(books.id, bookId));
@@ -542,7 +591,7 @@ bookRoutes.patch("/:id", async (c) => {
   const book = await loadBook(bookId);
   if (!book) return c.json({ error: "书籍不存在" }, 404);
   const body = await c.req
-    .json<{ name?: string; author?: string; intro?: string; latestChapter?: string; cover?: string }>()
+    .json<{ name?: string; author?: string; intro?: string; latestChapter?: string; cover?: string; status?: number; finished?: boolean }>()
     .catch(() => ({}) as any);
   const patch: Partial<typeof book> = {};
   if (typeof body.name === "string" && body.name.trim()) patch.name = body.name.trim().slice(0, 200);
@@ -559,6 +608,9 @@ bookRoutes.patch("/:id", async (c) => {
     }
     patch.cover = cv;
   }
+  // status 只接受 0..3；兼容旧前端仍传 finished 布尔
+  const st = statusFromValue(body.status ?? body.finished);
+  if (st !== undefined) patch.status = st;
   if (!Object.keys(patch).length) return c.json({ ok: true, changed: 0 });
   await db.update(books).set(patch).where(eq(books.id, bookId));
   log.info("edit", `《${book.name}》编辑元数据：${Object.keys(patch).join(", ")}`);
@@ -597,8 +649,14 @@ async function runScheduledUpdate() {
     let checked = 0;
     let updated = 0;
     let failed = 0;
+    let skipped = 0;
     for (const { b } of all) {
       if (!b.sourceId) continue;
+      // 只有「连载中」(0) 还会更新，完结/太监断更/下架一律跳过（手动标记或规则判定都算数）
+      if (!isActiveStatus(b.status)) {
+        skipped++;
+        continue;
+      }
       checked++;
       try {
         const eng = await loadEngine(b.sourceId);
@@ -620,6 +678,7 @@ async function runScheduledUpdate() {
             intro: info.intro || b.intro,
             cover,
             latestChapter: info.latestChapter || info.latestChapterUrl || b.latestChapter,
+            status: typeof info.status === "number" ? info.status : b.status,
             lastCheckAt: new Date(),
             ...(added > 0 ? { updatedAt: new Date() } : {}),
           })
@@ -634,7 +693,7 @@ async function runScheduledUpdate() {
       }
       await sleep(800); // 两本书之间留间隔，避免无头浏览器抢占
     }
-    log.info("scheduler", `巡检完成：检查 ${checked} 本，新增更新 ${updated} 本，失败 ${failed} 本（耗时 ${Math.round((Date.now() - startedAt) / 1000)}s）`);
+    log.info("scheduler", `巡检完成：检查 ${checked} 本，跳过非连载 ${skipped} 本，新增更新 ${updated} 本，失败 ${failed} 本（耗时 ${Math.round((Date.now() - startedAt) / 1000)}s）`);
   } catch (e: any) {
     log.error("scheduler", `巡检异常：${e?.message ?? e}`);
   } finally {
@@ -713,6 +772,7 @@ bookRoutes.get("/:id", async (c) => {
   const book = await loadBook(bookId);
   if (!book) return c.json({ error: "书籍不存在" }, 404);
   const [prog] = await db.select().from(progress).where(and(eq(progress.userId, uid), eq(progress.bookId, bookId)));
+  const [mine] = await db.select({ group: shelf.group }).from(shelf).where(and(eq(shelf.userId, uid), eq(shelf.bookId, bookId)));
   // 带上书源名：详情页要显示这本书来自哪个源（源被删则 sourceId 为 null，前端显示「未知」）
   let sourceName = "";
   if (book.sourceId != null) {
@@ -722,7 +782,8 @@ bookRoutes.get("/:id", async (c) => {
   return c.json({
     ...book,
     sourceName,
-    onShelf: await isOnShelf(uid, bookId),
+    onShelf: !!mine,
+    myGroup: mine?.group ?? null, // 我的书架分组；未收藏为 null（编辑弹层据此回填）
     progress: prog ? { chapterIdx: prog.chapterIdx, scrollPos: prog.scrollPos, updatedAt: prog.updatedAt } : null,
   });
 });

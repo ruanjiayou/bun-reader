@@ -225,7 +225,7 @@ export function legadoToOurs(rule: string): string {
     .join("||");
 }
 
-const RULE_FIELDS = new Set(["bookList", "name", "author", "lastChapter", "intro", "coverUrl", "bookUrl", "tocUrl", "chapterList", "chapterName", "chapterUrl", "nextTocUrl", "content", "nextContentUrl"]);
+const RULE_FIELDS = new Set(["bookList", "name", "author", "lastChapter", "intro", "coverUrl", "bookUrl", "tocUrl", "chapterList", "chapterName", "chapterUrl", "nextTocUrl", "content", "nextContentUrl", "status"]);
 
 // header 宽松解析：标准 JSON 失败时截取首个平衡的 {...} 对象（容错 devtools「Copy as fetch」复制出来的片段）。
 // 本项目 header 统一以对象存储（legado 的字符串约定在导入时解析掉），运行期 parseHeader 不再做字符串兼容
@@ -272,10 +272,14 @@ export function normalizeSource(src: any): any {
     if (h) out.header = h;
   }
   for (const grp of ["ruleSearch", "ruleExplore", "ruleBookInfo", "ruleToc", "ruleContent"]) {
-    if (out[grp] && typeof out[grp] === "object")
-      out[grp] = Object.fromEntries(
-        Object.entries(out[grp]).map(([k, v]) => [k, typeof v === "string" && RULE_FIELDS.has(k) ? legadoToOurs(v) : v]),
-      );
+    if (!out[grp] || typeof out[grp] !== "object") continue;
+    const norm: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(out[grp])) {
+      const key = k === "finished" ? "status" : k; // 旧字段 finished 平滑改名，存量书源不用手改
+      if (key === "status" && norm.status !== undefined) continue;
+      norm[key] = typeof v === "string" && RULE_FIELDS.has(key) ? legadoToOurs(v) : v;
+    }
+    out[grp] = norm;
   }
   return out;
 }

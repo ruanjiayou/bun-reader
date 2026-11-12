@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { api, fmtLatest } from "../api";
+import { api, BOOK_STATUS, fmtLatest, statusBadgeClass, statusLabel } from "../api";
 import { useConfirm } from "../Confirm";
 
 const PAGE_SIZE = 100; // 目录分页：一页 100 章（几千章的目录一次渲染太重）
@@ -12,9 +12,11 @@ interface BookInfo {
   cover: string;
   intro: string;
   latestChapter: string;
+  status?: number;
   sourceId?: number | null;
   sourceName?: string; // 由 GET /api/books/:id 联表带出
   onShelf?: boolean; // 是否在我的书架（预览即入库：书在库里不代表已收藏）
+  myGroup?: string | null; // 我的书架分组（未收藏为 null）
   progress: { chapterIdx: number; scrollPos: number } | null;
 }
 interface Chapter {
@@ -48,10 +50,11 @@ export default function Book() {
   const [cache, setCache] = useState<CacheStatus | null>(null);
   const [caching, setCaching] = useState(false);
   const [editing, setEditing] = useState(false); // 编辑书籍元数据弹层
-  const [editForm, setEditForm] = useState<{ name: string; author: string; intro: string; latestChapter: string; cover: string }>({
-    name: "", author: "", intro: "", latestChapter: "", cover: "",
+  const [editForm, setEditForm] = useState<{ name: string; author: string; intro: string; latestChapter: string; cover: string; status: number; group: string }>({
+    name: "", author: "", intro: "", latestChapter: "", cover: "", status: 0, group: "",
   });
   const [coverPreview, setCoverPreview] = useState("");
+  const [groupOptions, setGroupOptions] = useState<string[]>([]); // 已有分组候选：可复用，也可直接输入新名字
   const [saving, setSaving] = useState(false);
   const pageInit = useRef(0); // 每本书首次拿到目录时，定位到「上次读到」所在页
   const tocRef = useRef<HTMLDivElement>(null); // 目录滚动容器（翻页后回顶）
@@ -81,19 +84,26 @@ export default function Book() {
 
   const openEdit = () => {
     if (!book) return;
-    setEditForm({ name: book.name, author: book.author, intro: book.intro, latestChapter: book.latestChapter, cover: book.cover });
+    setEditForm({ name: book.name, author: book.author, intro: book.intro, latestChapter: book.latestChapter, cover: book.cover, status: book.status ?? 0, group: book.myGroup ?? "" });
     setCoverPreview(book.cover);
     setEditing(true);
+    api<string[]>("/api/books/groups").then(setGroupOptions).catch(() => {});
   };
   const saveEdit = async () => {
     setSaving(true);
     try {
+      const { group, ...meta } = editForm;
       const r = await api<{ changed: number }>(`/api/books/${bookId}`, {
         method: "PATCH",
-        body: JSON.stringify(editForm),
+        body: JSON.stringify(meta),
       });
+      // 分组属于「我的书架」，单独更新当前用户的 shelf 行；未收藏的书不允许编辑分组
+      const groupChanged = !!book?.onShelf && group !== (book.myGroup ?? "");
+      if (groupChanged) {
+        await api(`/api/books/${bookId}/shelf`, { method: "PATCH", body: JSON.stringify({ group }) });
+      }
       setEditing(false);
-      setMsg(r.changed > 0 ? "已保存修改" : "无改动");
+      setMsg(r.changed > 0 || groupChanged ? "已保存修改" : "无改动");
       await load();
     } catch (e: any) {
       setMsg(e.message);
@@ -310,7 +320,14 @@ export default function Book() {
               <div className="flex h-36 w-27 flex-none items-center justify-center rounded-lg bg-neutral-700 text-3xl">📕</div>
             )}
             <div className="min-w-0 flex-1">
-              <h1 className="text-lg font-bold">{book.name}</h1>
+              <h1 className="text-lg font-bold">
+                {book.name}
+                {!!book.status && (
+                  <span className={`ml-2 rounded px-1.5 py-0.5 align-middle text-[10px] font-normal ${statusBadgeClass(book.status)}`}>
+                    {statusLabel(book.status)}
+                  </span>
+                )}
+              </h1>
               <div className="mt-0.5 truncate text-sm text-neutral-400">{book.author || "佚名"}</div>
               {book.intro && <p className="mt-2 line-clamp-3 text-xs text-neutral-500">{book.intro}</p>}
               {/* 简介下方：最新章节 / 读到章节 各占一行 */}
@@ -414,6 +431,38 @@ export default function Book() {
               <div>
                 <label className="mb-1 block text-xs opacity-60">最新章节</label>
                 <input value={editForm.latestChapter} onChange={(e) => setEditForm((f) => ({ ...f, latestChapter: e.target.value }))} className="w-full rounded-lg bg-neutral-700 px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-amber-500" />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs opacity-60">书籍状态</label>
+                {/* select 同输入框 16px：iOS 聚焦不缩放 */}
+                <select
+                  value={editForm.status}
+                  onChange={(e) => setEditForm((f) => ({ ...f, status: Number(e.target.value) }))}
+                  className="w-full rounded-lg bg-neutral-700 px-3 py-2 text-base outline-none focus:ring-2 focus:ring-amber-500"
+                >
+                  {BOOK_STATUS.map((s) => (
+                    <option key={s.value} value={s.value}>
+                      {s.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="mt-1 text-xs opacity-50">仅「连载中」参与定时巡检；规则配置了 status 时仍会以源站判定覆盖</p>
+              </div>
+              <div>
+                <label className="mb-1 block text-xs opacity-60">书架分组</label>
+                {/* 16px（text-base）防 iOS 聚焦缩放；datalist 给出已有分组，也可直接输入新分组 */}
+                <input
+                  list="shelf-group-options"
+                  value={editForm.group}
+                  disabled={!book.onShelf}
+                  placeholder={book.onShelf ? "留空 = 未分组" : "先加入书架再设置分组"}
+                  onChange={(e) => setEditForm((f) => ({ ...f, group: e.target.value }))}
+                  className="w-full rounded-lg bg-neutral-700 px-3 py-2 text-base outline-none focus:ring-2 focus:ring-amber-500 disabled:opacity-50"
+                />
+                <datalist id="shelf-group-options">
+                  {groupOptions.map((g) => <option key={g} value={g} />)}
+                </datalist>
+                <p className="mt-1 text-xs opacity-50">加入书架时默认取书源分组；分组只对你自己的书架生效</p>
               </div>
               <div>
                 <label className="mb-1 block text-xs opacity-60">封面</label>

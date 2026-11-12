@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { api } from "../api";
+import { api, statusBadgeClass, statusLabel } from "../api";
 import { useConfirm } from "../Confirm";
 import type { Me } from "../App";
 
@@ -14,6 +14,8 @@ interface ShelfBook {
   createdAt?: string;
   lastCheckAt?: string | null;
   updatedAt?: string | null; // 书籍内容更新时间（检查更新发现新章节 / 首次建目录）
+  status?: number; // 书籍状态枚举：0 连载 / 1 完结 / 2 太监断更 / 3 下架；仅 0 参与巡检
+  group?: string; // 我的书架分组（加入书架时默认取书源分组，之后可手动改；空串 = 未分组）
   progress: { chapterIdx: number; updatedAt?: string } | null; // updatedAt = 上次阅读时间
 }
 
@@ -39,6 +41,7 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
   const [loading, setLoading] = useState(true); // 书架列表加载中（避免「空书架」误显）
   const [msg, setMsg] = useState("");
   const [tab, setTab] = useState<SortTab>("read"); // 默认按上次阅读时间
+  const [group, setGroup] = useState<string | null>(null); // 分组过滤：null = 全部，"" = 未分组（不能用 "" 兼作「全部」）
   const [menuOpen, setMenuOpen] = useState(false); // 头像下拉
   const nav = useNavigate();
   const [ask, confirmUi] = useConfirm();
@@ -53,8 +56,10 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
   }, []);
 
   // 最近阅读：按进度更新时间降序（没读过的排在后面，按加入时间）；最近更新：按书籍内容更新时间降序
+  // 过滤依据是「我的书架分组」而不是书源分组：源分组只在加入书架那一刻作为默认值
+  const groups = useMemo(() => [...new Set(rows.map((b) => b.group ?? ""))].sort(), [rows]);
   const list = useMemo(() => {
-    const arr = [...rows];
+    const arr = rows.filter((b) => group === null || (b.group ?? "") === group);
     if (tab === "read") {
       arr.sort((a, b) => ts(b.progress?.updatedAt) - ts(a.progress?.updatedAt) || ts(b.createdAt) - ts(a.createdAt));
     } else {
@@ -64,7 +69,7 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
       );
     }
     return arr;
-  }, [rows, tab]);
+  }, [rows, tab, group]);
 
   // 移出书架（右键 / 长按共用）；长按后要吞掉随之而来的 click，避免又跳详情页
   const removeBook = async (b: ShelfBook) => {
@@ -139,24 +144,42 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
         </div>
       </header>
 
-      {/* 排序 tab：最近阅读（默认）/ 最近更新 */}
-      <div className="mb-3 flex items-center gap-1 rounded-lg bg-neutral-800/60 p-1 text-xs w-fit">
-        {(
-          [
-            { id: "read", label: "最近阅读" },
-            { id: "update", label: "最近更新" },
-          ] as { id: SortTab; label: string }[]
-        ).map((t) => (
-          <button
-            key={t.id}
-            onClick={() => setTab(t.id)}
-            className={`rounded-md px-3 py-1 transition-colors ${
-              tab === t.id ? "bg-neutral-700 font-medium text-amber-400" : "text-neutral-400 hover:text-neutral-200"
-            }`}
-          >
-            {t.label}
-          </button>
-        ))}
+      {/* 排序 tab + 分组过滤：同一行（tab 左、分组 chips 右横滚），不增加页面高度 */}
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div className="flex flex-none items-center gap-1 rounded-lg bg-neutral-800/60 p-1 text-xs w-fit">
+          {(
+            [
+              { id: "read", label: "最近阅读" },
+              { id: "update", label: "最近更新" },
+            ] as { id: SortTab; label: string }[]
+          ).map((t) => (
+            <button
+              key={t.id}
+              onClick={() => setTab(t.id)}
+              className={`rounded-md px-3 py-1 transition-colors ${
+                tab === t.id ? "bg-neutral-700 font-medium text-amber-400" : "text-neutral-400 hover:text-neutral-200"
+              }`}
+            >
+              {t.label}
+            </button>
+          ))}
+        </div>
+        {/* 分组 chips：水平排列、可横向滚动但不显示滚动条；分组 ≤1 时不显示 */}
+        {groups.length > 1 && (
+          <div className="no-scrollbar flex min-w-0 flex-1 items-center gap-1.5 overflow-x-auto py-0.5">
+            {[null, ...groups].map((g) => (
+              <button
+                key={g ?? "all"}
+                onClick={() => setGroup(g)}
+                className={`flex-none whitespace-nowrap rounded-full px-3 py-1 text-xs transition-colors ${
+                  group === g ? "bg-amber-500 font-medium text-neutral-900" : "bg-neutral-800 text-neutral-400 hover:text-neutral-200"
+                }`}
+              >
+                {g === null ? "全部" : g || "未分组"}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
 
       {msg && <div className="mb-3 rounded-lg bg-neutral-800 px-3 py-2 text-sm text-amber-400">{msg}</div>}
@@ -170,8 +193,8 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
       ) : list.length ? (
         <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-6">
           {list.map((b) => {
-            const finished = b.progress && b.progress.chapterIdx >= b.chapterCount - 1;
-            const reading = b.progress && !finished;
+            const readDone = b.progress && b.progress.chapterIdx >= b.chapterCount - 1;
+            const reading = b.progress && !readDone;
             return (
               <div
                 key={b.id}
@@ -195,9 +218,19 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
                   ) : (
                     <div className="flex aspect-[3/4] w-full items-center justify-center rounded-lg bg-neutral-800 text-3xl">📕</div>
                   )}
+                  {!!b.status && (
+                    <span className={`absolute left-1 top-1 rounded px-1 text-[10px] font-medium ${statusBadgeClass(b.status)}`}>
+                      {statusLabel(b.status)}
+                    </span>
+                  )}
                   {reading && (
                     <span className="absolute right-1 top-1 rounded bg-amber-500 px-1 text-[10px] font-medium text-neutral-900">
                       {Math.round((b.progress!.chapterIdx / Math.max(1, b.chapterCount)) * 100)}%
+                    </span>
+                  )}
+                  {!!b.group && (
+                    <span className="absolute bottom-1 right-1 max-w-[80%] truncate rounded bg-black/65 px-1 text-[10px] text-neutral-200" title={b.group}>
+                      {b.group}
                     </span>
                   )}
                 </div>

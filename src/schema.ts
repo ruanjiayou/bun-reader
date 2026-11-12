@@ -37,6 +37,8 @@ export const books = sqliteTable(
     cover: text("cover").notNull().default(""),
     intro: text("intro").notNull().default(""),
     latestChapter: text("latest_chapter").notNull().default(""),
+    // 书籍状态枚举：0 连载中 / 1 已完结 / 2 太监断更 / 3 已下架；规则判定或编辑书籍手动改，巡检只跑连载中
+    status: integer("status").notNull().default(0),
     lastCheckAt: integer("last_check_at", { mode: "timestamp" }),
     // 书籍内容更新时间：检查更新发现新增章节（或首次建目录）时置为当前时间，书架「最近更新」排序用
     updatedAt: integer("updated_at", { mode: "timestamp" }),
@@ -46,6 +48,7 @@ export const books = sqliteTable(
 );
 
 // 书架：用户 ↔ 书籍的关联（加书架只插这一行，不再动 books）
+// group 是用户级分组：创建时默认取 sources.group，之后每人可改自己那一行；空串 = 未分组。
 export const shelf = sqliteTable(
   "shelf",
   {
@@ -55,6 +58,7 @@ export const shelf = sqliteTable(
     bookId: integer("book_id")
       .notNull()
       .references(() => books.id, { onDelete: "cascade" }),
+    group: text("group").notNull().default("默认"),
     createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
   },
   (t) => [primaryKey({ columns: [t.userId, t.bookId] })],

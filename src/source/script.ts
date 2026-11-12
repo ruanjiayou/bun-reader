@@ -2,7 +2,8 @@ import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from "no
 import { pathToFileURL } from "node:url";
 import path from "node:path";
 import { runWithInst } from "./runtime";
-import { isPlaceholder, type BookItem, type ChapterItem, type Log } from "./engine";
+import { BookStatus, isPlaceholder, statusFromValue, type BookItem, type ChapterItem, type Log } from "./engine";
+import type { BookInfoResult } from "./facade";
 import { cleanChapter } from "./clean";
 import { log } from "../log";
 
@@ -263,6 +264,7 @@ export async function scriptSearch(row: ScriptRow, key: string, log?: Log, timeo
       cover: abs2(String(b.cover ?? ""), inst.base),
       intro: String(b.desc ?? ""),
       latestChapter: "",
+      status: statusFromValue(b.status ?? b.finished) ?? BookStatus.Ongoing,
     }));
   log?.(books.length ? "ok" : "warn", "search", `脚本源命中 ${books.length} 条`);
   return books;
@@ -273,7 +275,7 @@ export async function scriptBookInfo(
   url: string,
   log?: Log,
   timeoutMs = DEFAULT_TIMEOUT,
-): Promise<{ name: string; author: string; intro: string; cover: string; latestChapter: string; latestChapterUrl: string; tocUrl: string }> {
+): Promise<BookInfoResult> {
   const inst = await loadInst(row.id, row.code);
   if (typeof inst.getDetail !== "function") throw new Error("该源未实现 getDetail");
   log?.("info", "book", `脚本源详情: ${url}`);
@@ -286,6 +288,7 @@ export async function scriptBookInfo(
     latestChapter: "",
     latestChapterUrl: "",
     tocUrl: abs2(String(info?.tocUrl || url), inst.base || url),
+    status: statusFromValue(info?.status ?? info?.finished),
   };
   // 与规则源同样的「一行一条」：字段挤一行时看不出哪项 getDetail 没返回
   const miss = (v: string) => v || "⚠️未取到";

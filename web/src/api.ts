@@ -13,6 +13,18 @@ export async function api<T = any>(path: string, init?: RequestInit): Promise<T>
   return data as T;
 }
 
+// 书籍状态枚举（与后端 BookStatus 保持一致）；0 是唯一还会更新的状态，巡检只跑它
+export const BOOK_STATUS = [
+  { value: 0, label: "连载中" },
+  { value: 1, label: "已完结" },
+  { value: 2, label: "太监/断更" },
+  { value: 3, label: "已下架" },
+];
+export const statusLabel = (s?: number) => BOOK_STATUS.find((x) => x.value === s)?.label ?? "未知状态";
+// 角标配色写死类名（Tailwind 不编译动态拼接的类）；以后新增枚举值同步这里即可
+export const statusBadgeClass = (s?: number) =>
+  s === 1 ? "bg-green-700 text-green-100" : s === 2 ? "bg-orange-700 text-orange-100" : s === 3 ? "bg-red-800 text-red-100" : "bg-neutral-700 text-neutral-100";
+
 // 最新章节展示：详情抓到标题显示标题；库里只有链接（历史数据/标题取不到）时兜底显示页码
 export const fmtLatest = (s: string) => {
   if (/^(https?:)?\/\//i.test(s) || s.startsWith("/")) {

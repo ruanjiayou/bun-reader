@@ -2,6 +2,32 @@
 
 按日期记录功能变更（设计规范见 [docs/design.md](./docs/design.md)，当前计划见 [docs/plans.md](./docs/plans.md)）。
 
+## 2026-11-12
+
+- **书籍级分组（shelf.group）：书源分组只作默认值，用户可手动改**：
+  - 数据：`shelf` 加 `"group" TEXT NOT NULL DEFAULT '默认'`（CREATE 为事实来源 + v4 `hasColumn` 幂等迁移）；存量行按各自书源分组回填，无源/源已删归「默认」。构造旧库实测回填正确。**分组放 shelf 不放 books**——books 全局共享，一个用户改分组会影响所有人
+  - 默认值：`POST /books/import`（onShelf）与 `POST /books/:id/shelf` 写入当前书源分组快照；之后改书源分组不会重刷已有书架；换源合并保留各自分组
+  - 接口：`GET /books` 每条带 `group`（另留 `sourceGroup` 参考）、`GET /books/:id` 带 `myGroup`、`GET /books/groups`（我用过的 + 启用书源的分组候选）、`PATCH /books/:id/shelf`（trim + ≤50 字，空串=未分组，未收藏 404，只改当前用户一行）
+  - 前端：书架 chips 改用 `group` 过滤（`null`=全部、`""`=未分组，避免两者冲突），封面右下角显示当前分组小标；详情页编辑弹层加「书架分组」输入（16px + datalist，未加入书架禁用），保存时元数据走 `PATCH /books/:id`、分组走 `PATCH /books/:id/shelf`
+  - 验证：tsc 干净、176/176 测试过（新增 5 例含多用户隔离）、产物已构建 `web/reader/`
+
+- **finished → status（可扩展整数枚举）+ 分组过滤改横滚 chips**：
+  - 数据：`books.finished` 布尔列用 `ALTER TABLE RENAME COLUMN` 平移成 `status INTEGER`（0 连载 / 1 完结 / 2 太监断更 / 3 下架，0/1 原值不变；构造旧库实测值保留）；CREATE 为事实来源，迁移用 `hasColumn` 幂等
+  - 规则：`ruleSearch.status` / `ruleBookInfo.status` 替换 finished（`normalizeSource` 自动把旧字段改名兼容，存量书源无需手改）；`parseStatus` 按关键词判 0/1/2/3（连载优先防「未完结」误判），`statusFromValue` 兼容数字/旧布尔/文案；未命中 = undefined 仍保护手动标记
+  - 接口/引擎：`BookItem` / `BookInfoResult` / 脚本源统一 status；`PATCH /api/books/:id` 与 `POST /import` 接受 status（兼容旧 finished 布尔）；四处入库统一「number 才覆盖」；巡检改为只跑 `isActiveStatus(0)`
+  - 前端：书架角标按状态配色（完结绿/断更橙/下架红，连载不显示）、详情书名旁状态小标、编辑弹层勾选框改状态下拉（`text-base`）；书源规则表单搜索/详情区字段改名
+  - 分组过滤：下拉改**水平 chips**，与排序 tab 同一行右侧 `flex-1 min-w-0 overflow-x-auto no-scrollbar`（复用全局 `.no-scrollbar`），可横滚但不显示滚动条，分组 ≤1 仍隐藏
+  - 验证：tsc 干净、171/171 测试过（状态判定 5 例 + 旧字段兼容 2 例）、前端产物已构建 `web/reader/`
+
+- **书架按分组过滤**：`GET /api/books` 联表带出书源分组（`sourceGroup`，源已删归「未分组」）；书架排序 tab 行**右侧**加分组下拉（tab 左、下拉右，同一行不增加页面高度；分组 ≤1 时不显示）。选右侧而非下方的理由：排序和过滤是同层操作放一行视觉一致，分组数多时下拉可扩展，也不把书籍网格往下挤
+- **完结状态（finished）全链路**：
+  - 数据：`books` 加 `finished` 列（CREATE 为事实来源 + `hasColumn` 幂等 ALTER 迁移 v2）
+  - 规则：`ruleSearch.finished` / `ruleBookInfo.finished`（RULE_FIELDS 纳入，Legado 原生写法自动转换），取文本按关键词判定——「连载/未完/太监/更新中」=false（优先，防「未完结」误伤）、「完结/完本/已完/全集/大结局」=true、匹配不上=undefined（**入库不动已有值，保护手动标记**）；`parseFinished` 导出，搜索/探索共用 `mapBooks` 带出 `finished`
+  - 接口：`PATCH /api/books/:id` 支持 `finished`（boolean 才生效）；入库 `POST /import` info 可带 finished；检查更新/换源/巡检四处统一「boolean 才覆盖」
+  - 定时巡检：**finished=1 的书直接跳过**，日志汇总显示「跳过完结 N 本」
+  - 前端：书架封面左上角绿色「完结」角标；详情页书名旁完结小标；编辑弹层加「已完结」勾选框；规则表单搜索/详情区加 finished 输入
+  - 测试：`parseFinished` 3 例 + BookItem 字段断言更新，167/167 过
+
 ## 2026-10-31
 
 - **正文额外删标签 `dropTags`（源级）**：默认删除清单（`script/style/iframe/ins/svg/video…`）**不含 `span`**——正文常整段包在 span 里，按标签删会把字一起删掉。所以「某站用 `span` / `font` 包广告水印」这类需求给源级开关 `ruleContent.dropTags`（脚本源对应 `dropTags` 成员），逗号分隔，**删标签连同内容**，只作用于正文、`stripTags=false` 时也不生效。非法标签名（`</div>`、`#content`）静默忽略：拼坏选择器会让整个清洗失效且极难排查。书源编辑页「正文」新增一个输入框，脚本源表单同步
