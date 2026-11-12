@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api, fmtLatest } from "../api";
 import { useConfirm } from "../Confirm";
 import { holdAudioSession, releaseAudioSession } from "../tts-audio";
+import { useLayerActive } from "../layers";
 
 interface ContentResp {
   idx: number;
@@ -433,7 +434,8 @@ export default function Reader() {
       setShowSources(false);
       setToast(`已换源：${h.sourceName}`);
       const to = idx < cat.chapters.length ? idx : 0;
-      if (to !== idx) nav(`/book/${bookId}/read/${to}`);
+      // 与跳章一致用 replace：层栈里不该因为换源多出一层阅读器
+      if (to !== idx) nav(`/book/${bookId}/read/${to}`, { replace: true });
       else setTick((t) => t + 1); // 重载当前章
     } catch (e: any) {
       setSrcErr(e.message);
@@ -500,6 +502,14 @@ export default function Reader() {
     setSpeaking(false);
     setSpoken(null);
   };
+
+  // 层栈保活后阅读器不再因跳转而卸载：失活要主动停朗读，否则声音会在上层页面继续播放。
+  // 恢复顶层时不自动续读，用户重新点「朗读」即可。
+  const active = useLayerActive();
+  useEffect(() => {
+    if (!active) stopTts();
+    // 只在 active 切换时跑一次（stopTts 会置 ttsStopped 并复位引擎，onend 不会续读旧章）
+  }, [active]);
 
   // 当前可视位置对应的段落下标（与底部细线同源：以滚动位置为准）
   const currentParaIndex = () => {

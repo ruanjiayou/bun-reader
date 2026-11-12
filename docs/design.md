@@ -148,6 +148,43 @@ SQLite 表 + 磁盘文件：
 
 ## 7. 前端页面
 
+### 页面层栈（保活路由）
+
+`web/src/layers.tsx` 的 `PageLayers` 夹在 `BrowserRouter`（`main.tsx`，basename `/reader`）与路由表（`App.tsx` 的 `PageRoutes`）之间。**同一份路由表会被渲染到每一层**，每层是一个始终挂载的页面实例，React `key = layer.id`；顶层可见，其余只隐藏不卸载。目的：PUSH 后返回不再重新请求数据，列表/筛选/页码/滚动位置全部保留。`BrowserRouter` 继续管真实 URL、前进后退与 PWA 深链，页面里现有的 `navigate()` / `<Link>` 一行都不用改。
+
+状态 `layers: { id, key, loc, type }[] + activeId + transition`（`transition` 是本次转场描述，见下），用 `useLayoutEffect` 监听 `useLocation()` / `useNavigationType()` 同步（绘制前更新，避免闪一帧旧页）：
+
+| history 事件 | 层栈动作 |
+|---|---|
+| `PUSH` | 截断 `activeId` 之后的层（浏览器也丢 forward history）→ 追加新层 |
+| `REPLACE` | **只更新当前层 `loc`/`key`，id 不变** → 组件实例保留。阅读器跳章是同组件（state 续存、`useParams` 变化触发正文重抓）；预览入库跳详情是换组件（正常卸载/挂载） |
+| `POP`（返回/前进） | 用 `loc.key`（即 `history.state.key`）找回目标层，只把 `activeId` 指过去；后续层保留，前进也能秒回 |
+| 找不到 key | 刷新前的旧历史条目 → 降级清空，按当前 URL 只建一层 |
+| 刷新 | 初始 `location.key === "default"`，天然只有一层 |
+
+**每层独立的 location**：用 `UNSAFE_LocationContext.Provider` 覆盖成该层自己的 `loc`，`<Routes>` 不带 `location` prop 直接读它 —— 否则隐藏层的 `useLocation`/`useSearchParams`/`useParams` 会读到当前顶层 URL（表现为隐藏层被重新匹配成别的页面）。这是 react-router 内部 API，**当前锁 7.6.x，升级大版本必须复查**。`useNavigate`/`Link` 仍来自全局 `NavigationContext`，作用于真实 history。
+
+**隐藏方式**：层容器 `absolute inset-0 overflow-x-hidden overflow-y-auto`，顶层 `visibility:visible / zIndex:1`，其余 `visibility:hidden + inert + aria-hidden + pointer-events:none + zIndex:0`。刻意不用 `display:none`（实测会丢 `scrollTop` 并触发重排）；层容器静止态**不加 `transform`/`contain`**，否则 `fixed inset-0` 的阅读器与编辑弹层包含块会变（转场动画期间短暂有 transform，动画结束立刻撤掉，见下）。容器带 `data-layer-id` / `data-active` 便于调试与实测。外层是 `fixed inset-0 overflow-hidden`（裁剪滑入/滑出的层，不产生横向滚动条），滚动从 body 改为每层容器内滚动（现有页面都靠内部 ref 或普通文档流滚动，无 `window.scrollY` 依赖）。
+
+**页面转场动画（原生风格）**：层栈天然知道「从哪层到哪层」和前进/后退方向，因此不需要额外路由配置：`Stack` 里带 `transition: { fromId, toId, forward }`。`forward` = PUSH，或 POP 时目标层在栈里位于当前层之后（浏览器**前进**）；POP 回到前面的层就是返回。REPLACE、刷新、POP 找不到 key 降级为单层时一律 `transition: null`，**不打动画**（跳章、预览入库跳详情都是 REPLACE）。
+
+用 Web Animations API 给参与的两层各跑一条 **320ms `cubic-bezier(.4,0,.2,1)`** 的 transform 动画（`fill: both`，确保起始帧在绘制前生效、不闪终点画面）：
+
+| 动作 | 上层 | 下层 |
+|---|---|---|
+| 进入（PUSH / 前进） | 新页 `translateX(100%) → 0`，**从右往左** | 旧页 `0 → -24%` 视差退到后面 |
+| 返回（POP） | 当前页 `0 → translateX(100%)`，**从左往右**滑出 | 下层 `-24% → 0` 归位 |
+
+- 动画期间离开的层临时改成 `visibility:visible`（平时是 hidden，否则看不见层叠）；返回时还要把它 `z-index` 提到 2，才能盖在目标层上方滑走。上层挂 `.layer-elevated` 静态左边缘投影；根容器 `data-animating="1"` 由 `index.css` 生成透明遮罩，吃掉转场期间的点击/触摸，防止 320ms 内连点串导航。
+- **只动画 `transform`**：投影是静态 CSS class，不能把 `box-shadow` 写进 keyframes —— 逐帧重绘整个大列表页实测会把动画拖慢到 450ms 还没走完 1/3。曲线也别用抽屉那条 `.32,.72,0,1`：一半时间就走完 95% 位移，全屏页面看着像瞬间弹到位；`.4,0,.2,1` 位移分布均匀。
+- 动画结束（`Promise.all(finished)`）立即 `cancel()` 撤掉 transform，并收回 visibility / z-index / 投影 / 遮罩 —— 静止态层容器回到「无 transform」，`fixed inset-0` 的阅读器与编辑弹层包含块不变。快速连点或 REPLACE 打断时先 `cancel()` 上一场，再按新栈重置所有层的样式。
+- 系统开启「减少动态效果」（`prefers-reduced-motion: reduce`）时直接切换，不挂遮罩也不跑动画。
+- **明确不做**：可拖拽的边缘侧滑返回（交互式中途取消的手势）。当前只做点击返回按钮 / 浏览器返回触发的完整转场。桌面与移动端都启用，不按屏宽区分。
+
+**重定向与副作用**：`Guard` 和 `*` fallback 必须用 `ActiveRedirect`（内部读 `useLayerActive()`，只在顶层生效），否则多个隐藏层的 `<Navigate>` 会同时改 history。阅读器失活时主动 `stopTts()`，避免朗读跟着上层页面继续播放；恢复顶层不自动续读。
+
+**取舍（当前版本）**：纯保活、无失效广播 —— 返回后不重新请求，因此详情页改过书名/分组/状态后，书架可能显示旧数据（已接受，需要时再加 invalidate）。隐藏层的长轮询（目录抓取、缓存任务）与 SSE 会继续跑完。层栈不做上限、不持久化到 sessionStorage；`UNSAFE_LocationContext` 是本方案的唯一版本约束。
+
 | 路由 | 页面 | 要点 |
 |---|---|---|
 | `/` | 书架 | 手机 3 列网格 / 桌面列表；排序 tab（默认「最近阅读」，可切「最近更新」）**+ 分组过滤 chips（tab 行右侧水平排列，`flex-1 min-w-0 overflow-x-auto no-scrollbar`：可横滚但隐藏滚动条，不新增页面高度）**：按**我的书架分组**（`shelf.group`，接口带出 `group`；加入书架时默认取书源分组、之后可手动改）过滤，「全部」+「未分组」+ 各分组按钮，选中 amber、按钮 `flex-none whitespace-nowrap`；过滤状态 `null`=全部、空串=未分组（不可用 `""` 兼作「全部」，否则筛不出未分组的书），分组 ≤1 时不显示；**封面右下角显示当前分组小标**（与左上状态标、右上进度标不冲突）；**封面左上角按状态显示角标**（1 完结绿 / 2 太监断更橙 / 3 下架红，0 连载不显示；配色类名写死）。**右上角账号区**：未登录=登录按钮；已登录=头像圆钮（无头像显示首字）→ 下拉（昵称 / 设置 / 退出登录）。**移出书架 = 右键或长按 500ms**（移动端没有右键），长按触发后吞掉同一次 click 不进详情。列表有**加载中状态**（转圈 + 「书架加载中…」），请求未回不显示「空书架」 |
@@ -544,8 +581,9 @@ p.html(); p.click(sel); p.waitCount(sel, prev); p.waitForLoad(); p.close();
 
 ## 7. 章节导航与历史
 
-- 上一章 / 下一章 / 目录跳章一律用 **`replace`** 导航：历史栈只保留「书籍详情 → 阅读器」两层，返回键回书籍详情，不会退成上一章。
+- 上一章 / 下一章 / 目录跳章一律用 **`replace`** 导航：历史栈只保留「书籍详情 → 阅读器」两层，返回键回书籍详情，不会退成上一章。页面层栈下 `replace` 只更新当前层的 `loc`，阅读器组件实例与 TTS/滚动状态都保留，正文按新 `idx` 重抓；**换源后跳章同样已改为 `replace`**，避免多出一层阅读器。
 - 换源后进度保留，章节号越界回第 0 章。
+- 阅读器不再因上层导航而卸载（保活），因此失活时主动停止朗读；返回时不重新抓章节列表。
 
 ## 8. 交互细节备忘
 

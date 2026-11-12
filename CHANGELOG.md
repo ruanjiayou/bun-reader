@@ -4,6 +4,25 @@
 
 ## 2026-11-12
 
+- **页面转场动画：模拟原生 push / pop**（进入从右往左、返回从左往右）：
+  - `web/src/layers.tsx` 的 `Stack` 增加 `transition: { fromId, toId, forward }`：PUSH 或 POP 到栈中更靠后的层（浏览器前进）= 进入，POP 回前面的层 = 返回；REPLACE / 刷新 / POP 降级单层都不打动画（跳章、预览入库跳详情不受影响）
+  - Web Animations API 给参与的两层各跑一条 **320ms `cubic-bezier(.4,0,.2,1)`** 的 transform 动画：进入时新页 `100% → 0` + 旧页 `0 → -24%` 视差；返回时当前页 `0 → 100%` 滑出（z-index 临时 2）+ 下层 `-24% → 0` 归位。`fill: both` 保证起始帧绘制前生效，不闪一帧终点画面
+  - 动画期间离开的层临时 `visibility:visible`，上层挂 `.layer-elevated` 静态投影，根容器 `data-animating` 生成透明触摸遮罩（吃掉转场期连点）；系统开启「减少动态效果」时直接切换
+  - **只动画 transform**：投影用静态 CSS class，不写进 keyframes —— 把 `box-shadow` 逐帧动画时，大列表页实测 450ms 才走完 1/3（整层每帧重绘）；曲线也从 `.32,.72,0,1`（半程走完 95% 位移、像瞬间弹到位）换成 `.4,0,.2,1`
+  - 结束用 `Promise.all(finished)` + `cancel()` 撤掉 transform 并收回 visibility/z-index/投影/遮罩 —— 静止态层容器仍无 transform，保护 `fixed inset-0` 的阅读器与编辑弹层；快速连点/REPLACE 打断时先取消上一场并按新栈重置所有层
+  - `index.css` 加 `.page-layers[data-animating="1"]::after` 遮罩与 `.layer-elevated`；根容器加 `overflow-hidden` 裁剪滑入的层
+  - 验证：Playwright（系统 Chrome + mock API，`/tmp/br-anim-test.mjs`）**39 项全过**——用 `Element.prototype.animate` 打补丁在动画创建瞬间暂停、手动拨 `currentTime` 到 0/160/320 精确断言方向与中间帧；覆盖进入/返回/前进方向、旧层可见性与视差、遮罩、结束后无残留 transform/动画/阴影、自然结束自清、快速连点打断、REPLACE/刷新无动画、阅读器 fixed 元素仍贴视口、reduced-motion、保活滚动 600→600、无运行时错误。前后端 tsc 干净、`bun test` 176/176、产物已构建 `web/reader/`
+  - 明确不做：可拖拽的边缘侧滑返回手势
+
+- **页面层栈（保活路由）：返回不再重新加载数据**：
+  - 新增 `web/src/layers.tsx` 的 `PageLayers`：维护 `layers[] + activeId`，**同一份路由表渲染到每一层**，按 React `key = layer.id` 保持组件实例；`App.tsx` 把 `<Routes>` 抽成 `PageRoutes` 并由 `PageLayers` 包裹，`main.tsx` 的 `BrowserRouter basename="/reader"` 不动，页面里现有 `navigate()` / `<Link>` 零改动
+  - history 同步（`useLayoutEffect` + `useNavigationType`）：PUSH 截断后续层再追加；REPLACE 只改当前层 `loc`/`key`、id 不变（阅读器跳章=同组件保实例，预览入库跳详情=换组件正常替换）；POP 按 `location.key` 找回原层、后续层保留所以浏览器前进也秒回；找不到 key（刷新前的旧历史条目）降级为单层；刷新时初始 key=`default` 天然只有一层
+  - location 隔离：每层用 `UNSAFE_LocationContext.Provider` 覆盖成自己那次的 `loc`，`<Routes>` 直接读它，避免隐藏层的 `useLocation`/`useSearchParams`/`useParams` 串到顶层 URL。**这是 react-router 内部 API，锁 7.6.x，升级大版本要复查**
+  - 隐藏层 `absolute inset-0 overflow-y-auto` + `visibility:hidden + inert + aria-hidden + pointer-events:none`（不用 `display:none`，实测会丢 `scrollTop`）；层容器不加 `transform`/`contain`，保护 `fixed inset-0` 的阅读器与编辑弹层；容器带 `data-layer-id`/`data-active` 便于调试
+  - `Guard` 与 `*` fallback 改用 `ActiveRedirect`（只在顶层生效），防止多个隐藏层同时 `<Navigate>` 搅乱 history；阅读器失活主动 `stopTts()`；换源后跳章补 `replace`，避免层栈多一层阅读器
+  - 取舍：**纯保活、无失效广播**（返回后数据可能陈旧，本轮已接受）；不设层数上限；层栈不持久化到 sessionStorage
+  - 验证：Playwright + mock API 实测 **26 项全过**（单层初始化 / PUSH 追加 / 隐藏层 location 隔离 / POP 零请求 / 滚动位置 600→600 / 前进恢复 / 刷新只一层 / 刷新后 POP 降级 / 两种 REPLACE / 无运行时错误）；`bunx tsc --noEmit` 干净、`bun test` 176/176、前端产物已构建 `web/reader/`
+
 - **书籍级分组（shelf.group）：书源分组只作默认值，用户可手动改**：
   - 数据：`shelf` 加 `"group" TEXT NOT NULL DEFAULT '默认'`（CREATE 为事实来源 + v4 `hasColumn` 幂等迁移）；存量行按各自书源分组回填，无源/源已删归「默认」。构造旧库实测回填正确。**分组放 shelf 不放 books**——books 全局共享，一个用户改分组会影响所有人
   - 默认值：`POST /books/import`（onShelf）与 `POST /books/:id/shelf` 写入当前书源分组快照；之后改书源分组不会重刷已有书架；换源合并保留各自分组

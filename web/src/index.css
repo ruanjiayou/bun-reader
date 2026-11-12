@@ -12,3 +12,17 @@ body {
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
+
+/* 页面转场（进入右→左 / 返回左→右）期间盖一层透明遮罩：吃掉点击与触摸，
+   防止转场期间连点串导航。由 layers.tsx 在动画起止设置 data-animating。 */
+.page-layers[data-animating="1"]::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+}
+
+/* 转场时上层页面的左边缘投影。静态样式（不逐帧动画 box-shadow，否则整层每帧重绘） */
+.layer-elevated {
+  box-shadow: -12px 0 28px rgb(0 0 0 / 42%);
+}

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Routes, Route, Navigate, useNavigate } from "react-router-dom";
+import { Routes, Route, useNavigate } from "react-router-dom";
 import { api } from "./api";
+import { ActiveRedirect, PageLayers } from "./layers";
 import Auth from "./pages/Auth";
 import Shelf from "./pages/Shelf";
 import SourceList from "./pages/SourceList";
@@ -35,20 +36,26 @@ export function useAuth() {
 
 function Guard({ children, me, loading }: any) {
   if (loading) return <div className="p-8 text-center text-neutral-500">加载中…</div>;
-  return me ? children : <Navigate to="/auth" replace />;
+  if (me) return children;
+  // 隐藏层不重定向：多个 <Navigate> 同时触发会搅乱 history；等它重新变成顶层再跳
+  return <ActiveRedirect to="/auth" />;
 }
 
-export default function App() {
-  const { me, loading, refresh } = useAuth();
-  const nav = useNavigate();
-  const logout = async () => {
-    await api("/auth/logout", { method: "POST" });
-    refresh();
-    nav("/auth");
-  };
+/** 同一份路由表会被 PageLayers 渲染到每一层；各层有独立的 location context 与组件实例 */
+function PageRoutes({
+  me,
+  loading,
+  refresh,
+  logout,
+}: {
+  me: Me | null;
+  loading: boolean;
+  refresh: () => void;
+  logout: () => void;
+}) {
   return (
     <Routes>
-      <Route path="/auth" element={me ? <Navigate to="/" replace /> : <Auth onOk={refresh} />} />
+      <Route path="/auth" element={me ? <ActiveRedirect to="/" /> : <Auth onOk={refresh} />} />
       <Route path="/" element={<Guard me={me} loading={loading}><Shelf me={me} onLogout={logout} /></Guard>} />
       <Route path="/settings" element={<Guard me={me} loading={loading}><Settings me={me!} onSaved={refresh} /></Guard>} />
       <Route path="/search" element={<Guard me={me} loading={loading}><Search /></Guard>} />
@@ -61,7 +68,22 @@ export default function App() {
       <Route path="/sources" element={<Guard me={me} loading={loading}><SourceList /></Guard>} />
       <Route path="/sources/new" element={<Guard me={me} loading={loading}><Sources /></Guard>} />
       <Route path="/sources/:id" element={<Guard me={me} loading={loading}><Sources /></Guard>} />
-      <Route path="*" element={<Navigate to="/" replace />} />
+      <Route path="*" element={<ActiveRedirect to="/" />} />
     </Routes>
+  );
+}
+
+export default function App() {
+  const { me, loading, refresh } = useAuth();
+  const nav = useNavigate();
+  const logout = async () => {
+    await api("/auth/logout", { method: "POST" });
+    refresh();
+    nav("/auth");
+  };
+  return (
+    <PageLayers>
+      <PageRoutes me={me} loading={loading} refresh={refresh} logout={logout} />
+    </PageLayers>
   );
 }
