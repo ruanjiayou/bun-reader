@@ -172,7 +172,7 @@ describe("书源脚本引擎", () => {
 
   test("BookItem 类型兼容：search 产出可直接喂给书架快照流程", async () => {
     const books: BookItem[] = await scriptSearch({ id: TID }, "凡人");
-    expect(Object.keys(books[0]).sort()).toEqual(["author", "bookUrl", "cover", "intro", "latestChapter", "name"]);
+    expect(Object.keys(books[0]).sort()).toEqual(["author", "bookUrl", "cover", "intro", "latestChapter", "name", "status"]);
   });
 
   test("formToCode：表单方法合并为 class，空壳/纯注释方法不写入，成员落为类字段", async () => {

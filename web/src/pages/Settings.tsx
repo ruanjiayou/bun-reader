@@ -1,6 +1,6 @@
 import { useRef, useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "../api";
+import { BackLink } from "../layers";
 import type { Me } from "../App";
 
 // 头像压缩：任意图片 → 居中方裁 128×128 JPEG dataURL（省流量省存储，头像够用）
@@ -87,7 +87,7 @@ export default function Settings({ me, onSaved }: { me: Me; onSaved: () => void 
   return (
     <div className="mx-auto min-h-dvh max-w-md p-4">
       <header className="mb-4 flex items-center">
-        <Link to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
+        <BackLink to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</BackLink>
         <h1 className="flex-1 text-center text-base font-bold">账号设置</h1>
         <span className="w-12" />
       </header>

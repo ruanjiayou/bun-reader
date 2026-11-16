@@ -3,7 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { api, fmtLatest } from "../api";
 import { useConfirm } from "../Confirm";
 import { holdAudioSession, releaseAudioSession } from "../tts-audio";
-import { useLayerActive } from "../layers";
+import { useLayerActive, useBackTo } from "../layers";
 
 interface ContentResp {
   idx: number;
@@ -201,6 +201,7 @@ export default function Reader() {
   const bookId = Number(id);
   const idx = Number(idxParam);
   const nav = useNavigate();
+  const backTo = useBackTo();
   const [ask, confirmUi] = useConfirm();
 
   const [chapters, setChapters] = useState<{ idx: number; title: string; cached?: boolean }[]>([]);
@@ -747,7 +748,7 @@ export default function Reader() {
           <button onClick={() => nav(-1)} className="flex h-9 w-9 flex-none items-center justify-center opacity-75 hover:opacity-100" title="返回上一页">
             <Icon name="back" size={18} />
           </button>
-          <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
+          <NavItem icon="shelf" label="书架" onClick={() => backTo("/")} />
           <NavItem icon="globe" label="书源" onClick={openSources} />
           <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
         </div>
@@ -758,7 +759,7 @@ export default function Reader() {
       {chrome && (
         <div className="absolute left-1 top-3 z-30 hidden min-[501px]:flex min-[501px]:flex-col min-[501px]:items-start min-[501px]:gap-2 min-[900px]:left-[calc(50%-320px)] min-[900px]:-translate-x-[calc(100%+12px)]">
           <NavItem icon="back" label="返回" onClick={() => nav(-1)} />
-          <NavItem icon="shelf" label="书架" onClick={() => nav("/")} />
+          <NavItem icon="shelf" label="书架" onClick={() => backTo("/")} />
           <NavItem icon="globe" label="书源" onClick={openSources} />
           <NavItem icon="list" label="目录" onClick={() => setShowToc(true)} />
         </div>

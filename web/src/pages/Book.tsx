@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, BOOK_STATUS, fmtLatest, statusBadgeClass, statusLabel } from "../api";
 import { useConfirm } from "../Confirm";
+import { BackLink } from "../layers";
 
 const PAGE_SIZE = 100; // 目录分页：一页 100 章（几千章的目录一次渲染太重）
 
@@ -302,7 +303,7 @@ export default function Book() {
     <div className="mx-auto flex h-dvh max-w-3xl flex-col overflow-hidden p-4">
       {confirmUi}
       <header className="mb-3 flex flex-none items-center gap-2">
-        <Link to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
+        <BackLink to="/" className="text-sm text-neutral-400 hover:text-neutral-200">← 书架</BackLink>
       </header>
       {msg && (
         <div className="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg bg-neutral-700 px-4 py-2 text-sm text-neutral-100 shadow-lg">

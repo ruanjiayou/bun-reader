@@ -2,6 +2,20 @@
 
 按日期记录功能变更（设计规范见 [docs/design.md](./docs/design.md)，当前计划见 [docs/plans.md](./docs/plans.md)）。
 
+## 2026-11-16
+
+- **修复：点页面「返回」按钮仍播放进入动画（右→左）**：
+  - 根因不在动画代码：各页「← 书架 / 回搜索 / 返回列表」写的是 `<Link to="/">` 或 `navigate("/")`，React Router 按 **PUSH** 处理，层栈据此判 `forward: true`，于是返回也播右→左动画，还会往栈里堆新层、丢掉原页保活。浏览器后退按钮（`POP`）方向一直是对的。
+  - `web/src/layers.tsx` 新增 `BackContext` + `useBackTo()` + `BackLink`：`backTo(to)` 从当前层往前找 `loc.pathname === to` 的最近一层，用 `navigate(i - idx)` 走真正的 **POP**（可一次跨多层，forward history 保留）；找不到（刷新后单层、外部深链直达）就 `navigate(to, { replace: true })` 兜底，不播转场、也不 `history.back()` 退出应用。`BackLink` 保留 `<Link>` 的 href / 修饰键新标签行为，只接管普通左键。
+  - 8 个文件共 9 处返回入口改为 `BackLink` / `backTo`（Book / Search / Explore / Settings / Preview / SourceList / Sources / Reader×2）；进入类导航（书架顶部菜单、点书进详情等）仍是 PUSH，不受影响。
+  - 验证：Playwright（系统 Chrome + mock API）全部通过 —— 新增「点 ← 书架是 POP：`history.length` 不变」「滑出层 `0 → 1000` 左→右」「不新增层、顶层 id 就是原书架层」「不重新请求 `/api/books`」「跨两层返回（书架→详情→阅读器→书架）」「刷新后单层 replace 兜底不退出应用」；原有进入/前进/连点打断/REPLACE/reduced-motion/fixed 元素/无运行时错误回归全过。前后端 tsc 干净、`bun test` 176/176、产物重建 `web/reader/`。
+
+- **转场改为原生压栈/出栈模型：底层不动 + 层容器不透明底色**：
+  - 反馈：底层 page view 不该跟着平移，push 应是新页面从右**覆盖**过来、back 是最上层退出；而且层容器透明时两层同时可见，文字会直接透叠。
+  - `web/src/layers.tsx`：去掉 `PARALLAX` 视差，**只给最上层跑一条** WAAPI 动画（进入 `100% → 0`、返回 `0 → 100%`）；底层 `x` 全程 0、连动画对象都不创建。`from` 层动画期间仍临时 `visibility:visible`（上层滑开时露出的区域必须有内容），返回时 `z-index: 2` 盖在目标层上方不变。
+  - 层容器加 `bg-neutral-900`（与 `body` 的 Tailwind 同源，实测 computed 都是 `oklch(0.205 0 none)`），两层都不透明 → 不再看到内容重叠；阅读器自带主题底色（羊皮纸/护眼绿等）会自己铺满盖住它。根容器 `overflow-hidden` 继续裁剪滑入层。
+  - 验证：Playwright **39 项全过**（新增「底层 x 全程 0 且无动画对象」「静止态底色 = body」「进入/返回全程两层底色不透明」），并截取进入与返回的中途帧目视确认：左侧底层静止、右侧上层覆盖/退出、分界干净无透叠；前后端 tsc 干净、`bun test` 176/176、产物已构建 `web/reader/`。
+
 ## 2026-11-12
 
 - **页面转场动画：模拟原生 push / pop**（进入从右往左、返回从左往右）：

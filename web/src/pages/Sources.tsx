@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { api, API_BASE } from "../api";
 import { useConfirm } from "../Confirm";
+import { useBackTo } from "../layers";
 
 interface SourceRow {
   id: number;
@@ -248,6 +249,7 @@ export default function Sources() {
   const [scriptForm, setScriptForm] = useState(emptyScriptForm()); // 脚本源表单（保存时合并生成 class 脚本）
   const [scriptCode, setScriptCode] = useState(""); // 右侧「生成的 JS」只读预览（rules/script 都是生成产物）
   const nav = useNavigate();
+  const backTo = useBackTo();
   const { id: routeId } = useParams(); // /sources/new = 新建；/sources/:id = 编辑/调试
   const logBox = useRef<HTMLDivElement>(null);
   const [ask, confirmUi] = useConfirm();
@@ -372,7 +374,7 @@ export default function Sources() {
       });
       if (!ok) return;
     }
-    nav("/sources");
+    backTo("/sources");
   };
 
   // 清空成新建：先把表单复位，URL 也跟到 /sources/new（否则停在 /sources/12 上却是个空表单）

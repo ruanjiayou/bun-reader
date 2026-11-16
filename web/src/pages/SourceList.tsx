@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api";
 import { useConfirm } from "../Confirm";
+import { useBackTo } from "../layers";
 
 interface SourceRow {
   id: number;
@@ -80,6 +81,7 @@ export default function SourceList() {
   const [msg, setMsg] = useState("");
   const [busy, setBusy] = useState(false);
   const nav = useNavigate();
+  const backTo = useBackTo();
   const [ask, confirmUi] = useConfirm();
 
   const load = () => api<SourceRow[]>("/api/sources").then(setRows).catch((e) => setMsg(e.message));
@@ -149,7 +151,7 @@ export default function SourceList() {
       {confirmUi}
       <header className="mb-3 flex items-center gap-2">
         <button
-          onClick={() => nav("/")}
+          onClick={() => backTo("/")}
           className="flex h-9 w-9 flex-none items-center justify-center rounded-lg text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100"
           title="返回书架"
         >

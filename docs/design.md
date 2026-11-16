@@ -150,7 +150,7 @@ SQLite 表 + 磁盘文件：
 
 ### 页面层栈（保活路由）
 
-`web/src/layers.tsx` 的 `PageLayers` 夹在 `BrowserRouter`（`main.tsx`，basename `/reader`）与路由表（`App.tsx` 的 `PageRoutes`）之间。**同一份路由表会被渲染到每一层**，每层是一个始终挂载的页面实例，React `key = layer.id`；顶层可见，其余只隐藏不卸载。目的：PUSH 后返回不再重新请求数据，列表/筛选/页码/滚动位置全部保留。`BrowserRouter` 继续管真实 URL、前进后退与 PWA 深链，页面里现有的 `navigate()` / `<Link>` 一行都不用改。
+`web/src/layers.tsx` 的 `PageLayers` 夹在 `BrowserRouter`（`main.tsx`，basename `/reader`）与路由表（`App.tsx` 的 `PageRoutes`）之间。**同一份路由表会被渲染到每一层**，每层是一个始终挂载的页面实例，React `key = layer.id`；顶层可见，其余只隐藏不卸载。目的：PUSH 后返回不再重新请求数据，列表/筛选/页码/滚动位置全部保留。`BrowserRouter` 继续管真实 URL、前进后退与 PWA 深链；页面里的**进入类**导航（`<Link>` / `navigate(path)`）不用改，但**返回类入口必须改用 `BackLink` / `useBackTo()`**（见下），否则会被当成 PUSH。
 
 状态 `layers: { id, key, loc, type }[] + activeId + transition`（`transition` 是本次转场描述，见下），用 `useLayoutEffect` 监听 `useLocation()` / `useNavigationType()` 同步（绘制前更新，避免闪一帧旧页）：
 
@@ -164,18 +164,26 @@ SQLite 表 + 磁盘文件：
 
 **每层独立的 location**：用 `UNSAFE_LocationContext.Provider` 覆盖成该层自己的 `loc`，`<Routes>` 不带 `location` prop 直接读它 —— 否则隐藏层的 `useLocation`/`useSearchParams`/`useParams` 会读到当前顶层 URL（表现为隐藏层被重新匹配成别的页面）。这是 react-router 内部 API，**当前锁 7.6.x，升级大版本必须复查**。`useNavigate`/`Link` 仍来自全局 `NavigationContext`，作用于真实 history。
 
-**隐藏方式**：层容器 `absolute inset-0 overflow-x-hidden overflow-y-auto`，顶层 `visibility:visible / zIndex:1`，其余 `visibility:hidden + inert + aria-hidden + pointer-events:none + zIndex:0`。刻意不用 `display:none`（实测会丢 `scrollTop` 并触发重排）；层容器静止态**不加 `transform`/`contain`**，否则 `fixed inset-0` 的阅读器与编辑弹层包含块会变（转场动画期间短暂有 transform，动画结束立刻撤掉，见下）。容器带 `data-layer-id` / `data-active` 便于调试与实测。外层是 `fixed inset-0 overflow-hidden`（裁剪滑入/滑出的层，不产生横向滚动条），滚动从 body 改为每层容器内滚动（现有页面都靠内部 ref 或普通文档流滚动，无 `window.scrollY` 依赖）。
+**返回入口必须走 POP（不能是 PUSH）**：`<Link to="/">` / `navigate("/")` 是 PUSH，层栈会把「点 ← 书架」判成 `forward: true` —— 于是返回也播放右→左的**进入**动画，还会不断往栈里堆书架层、丢掉原页保活状态。所有语义为「返回 / 回书架 / 回列表」的入口统一用 `layers.tsx` 导出的：
+
+- `BackLink`：外观、href、修饰键/`target=_blank` 新标签全交给 `<Link>`，只在普通左键时 `preventDefault()` 后改走 `backTo(to)`；
+- `useBackTo()`：图标按钮（书源列表/编辑页返回 icon、阅读器「书架」）拿 `backTo(path)` 直接调用。
+
+`backTo` 从**当前层往前**找 `loc.pathname === to` 的最近一层，用 `navigate(i - idx)` 一次 POP 回去（可跨多层，forward history 保留，浏览器前进仍能逐层回来）；层栈据此按「返回」方向播放动画并复用目标层。栈里找不到目标（刷新后只有一层、外部深链直达）则 `navigate(to, { replace: true })` 兜底：**不播转场、不新增层、也不会 `history.back()` 退出应用**。已接入各页 `← 书架` / `← 回搜索` / 书源返回 icon / 阅读器「书架」按钮；阅读器「返回上一页」本来就是 `navigate(-1)`，保持不动。进入类导航（书架顶部菜单、点书进详情等）仍是 PUSH。
+
+**隐藏方式**：层容器 `absolute inset-0 overflow-x-hidden overflow-y-auto`，顶层 `visibility:visible / zIndex:1`，其余 `visibility:hidden + inert + aria-hidden + pointer-events:none + zIndex:0`。刻意不用 `display:none`（实测会丢 `scrollTop` 并触发重排）；层容器静止态**不加 `transform`/`contain`**，否则 `fixed inset-0` 的阅读器与编辑弹层包含块会变（转场动画期间短暂有 transform，动画结束立刻撤掉，见下）。**层容器必须自带不透明底色** `bg-neutral-900`（与 `body` 的 `@apply` 同源，改全局主题时要一起改）：转场时两层同时可见，容器透明会让上下层文字直接透叠在一起。阅读器有自己的主题底色（暗色/羊皮纸/护眼绿…），`fixed inset-0` 铺满后会自己盖住这层底色。容器带 `data-layer-id` / `data-active` 便于调试与实测。外层是 `fixed inset-0 overflow-hidden`（裁剪滑入/滑出的层，不产生横向滚动条），滚动从 body 改为每层容器内滚动（现有页面都靠内部 ref 或普通文档流滚动，无 `window.scrollY` 依赖）。
 
 **页面转场动画（原生风格）**：层栈天然知道「从哪层到哪层」和前进/后退方向，因此不需要额外路由配置：`Stack` 里带 `transition: { fromId, toId, forward }`。`forward` = PUSH，或 POP 时目标层在栈里位于当前层之后（浏览器**前进**）；POP 回到前面的层就是返回。REPLACE、刷新、POP 找不到 key 降级为单层时一律 `transition: null`，**不打动画**（跳章、预览入库跳详情都是 REPLACE）。
 
-用 Web Animations API 给参与的两层各跑一条 **320ms `cubic-bezier(.4,0,.2,1)`** 的 transform 动画（`fill: both`，确保起始帧在绘制前生效、不闪终点画面）：
+**底层不动，只有最上层在动**：原生导航是压栈/出栈，下层页面不该跟着平移。用 Web Animations API **只给上层跑一条** 320ms `cubic-bezier(.4,0,.2,1)` 的 transform 动画（`fill: both`，确保起始帧在绘制前生效、不闪终点画面）：
 
 | 动作 | 上层 | 下层 |
 |---|---|---|
-| 进入（PUSH / 前进） | 新页 `translateX(100%) → 0`，**从右往左** | 旧页 `0 → -24%` 视差退到后面 |
-| 返回（POP） | 当前页 `0 → translateX(100%)`，**从左往右**滑出 | 下层 `-24% → 0` 归位 |
+| 进入（PUSH / 前进） | 新页 `translateX(100%) → 0`，**从右往左覆盖过来** | 全程 `0`，静止 |
+| 返回（POP） | 当前页 `0 → translateX(100%)`，**从左往右退出** | 全程 `0`，静止 |
 
-- 动画期间离开的层临时改成 `visibility:visible`（平时是 hidden，否则看不见层叠）；返回时还要把它 `z-index` 提到 2，才能盖在目标层上方滑走。上层挂 `.layer-elevated` 静态左边缘投影；根容器 `data-animating="1"` 由 `index.css` 生成透明遮罩，吃掉转场期间的点击/触摸，防止 320ms 内连点串导航。
+- 不做 `-24%` 视差：底层跟着移动既不像原生、又要求两层都参与动画。现在只有一条动画对象，结束后清理也更简单。两层都有不透明底色，上层滑入/滑出时露出的就是干净的下层，不会看到内容透叠。
+- 动画期间离开的层临时改成 `visibility:visible`（平时是 hidden，否则上层滑开时露出的区域是空白）；返回时还要把它 `z-index` 提到 2，才能盖在目标层上方滑走。上层挂 `.layer-elevated` 静态左边缘投影（区分层级）；根容器 `data-animating="1"` 由 `index.css` 生成透明遮罩，吃掉转场期间的点击/触摸，防止 320ms 内连点串导航。
 - **只动画 `transform`**：投影是静态 CSS class，不能把 `box-shadow` 写进 keyframes —— 逐帧重绘整个大列表页实测会把动画拖慢到 450ms 还没走完 1/3。曲线也别用抽屉那条 `.32,.72,0,1`：一半时间就走完 95% 位移，全屏页面看着像瞬间弹到位；`.4,0,.2,1` 位移分布均匀。
 - 动画结束（`Promise.all(finished)`）立即 `cancel()` 撤掉 transform，并收回 visibility / z-index / 投影 / 遮罩 —— 静止态层容器回到「无 transform」，`fixed inset-0` 的阅读器与编辑弹层包含块不变。快速连点或 REPLACE 打断时先 `cancel()` 上一场，再按新栈重置所有层的样式。
 - 系统开启「减少动态效果」（`prefers-reduced-motion: reduce`）时直接切换，不挂遮罩也不跑动画。

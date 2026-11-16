@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api";
+import { BackLink } from "../layers";
 
 interface ExploreSource {
   id: number;
@@ -107,9 +108,9 @@ export default function Explore() {
       {/* 顶部两行：①返回书架独占一行 ②书源下拉 + 分类（分类横向滚动、不显示滚动条） */}
       <header className="mb-3 flex-none">
         <div className="mb-2 flex items-center gap-2">
-          <Link to="/" className="flex-none text-sm text-neutral-400 hover:text-neutral-200">
+          <BackLink to="/" className="flex-none text-sm text-neutral-400 hover:text-neutral-200">
             ← 书架
-          </Link>
+          </BackLink>
           <h1 className="text-base font-bold">探索</h1>
         </div>
         <div className="flex items-center gap-2">

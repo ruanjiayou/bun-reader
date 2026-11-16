@@ -1,6 +1,7 @@
 import { useRef, useState } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { api, API_BASE } from "../api";
+import { BackLink } from "../layers";
 
 interface SBook {
   name: string;
@@ -152,7 +153,7 @@ export default function Search() {
       {/* 顶部两行：①返回书架独占一行 ②输入框 + 搜索按钮（与探索页同一套顶栏节奏） */}
       <header className="mb-4 flex-none">
         <div className="mb-2 flex items-center gap-2">
-          <Link to="/" className="flex-none text-sm text-neutral-400 hover:text-neutral-200">← 书架</Link>
+          <BackLink to="/" className="flex-none text-sm text-neutral-400 hover:text-neutral-200">← 书架</BackLink>
           <h1 className="text-base font-bold">搜索</h1>
         </div>
         <div className="flex items-center gap-2">

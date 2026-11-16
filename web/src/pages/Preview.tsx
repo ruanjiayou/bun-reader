@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../api";
+import { BackLink } from "../layers";
 
 // 兼容旧入口：以前 /preview?sourceId=&bookUrl= 是不落库的预览页，
 // 现在「预览即入库」，这里只负责把书入库再跳到统一的详情页 /book/:id。
@@ -37,7 +38,7 @@ export default function Preview() {
       {err ? (
         <div className="text-center">
           <div className="text-amber-400">{err}</div>
-          <Link to="/search" className="mt-2 inline-block text-neutral-400 hover:text-neutral-200">← 回搜索</Link>
+          <BackLink to="/search" className="mt-2 inline-block text-neutral-400 hover:text-neutral-200">← 回搜索</BackLink>
         </div>
       ) : (
         "正在打开…"
