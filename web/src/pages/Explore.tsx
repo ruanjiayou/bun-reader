@@ -99,6 +99,9 @@ export default function Explore() {
       nav(`/book/${r.id}`);
     } catch (e: any) {
       setErr(`入库失败：${e.message}`);
+    } finally {
+      // 层栈保活后返回不会卸载本组件，一次性状态必须自己收干净：
+      // 只在失败时清空的话，opening 会永久残留，if (opening) return 让整张列表再也点不动
       setOpening("");
     }
   };

@@ -167,9 +167,13 @@ SQLite 表 + 磁盘文件：
 **返回入口必须走 POP（不能是 PUSH）**：`<Link to="/">` / `navigate("/")` 是 PUSH，层栈会把「点 ← 书架」判成 `forward: true` —— 于是返回也播放右→左的**进入**动画，还会不断往栈里堆书架层、丢掉原页保活状态。所有语义为「返回 / 回书架 / 回列表」的入口统一用 `layers.tsx` 导出的：
 
 - `BackLink`：外观、href、修饰键/`target=_blank` 新标签全交给 `<Link>`，只在普通左键时 `preventDefault()` 后改走 `backTo(to)`；
-- `useBackTo()`：图标按钮（书源列表/编辑页返回 icon、阅读器「书架」）拿 `backTo(path)` 直接调用。
+- `useBackTo()`：图标按钮（书源列表/编辑页返回 icon、阅读器「书架」）拿 `backTo(path)` 直接调用；**详情页的「← 返回」调 `backTo()` 不传参数**（见下）。
 
-`backTo` 从**当前层往前**找 `loc.pathname === to` 的最近一层，用 `navigate(i - idx)` 一次 POP 回去（可跨多层，forward history 保留，浏览器前进仍能逐层回来）；层栈据此按「返回」方向播放动画并复用目标层。栈里找不到目标（刷新后只有一层、外部深链直达）则 `navigate(to, { replace: true })` 兜底：**不播转场、不新增层、也不会 `history.back()` 退出应用**。已接入各页 `← 书架` / `← 回搜索` / 书源返回 icon / 阅读器「书架」按钮；阅读器「返回上一页」本来就是 `navigate(-1)`，保持不动。进入类导航（书架顶部菜单、点书进详情等）仍是 PUSH。
+`backTo(to)` 从**当前层往前**找 `loc.pathname === to` 的最近一层，用 `navigate(i - idx)` 一次 POP 回去（可跨多层，forward history 保留，浏览器前进仍能逐层回来）；层栈据此按「返回」方向播放动画并复用目标层。栈里找不到目标（刷新后只有一层、外部深链直达）则 `navigate(to, { replace: true })` 兜底：**不播转场、不新增层、也不会 `history.back()` 退出应用**。
+
+**`backTo()` 不传目标 = 只退一层，回到用户实际来的那一页**。这是**详情页返回按钮的唯一正确写法**：从探索/搜索/书源调试进详情时，跨层的 `backTo("/")` 会按字面跳过这些来源页直奔书架（实测栈 `[书架, 探索, 详情]` 一次退 2 层），用户就觉得「探索页被 replace 掉了」。详情页按钮因此叫「← 返回」而非「← 书架」，用 `<button onClick={() => backTo()}>`；单层直达时 `backTo()` 兜底 replace 回书架。跨层 `backTo(to)` 只保留给语义明确的「书架」「返回书源列表」按钮（探索/搜索/设置/书源列表页顶栏、阅读器「书架」、Sources 返回 icon）。阅读器「返回上一页」本来就是 `navigate(-1)`，保持不动。
+
+**探索/搜索/书源调试点书进详情一律 `nav('/book/:id')` PUSH**（先 `POST /api/books/import` 入库），**不能用 `replace`、也不要再绕 `/preview`**：否则来源层被替换掉，返回就少了探索/搜索这一级。`/preview` 只保留给外部旧链接兼容，它内部 `replace` 到 `/book/:id` 是故意的（不能让返回停在一个「正在打开…」的过渡页）。进入类导航（书架顶部菜单、点书进详情等）都是 PUSH。
 
 **隐藏方式**：层容器 `absolute inset-0 overflow-x-hidden overflow-y-auto`，顶层 `visibility:visible / zIndex:1`，其余 `visibility:hidden + inert + aria-hidden + pointer-events:none + zIndex:0`。刻意不用 `display:none`（实测会丢 `scrollTop` 并触发重排）；层容器静止态**不加 `transform`/`contain`**，否则 `fixed inset-0` 的阅读器与编辑弹层包含块会变（转场动画期间短暂有 transform，动画结束立刻撤掉，见下）。**层容器必须自带不透明底色** `bg-neutral-900`（与 `body` 的 `@apply` 同源，改全局主题时要一起改）：转场时两层同时可见，容器透明会让上下层文字直接透叠在一起。阅读器有自己的主题底色（暗色/羊皮纸/护眼绿…），`fixed inset-0` 铺满后会自己盖住这层底色。容器带 `data-layer-id` / `data-active` 便于调试与实测。外层是 `fixed inset-0 overflow-hidden`（裁剪滑入/滑出的层，不产生横向滚动条），滚动从 body 改为每层容器内滚动（现有页面都靠内部 ref 或普通文档流滚动，无 `window.scrollY` 依赖）。
 
@@ -190,6 +194,8 @@ SQLite 表 + 磁盘文件：
 - **明确不做**：可拖拽的边缘侧滑返回（交互式中途取消的手势）。当前只做点击返回按钮 / 浏览器返回触发的完整转场。桌面与移动端都启用，不按屏宽区分。
 
 **重定向与副作用**：`Guard` 和 `*` fallback 必须用 `ActiveRedirect`（内部读 `useLayerActive()`，只在顶层生效），否则多个隐藏层的 `<Navigate>` 会同时改 history。阅读器失活时主动 `stopTts()`，避免朗读跟着上层页面继续播放；恢复顶层不自动续读。
+
+**保活层里的一次性状态必须在 `finally` 清空**：页面不再卸载 → 组件 state 不会自动归零。「请求中防重复点 / loading / 按钮 disabled」这类状态若只在 `catch` 里清空，成功 `navigate()` 之后就永久残留，返回时 `if (busy) return` 会把整张列表锁死（表现为「返回后列表点不动」，卡片还停在半透明）。`Explore.openBook` 的 `opening`、`Search.openBook` 的 `adding`、`Sources.addBookFromDebug` 的 `addingBook` 都踩过这个坑：三处统一 `try/catch/finally`，在 `finally` 里清空，成功/失败/异常一视同仁（`Search.addToShelf` 本来就有 `finally`）。这类状态只负责挡住**本次请求期间**的连点，不承担跨页面生命周期；`navigate()` 后该层立刻失活并 `inert`，重复点击自然也进不来。排查这类问题时先核对 `data-animating` / `inert` / `pointer-events`，都正常就查页面 state 残留。
 
 **取舍（当前版本）**：纯保活、无失效广播 —— 返回后不重新请求，因此详情页改过书名/分组/状态后，书架可能显示旧数据（已接受，需要时再加 invalidate）。隐藏层的长轮询（目录抓取、缓存任务）与 SSE 会继续跑完。层栈不做上限、不持久化到 sessionStorage；`UNSAFE_LocationContext` 是本方案的唯一版本约束。
 

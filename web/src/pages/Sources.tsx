@@ -607,6 +607,8 @@ export default function Sources() {
       nav(`/book/${r.id}`);
     } catch (e: any) {
       setMsg(`加书架失败：${e.message}`);
+    } finally {
+      // 保活返回后组件不卸载，addingBook 残留会让「加入书架」按钮永久 disabled
       setAddingBook(false);
     }
   };

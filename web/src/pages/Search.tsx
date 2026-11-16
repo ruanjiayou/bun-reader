@@ -122,6 +122,8 @@ export default function Search() {
       nav(`/book/${r.id}`);
     } catch (e: any) {
       setMsg(`入库失败：${e.message}`);
+    } finally {
+      // 与 addToShelf 一致：保活返回后组件不卸载，adding 残留会锁死所有卡片
       setAdding(null);
     }
   };

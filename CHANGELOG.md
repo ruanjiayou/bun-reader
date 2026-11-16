@@ -4,6 +4,17 @@
 
 ## 2026-11-16
 
+- **修复：探索/搜索点书进详情再返回后，列表点不动了**：
+  - 复现（Playwright）：返回后第 1 本书卡片仍 `opacity: 0.5`；再点第 2 本 URL 不变、`/api/books/import` 请求数为 0；`data-animating`、`inert`、`pointer-events` 全部正常，排除转场遮罩残留。
+  - 根因是**层栈保活的副作用**：页面不再卸载 → 组件 state 不会自动归零。`Explore.openBook` 的 `opening` 只在 `catch` 里清空，成功 `nav('/book/:id')` 后永久残留，`if (opening) return` 把整张列表锁死（以前返回会重新挂载，所以看不出来）。`Search.openBook` 的 `adding`、`Sources.addBookFromDebug` 的 `addingBook` 是同一模式。
+  - 三处统一改成 `try/catch/finally`，在 `finally` 清空一次性状态（成功/失败一视同仁）；`Search.addToShelf` 本来就有 `finally`，保持不动。
+  - 验证：新增 Playwright 实测 **22 项全过** —— 探索页返回后 8 张卡片 opacity 全 1、点第 2 本与重复点同一本都能进详情且各发一次 import、页码第 2 页 + 列表滚动 248 保活、搜索页同样链路（3 组结果返回后全部可点、点第 2 组能进详情）、无运行时错误；原有转场回归 49 项 + 探索链路 18 项全过。前后端 tsc 干净、`bun test` 176/176、产物重建 `web/reader/`。
+
+- **修复：从探索进详情后返回直接跳到书架（跳过探索页）**：
+  - 先实测澄清：书架 → 探索 → 详情的 history 是 `2 → 3 → 4`、层栈 `L1/L2/L3` 三层都在，**探索进详情本来就是 PUSH**（`Explore.tsx` 的 `nav('/book/:id')`），浏览器返回也确实回探索页；唯一 replace 到详情的是旧链接兼容页 `/preview`。真正跳过探索页的是上一轮改的详情页「← 书架」`backTo("/")`：它按 pathname 找最近的 `/` 层，一次 `navigate(-2)` 直奔书架。
+  - `layers.tsx` 的 `backTo` 支持**不传目标 = 只退一层**（`navigate(-1)`；单层时 replace 到 `/` 兜底）。`Book.tsx` 的返回按钮改成 `<button onClick={() => backTo()}>← 返回`，回到用户实际来的那一页（探索/搜索/书源调试/书架都适用），文字也改成不带误导的「← 返回」。跨层 `backTo(to)` 保留给语义明确的「书架 / 返回书源列表」按钮，阅读器「书架」一次退两层的行为不变。
+  - 验证：新增 Playwright 探索链路实测 **18 项全过** —— 探索进详情是 PUSH 且探索层仍在栈里、点「← 返回」落在 `/explore`（不是书架）、POP 且 `history.length` 不变、复用原探索层、**页码仍第 2 页 + 列表滚动 300 保活**、滑出层 `0 → 776 → 1000` 左→右且探索层静止、`goForward/goBack` 历史正常、探索页「← 书架」仍回书架；原有转场回归 49 项全过（仅把点击文本同步为「← 返回」）。前后端 tsc 干净、`bun test` 176/176、产物重建 `web/reader/`。
+
 - **修复：点页面「返回」按钮仍播放进入动画（右→左）**：
   - 根因不在动画代码：各页「← 书架 / 回搜索 / 返回列表」写的是 `<Link to="/">` 或 `navigate("/")`，React Router 按 **PUSH** 处理，层栈据此判 `forward: true`，于是返回也播右→左动画，还会往栈里堆新层、丢掉原页保活。浏览器后退按钮（`POP`）方向一直是对的。
   - `web/src/layers.tsx` 新增 `BackContext` + `useBackTo()` + `BackLink`：`backTo(to)` 从当前层往前找 `loc.pathname === to` 的最近一层，用 `navigate(i - idx)` 走真正的 **POP**（可一次跨多层，forward history 保留）；找不到（刷新后单层、外部深链直达）就 `navigate(to, { replace: true })` 兜底，不播转场、也不 `history.back()` 退出应用。`BackLink` 保留 `<Link>` 的 href / 修饰键新标签行为，只接管普通左键。

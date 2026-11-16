@@ -52,8 +52,10 @@ export function ActiveRedirect({ to, replace = true }: { to: string; replace?: b
  * 于是返回时也播放右→左动画、还往栈里堆一层并丢掉原页的保活状态。
  * backTo 按目标 pathname 在栈里找最近的那一层，用 navigate(delta) 一次退回去；
  * 找不到（刷新后只有一层、外部链接直达）则 replace 到目标，不算转场。
+ * 不传目标时只退一层（回到来源页）：详情页从探索/搜索/书源调试进来，返回就该回那一页，
+ * 而不是按「← 书架」的字面跳过它们直奔书架 —— 那种跨层只留给语义明确的「书架」按钮。
  */
-const BackContext = createContext<(to: string) => void>(() => {});
+const BackContext = createContext<(to?: string) => void>(() => {});
 export const useBackTo = () => useContext(BackContext);
 
 /** 外观与 <Link> 一致，普通左键走层栈回退；修饰键 / target=_blank 仍由 Link 自己处理 */
@@ -194,16 +196,23 @@ export function PageLayers({ children }: { children: ReactNode }) {
 
   // 回退用 POP，层栈才能按「返回」方向播放动画并复用目标层（数据/滚动不重载）。
   // navigate(delta) 一次跨多层，浏览器前进仍能逐层回来；栈里没有目标层就 replace 兜底。
-  const backTo = useCallback((to: string) => {
+  const backTo = useCallback((to?: string) => {
     const s = stackRef.current;
     const idx = s.layers.findIndex((l) => l.id === s.activeId);
-    for (let i = idx - 1; i >= 0; i--) {
-      if (s.layers[i].loc.pathname === to) {
-        navigate(i - idx);
-        return;
+    // 不指定目标 = 只退一层，回到用户实际来的那一页（探索/搜索/书源/书架都适用）
+    if (!to && idx > 0) {
+      navigate(-1);
+      return;
+    }
+    if (to) {
+      for (let i = idx - 1; i >= 0; i--) {
+        if (s.layers[i].loc.pathname === to) {
+          navigate(i - idx);
+          return;
+        }
       }
     }
-    navigate(to, { replace: true });
+    navigate(to ?? "/", { replace: true });
   }, [navigate]);
 
   const rootRef = useRef<HTMLDivElement>(null);
