@@ -25,6 +25,9 @@ const redirectToBase = (): Plugin => {
 
 export default defineConfig({
   base: "/reader/",
+  define: {
+    __APP_VERSION__: JSON.stringify('1.1'),
+  },
   plugins: [
     react(),
     tailwindcss(),

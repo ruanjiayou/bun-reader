@@ -190,6 +190,7 @@ SQLite 表 + 磁盘文件：
 - 动画期间离开的层临时改成 `visibility:visible`（平时是 hidden，否则上层滑开时露出的区域是空白）；返回时还要把它 `z-index` 提到 2，才能盖在目标层上方滑走。上层挂 `.layer-elevated` 静态左边缘投影（区分层级）；根容器 `data-animating="1"` 由 `index.css` 生成透明遮罩，吃掉转场期间的点击/触摸，防止 320ms 内连点串导航。
 - **只动画 `transform`**：投影是静态 CSS class，不能把 `box-shadow` 写进 keyframes —— 逐帧重绘整个大列表页实测会把动画拖慢到 450ms 还没走完 1/3。曲线也别用抽屉那条 `.32,.72,0,1`：一半时间就走完 95% 位移，全屏页面看着像瞬间弹到位；`.4,0,.2,1` 位移分布均匀。
 - 动画结束（`Promise.all(finished)`）立即 `cancel()` 撤掉 transform，并收回 visibility / z-index / 投影 / 遮罩 —— 静止态层容器回到「无 transform」，`fixed inset-0` 的阅读器与编辑弹层包含块不变。快速连点或 REPLACE 打断时先 `cancel()` 上一场，再按新栈重置所有层的样式。
+- **重复 `popstate` 去重（iOS 独立 PWA 侧滑）**：WebKit 的边缘侧滑偶尔会对**同一个历史条目**连发两次 `popstate`。React Router 每次都 new 一个 `location` 对象，靠引用比较（`lastLoc.current === location`）挡不住；第二次 key 相同，`nextStack` 会判成「回到当前层」（`transition: null`），从而 `cancel()` 掉第一次刚开始播的动画——表现就是**同一页滑两次 / 滑到一半跳走**。两道防线：① location effect 对 `navType === "POP"` 且 `key + pathname + search` 全同的连续事件直接 `return`，不动层栈、不打断动画（history key 唯一，只有重复投递才会连着出现两次）；② 转场 effect 用 `lastPlay` 记最近一场的 `fromId>toId:forward` 签名，同一场动画还在 `running` 时重复到达就忽略，绝不再 cancel 重播。动画自然结束后 `cancel()` 撤 transform 属正常清理，此时签名清空。
 - 系统开启「减少动态效果」（`prefers-reduced-motion: reduce`）时直接切换，不挂遮罩也不跑动画。
 - **明确不做**：可拖拽的边缘侧滑返回（交互式中途取消的手势）。当前只做点击返回按钮 / 浏览器返回触发的完整转场。桌面与移动端都启用，不按屏宽区分。
 
@@ -277,6 +278,7 @@ location /reader/ {
 
 - **Cloudflare 默认按扩展名缓存 js/css（sw.js 命中 .js）**：origin 有 no-cache 后 CF 尊重并不再缓存边缘副本；但已缓存的旧 sw.js 必须在 CF **清一次缓存**（至少清 `https://jiayou.work/reader/sw.js`）才会消失。验证：`curl -sI https://jiayou.work/reader/sw.js | grep -i cache-control` 应返回 no-cache。
 - PWA 更新链路：sw.js 生成配置含 `skipWaiting + clientsClaim`；前端 `registerSW({ immediate: true })` 在新 SW 激活（isUpdate）时自动 `location.reload()`。正常发版流程：第一次刷新仍是旧版（同时后台检测并安装新 SW），安装激活后自动 reload 进新版。
+- **构建版本号**：`web/vite.config.ts` 用 `define` 注入 `__APP_VERSION__`，值为**构建时的本地时间（精确到秒）**；类型声明在 `web/src/vite-env.d.ts`。书架页标题「书架」后以 `vYYYY.MM.DD HH:mm:ss` 显示（`title="前端构建版本"`）。每次 `vite build` 都重新生成，发布后打开书架对照版本号即可确认前端是否已更新到最新构建 —— 排查「PWA 停在旧版」先看这里，比翻 sw.js 缓存头更直观。
 - API 反代保持 `proxy_buffering off`（SSE 调试流实时性，配合后端 `X-Accel-Buffering: no`），并加 `proxy_read_timeout 600s`（目录翻页长请求）。
 
 ---

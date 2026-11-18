@@ -222,11 +222,26 @@ export function PageLayers({ children }: { children: ReactNode }) {
     else nodes.current.delete(id);
   }, []);
   const running = useRef<Animation[]>([]);
+  // 最近一场动画的签名：同一对层、同一方向在动画还没播完时重复到达，直接忽略。
+  // 这是 key 去重之外的第二道防线（例如两次 popstate 间隔中 navType 被别的更新打断）。
+  const lastPlay = useRef<{ sig: string; anims: Animation[] } | null>(null);
 
   const lastLoc = useRef(location);
   // layout effect：在浏览器绘制前把层栈同步到最新 location，避免新页面出现前闪一帧旧页
   useLayoutEffect(() => {
     if (lastLoc.current === location) return;
+    // iOS 独立 PWA 的边缘侧滑偶尔会对**同一个历史条目**连发两次 popstate：
+    // React Router 每次都 new 一个 location 对象，引用比较挡不住。第二次 key 相同，
+    // nextStack 会把它判成「回到当前层」(transition:null)，从而 cancel 掉第一次
+    // 刚开始播的动画 —— 用户看到的就是同一页滑两次 / 滑到一半跳走。
+    // 按 key 去重：同一 history entry 的重复 POP 直接丢弃，不碰层栈、不打断动画。
+    // history key 是唯一的，只有重复投递才会连着出现两次相同的 key（中间夹别的关键字则不会命中）。
+    if (
+      navType === "POP" &&
+      lastLoc.current.key === location.key &&
+      lastLoc.current.pathname === location.pathname &&
+      lastLoc.current.search === location.search
+    ) return;
     lastLoc.current = location;
     const next = nextStack(stackRef.current, location, navType, make);
     stackRef.current = next;
@@ -236,6 +251,10 @@ export function PageLayers({ children }: { children: ReactNode }) {
   // 转场：DOM 已按新栈提交，绘制前应用 backwards fill 的起始关键帧，不会闪一帧终点画面
   useLayoutEffect(() => {
     const t = stack.transition;
+    // 第二道防线：同一场转场（同层对 + 同方向）在动画还没结束时被重复提交，
+    // 多半是 iOS 侧滑连发 popstate 的残留，绝不能 cancel 掉正在播的动画再来一遍。
+    if (t && lastPlay.current?.sig === `${t.fromId}>${t.toId}:${t.forward}` &&
+        lastPlay.current.anims.some((a) => a.playState === "running")) return;
     // 每次栈变化先收掉上一场动画（快速连点 / REPLACE 打断 / POP 降级时 t 为 null）
     const prevAnims = running.current;
     running.current = [];
@@ -274,10 +293,12 @@ export function PageLayers({ children }: { children: ReactNode }) {
       : [{ transform: "translateX(0)" }, { transform: "translateX(100%)" }];
     const anims = [moving.animate(frames, opts)];
     running.current = anims;
+    lastPlay.current = { sig: `${t.fromId}>${t.toId}:${t.forward}`, anims };
     Promise.all(anims.map((a) => a.finished.catch(() => {}))).then(() => {
       if (running.current !== anims) return; // 已被下一次导航取消，清理由那次负责
       anims.forEach((a) => a.cancel()); // 撤掉 transform，别让 fixed 元素长期换包含块
       running.current = [];
+      lastPlay.current = null;
       from.style.visibility = "hidden";
       from.style.zIndex = "0";
       [from, to].forEach((el) => el.classList.remove("layer-elevated"));

@@ -2,6 +2,14 @@
 
 按日期记录功能变更（设计规范见 [docs/design.md](./docs/design.md)，当前计划见 [docs/plans.md](./docs/plans.md)）。
 
+## 2026-11-18
+
+- **前端加构建版本号，发版后可直接看出是否更新**：`web/vite.config.ts` 用 `define` 注入 `__APP_VERSION__`（构建时本地时间，精确到秒），`vite-env.d.ts` 补声明；`Shelf.tsx` 在「书架」标题后显示 `vYYYY.MM.DD HH:mm:ss`（灰色小字，title="前端构建版本"）。每次 `vite build` 值都会变，发布后打开书架对照即可确认前端资源更新到位，配合排查 PWA 缓存旧版问题。验证：tsc 前后端干净、176/176、产物重建到 `web/reader/` 且字面量确认注入，Playwright 端到端确认书架标题渲染 `v2026.11.18 10:37:44`、无运行时错误。
+- **修复：iOS 独立 PWA 侧滑返回偶尔「同一页滑出两次」**：
+  - 根因不是 Web 动画播了两遍，而是第二次 `popstate` **取消**了第一遍：WebKit 边缘侧滑偶尔对同一历史条目连发两次 `popstate`；React Router 每次 new 一个 `location` 对象，`layers.tsx` 的 `lastLoc.current === location` 引用比较挡不住。第二次 key 相同 → `nextStack` 判成 `found.id === fromId`（`transition: null`）→ 转场 effect `cancel()` 掉刚起播的动画，视觉上就是滑两次/滑一半跳走。
+  - 两道防线：① location effect 对 `POP` 且 `key + pathname + search` 全同的连续事件直接丢弃（history key 唯一，重复投递才会连着出现两次）；② 转场 effect 用 `lastPlay` 记录最近一场 `fromId>toId:forward` 签名，同一场仍在 `running` 时重复到达就忽略，不 cancel 不重播。自然结束的 `cancel()` 是撤 transform 的正常清理，此时签名清空。
+  - 验证：新增 Playwright 实测 **10 项全过**（模拟真实 POP + 紧接着派发同 key `popstate`：只产生 1 条动画对象、该动画未被 cancel 且跑完、层栈复用不重建、静止态干净；回归正常返回只播 1 条）；原有转场 49 项 + 探索 18 项 + 点击锁 22 项全过。前后端 tsc 干净、`bun test` 176/176、产物重建 `web/reader/`。
+
 ## 2026-11-16
 
 - **修复：探索/搜索点书进详情再返回后，列表点不动了**：

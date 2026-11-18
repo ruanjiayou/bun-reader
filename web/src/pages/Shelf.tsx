@@ -100,7 +100,12 @@ export default function Shelf({ me, onLogout }: { me: Me | null; onLogout: () =>
     <div className="mx-auto min-h-dvh max-w-5xl p-4">
       {confirmUi}
       <header className="mb-3 flex items-center justify-between">
-        <h1 className="text-lg font-bold">书架</h1>
+        <h1 className="flex items-baseline gap-2 text-lg font-bold">
+          书架
+          <span className="text-[10px] font-normal text-neutral-600" title="前端构建版本">
+            v{__APP_VERSION__}
+          </span>
+        </h1>
         <div className="flex items-center gap-3 text-sm text-neutral-400">
           <Link to="/explore" className="hover:text-neutral-200">探索</Link>
           <Link to="/search" className="hover:text-neutral-200">搜索</Link>
